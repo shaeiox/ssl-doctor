@@ -153,8 +153,13 @@ class Transcript:
             out.extend(wrap_line(line, width))
         return out
 
-    def tail(self, width: int, height: int, scroll: int = 0) -> List[str]:
-        """Return `height` rows ending `scroll` rows above the newest line."""
+    def tail(self, width: int, height: int, scroll: int = 0,
+             fill: bool = True) -> List[str]:
+        """Return up to `height` rows ending `scroll` rows above the newest line.
+
+        With `fill=False` only the real lines are returned, so a caller can
+        top-align them (the layout grows downward from the banner).
+        """
         rows = self.wrapped(width)
         if height <= 0:
             return []
@@ -162,8 +167,9 @@ class Transcript:
         end = len(rows) - offset
         start = max(0, end - height)
         visible = rows[start:end]
-        while len(visible) < height:
-            visible.insert(0, "")
+        if fill:
+            while len(visible) < height:
+                visible.insert(0, "")
         return visible
 
 
@@ -206,9 +212,40 @@ def top_margin(rows: int) -> int:
     return 1 if rows >= 20 else 0
 
 
-def panel_height(rows: int, header_len: int, hints: bool = True) -> int:
-    """Rows available to the output panel body (borders excluded)."""
-    return max(1, rows - header_len - 6 - (1 if hints else 0))
+def center_blocks(lines: Sequence[str], width: int) -> List[str]:
+    """Centre each blank-line-separated block as a unit.
+
+    Centring every line on its own would wreck the alignment of evidence
+    continuations and the help table, and centring the whole transcript as one
+    block would make every earlier command shift when a longer one arrives.
+    Per-block centring keeps each command's output internally aligned and its
+    block visually centred under the banner.
+    """
+    out: List[str] = []
+    block: List[str] = []
+
+    def flush() -> None:
+        if not block:
+            return
+        widest = max(len(line) for line in block)
+        shift = max(0, (width - widest) // 2)
+        out.extend(" " * shift + line for line in block)
+        block.clear()
+
+    for line in lines:
+        if line.strip():
+            block.append(line.rstrip())
+        else:
+            flush()
+            out.append("")
+    flush()
+    return out
+
+
+def content_height(rows: int, header_len: int, hints: bool = True) -> int:
+    """Rows available to the transcript between the header and the chrome."""
+    chrome = 3 + 1 + (1 if hints else 0)  # status, rule, input, rule, hints
+    return max(1, rows - top_margin(rows) - header_len - 1 - chrome)
 
 
 def build_frame(*, columns: int, rows: int, header: Sequence[Sequence[Span]],
@@ -218,14 +255,19 @@ def build_frame(*, columns: int, rows: int, header: Sequence[Sequence[Span]],
                 cursor: int = 0, prompt_len: int = 2) -> Tuple[List[str], Tuple[int, int]]:
     """Compose one screen.
 
+    There is no output frame: the transcript flows directly under the banner in
+    a centred column, and the status line, dashed input and key hints follow it,
+    so a short session reads as one centred block. When the transcript is longer
+    than the screen the chrome ends up on the last rows anyway.
+
     `cursor` is an index into the typed part of the command bar, `prompt_len` the
     width of the `> ` prefix. Returns (lines, (row, column)), both 1-based.
     """
-    width = block_width(columns) if width is None else min(width, columns)
-    width = min(width, columns)
+    width = min(block_width(columns) if width is None else width, columns)
     left = max(0, (columns - width) // 2)
     right = max(0, columns - left - width)
-    inner = max(4, width - 4)  # "| " ... " |"
+    gutter = 2
+    inner = max(4, width - gutter * 2)
 
     def pad(spans: Sequence[Span], fill: str = " ", align: str = "left") -> str:
         spans = truncate_spans(spans, width)
@@ -233,53 +275,32 @@ def build_frame(*, columns: int, rows: int, header: Sequence[Sequence[Span]],
         room = max(0, width - len(text))
         lead = room // 2 if align == "center" else 0
         trail = room - lead
-        body = fill * lead + _paint_spans(spans, painter) + fill * trail
-        return " " * left + body + " " * right
-
-    corner_tl = glyphs.corner("┌", "+")
-    corner_tr = glyphs.corner("┐", "+")
-    corner_bl = glyphs.corner("└", "+")
-    corner_br = glyphs.corner("┘", "+")
-    bar = glyphs.vert
+        body_text = fill * lead + _paint_spans(spans, painter) + fill * trail
+        return " " * left + body_text + " " * right
 
     margin = top_margin(rows)
+    limit = content_height(rows, len(header), bool(hints))
     lines: List[str] = [""] * margin
     for span_line in header:
         lines.append(pad(span_line, " ", "center"))
+    lines.append("")  # breathing room under the banner
 
-    # ---- output panel ----------------------------------------------------
-    panel_rows = panel_height(rows - margin, len(header), bool(hints))
-    label = " output "
-    top = corner_tl + glyphs.h + label
-    top += glyphs.h * max(0, width - 1 - len(top) - 1) + corner_tr
-    lines.append(pad([(top, "tool", False)]))
-
-    visible = list(body)[:panel_rows]
-    while len(visible) < panel_rows:
-        visible.append("")
+    # ---- transcript: no frame, centred blocks inside the centred column ----
+    visible = center_blocks([row[:inner] for row in list(body)[:limit]], inner)
     for row_text in visible:
-        clipped = row_text[:inner]
-        filler = " " * max(0, inner - len(clipped))
-        lines.append(pad([(bar + " ", "tool", False), *colorize(clipped),
-                          (filler + " " + bar, "tool", False)]))
-    lines.append(pad([(corner_bl + glyphs.h * (width - 2) + corner_br, "tool", False)]))
+        lines.append(pad([(" " * gutter, "", False), *colorize(row_text)]))
 
-    # ---- status ----------------------------------------------------------
-    lines.append(pad(list(status)))
+    # ---- status line -------------------------------------------------------
+    lines.append(pad(list(status), " ", "center"))
 
-    # ---- command bar -----------------------------------------------------
-    label = " command "
-    bar_top = corner_tl + glyphs.h + label
-    bar_top += glyphs.h * max(0, width - 1 - len(bar_top) - 1) + corner_tr
-    lines.append(pad([(bar_top, "accent", False)]))
+    # ---- dashed input ------------------------------------------------------
+    lines.append(pad([(glyphs.h * width, "muted", False)]))
     shown = prompt_text[:max(0, inner - prompt_len)]
-    prefix = prompt_text[:0] or "> "
-    tail = " " * max(0, inner - prompt_len - len(shown)) + " " + bar
-    lines.append(pad([(bar + " ", "accent", False), (prefix, "primary", True),
-                      (shown, "", False), (tail, "accent", False)]))
-    lines.append(pad([(corner_bl + glyphs.h * (width - 2) + corner_br, "accent", False)]))
+    lines.append(pad([(" " * gutter, "", False), ("> ", "primary", True),
+                      (shown, "", False)]))
+    lines.append(pad([(glyphs.h * width, "muted", False)]))
 
-    # ---- hints -----------------------------------------------------------
+    # ---- hints -------------------------------------------------------------
     if hints:
         lines.append(pad(list(hints), " ", "center"))
 
@@ -288,7 +309,7 @@ def build_frame(*, columns: int, rows: int, header: Sequence[Sequence[Span]],
         lines.append(" " * columns)
     # pad on *visible* width: painted spans carry escape sequences
     padded = [line + " " * max(0, columns - visible_len(line)) for line in lines[:rows]]
-    cursor_col = left + 2 + prompt_len + max(0, min(cursor, len(shown)))
+    cursor_col = left + gutter + prompt_len + max(0, min(cursor, len(shown)))
     return padded, (cursor_row, cursor_col + 1)
 
 

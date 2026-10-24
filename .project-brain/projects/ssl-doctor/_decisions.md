@@ -27,3 +27,7 @@ One line per settled choice: `YYYY-MM: chosen > rejected — why`.
 2026-10: raw mode for a single keystroke > raw for the whole session — a crashing check or a child process (`ssh`, `openssl`) must never inherit a raw terminal, and ISIG keeps Ctrl-C a real signal.
 2026-10: capture command output as plain text and recolour at render time > storing ANSI — wrapping/padding by visible width needs no terminal emulator, so centring stays exact.
 2026-10: questions and spinner in the status line > drawing them in the panel — the panel stays results-only, so evidence is never interleaved with progress.
+2026-10: transcript flows under the banner with the chrome right after it > a footer pinned to the last row — a short session reads as one centred block instead of leaving a dead gap and moving the input as output arrives.
+2026-10: centre each command's output as its own block > centring every line (breaks evidence/table alignment) or the whole transcript (earlier commands shift when a longer one arrives).
+2026-10: no output frame around results > the boxed panel — the frame competed with the banner and implied a fixed viewport; only the dashed input keeps a frame-like affordance.
+2026-10: remote command timeout stored as `command_timeout` > `cmd_timeout` — the attribute shadowed the `/timeout` handler, so the command either crashed (before) or would have to be renamed.

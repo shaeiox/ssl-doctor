@@ -19,10 +19,10 @@ python3 ssldoctor.py -c "/scan example.com --with-server" -c "/report both out"
 
 ## Terminal look
 
-SSL Doctor opens as a **full-screen application**, not a scrolling log: one
-centred column with a header, a scrollable output panel, a status line and a
-command bar. Output from every command is captured into the panel, wrap-safe and
-scrollable, so a long `/scan` never pushes the screen away.
+SSL Doctor opens as a **full-screen application**: the wordmark sits at the top
+and everything you run appears directly beneath it, centred as blocks — no
+output box, no scrolling log. Long output wraps in the centred column and stays
+scrollable, so a `/scan` never pushes the screen away.
 
 ```
                 ██████ ██████ ██       █████  ██████ ██████ ██████ ██████ ██████
@@ -33,22 +33,18 @@ scrollable, so a long `/scan` never pushes the screen away.
                  offline ssl/tls diagnostics · client · server · chain · nginx
                               creator: eleven  ·  read-only checks
 
- ┌─ output ──────────────────────────────────────────────────────────────────────────────────┐
- │                                                                                            │
- │                                                                                            │
- │                                                                                            │
- │                                                                                            │
- │                                                                                            │
- │                                                                                            │
- │ Welcome. SSL Doctor is read-only; credentials are never logged.                            │
- │                                                                                            │
- │ ssl-doctor> /version                                                                       │
- │ SSL Doctor v0.3.0                                                                          │
- └────────────────────────────────────────────────────────────────────────────────────────────┘
- timeout 8s · ssh off
- ┌─ command ─────────────────────────────────────────────────────────────────────────────────┐
- │ >                                                                                          │
- └────────────────────────────────────────────────────────────────────────────────────────────┘
+                Welcome. SSL Doctor is read-only; credentials are never logged.
+
+                                      ssl-doctor> /version
+                                      SSL Doctor v0.3.0
+
+                                       ssl-doctor> /clear
+                                       findings cleared
+
+                                      timeout 8s · ssh off
+ ──────────────────────────────────────────────────────────────────────────────────────────────
+   >
+ ──────────────────────────────────────────────────────────────────────────────────────────────
             up/down history  ·  PgUp/PgDn scroll  ·  /help commands  ·  Ctrl-D quit
 ```
 
@@ -58,14 +54,16 @@ scrollable, so a long `/scan` never pushes the screen away.
 | `↑` / `↓` | recall earlier commands |
 | `←` / `→`, `Home` / `End` | move the caret in the command bar |
 | `Backspace`, `Ctrl-U` | edit / clear the command bar |
-| `PgUp` / `PgDn` | scroll the output panel (the newest output is always one key away) |
+| `PgUp` / `PgDn` | scroll the transcript (the newest output is always one key away) |
 | `Ctrl-L` | redraw |
 | `Ctrl-C`, `Ctrl-D` | leave the session (same status code as the line REPL) |
 
-The chrome is laid out from the terminal size: the column is `min(columns - 2,
-96)`, centred, and the header drops from the wordmark to a compact line when
-the window is short. Commands, answers, findings, exit codes and reports are
-identical to the line-oriented mode — the shell only presents them.
+Each command's output is its own block: blocks are separated by one blank line
+and centred on their own width, so evidence stays aligned under its finding. The
+column is `min(columns - 2, 96)` and centred; the header drops from the wordmark
+to a compact line when the window is short. Commands, answers, findings, exit
+codes and reports are identical to the line-oriented mode — the shell only
+presents them.
 
 **Opting out** — any of these runs the line-oriented REPL instead:
 `--no-tui`, `SSL_DOCTOR_TUI=0`, a non-tty stdin/stdout (pipes, CI, `-c` batch

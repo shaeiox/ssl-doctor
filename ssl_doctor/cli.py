@@ -613,7 +613,7 @@ class SSLDoctorCLI:
     def __init__(self) -> None:
         self.store = F.FindingStore()
         self.net_timeout = 8.0
-        self.cmd_timeout = 20.0
+        self.command_timeout = 20.0  # remote command timeout (seconds)
         self.server: Optional[servermod.ServerSession] = None
         self.remote_facts: Dict = {}
         self._diagnosis = None
@@ -697,7 +697,7 @@ class SSLDoctorCLI:
             target = f"{tgt['host']}:{tgt.get('port', 443)}"
         return {"target": target,
                 "network_timeout": self.net_timeout,
-                "command_timeout": self.cmd_timeout,
+                "command_timeout": self.command_timeout,
                 "ssh_connected": bool(self.server and self.server.connected)}
 
     # ---------------- command dispatch ----------------
@@ -783,14 +783,14 @@ class SSLDoctorCLI:
     def cmd_timeout(self, args: List[str]) -> None:
         if not args:
             self.out(f"network timeout: {self.net_timeout}s · remote command timeout: "
-                     f"{self.cmd_timeout}s  (usage: /timeout <net_s> [cmd_s])")
+                     f"{self.command_timeout}s  (usage: /timeout <net_s> [cmd_s])")
             return
         try:
             self.net_timeout = float(args[0])
             if len(args) > 1:
-                self.cmd_timeout = float(args[1])
+                self.command_timeout = float(args[1])
             self.out(f"timeouts set: network {self.net_timeout}s, "
-                     f"remote commands {self.cmd_timeout}s")
+                     f"remote commands {self.command_timeout}s")
         except ValueError:
             self.error("usage: /timeout <net_s> [cmd_s]")
 
@@ -1111,7 +1111,7 @@ class SSLDoctorCLI:
         cfg = servermod.SSHConfig(
             host=host, port=int(ssh_port_s), username=user, auth=method,
             key_path=key_path, connect_timeout=timeout,
-            command_timeout=self.cmd_timeout,
+            command_timeout=self.command_timeout,
             tls_host=tls_host or host, tls_port=tls_port)
         if self.server:
             self.server.disconnect()
@@ -1205,8 +1205,7 @@ class SSLDoctorCLI:
         header.append([(banner_tagline(), "muted", False)])
         header.append([(f"{BANNER_CREDIT}  {_GLYPHS['sep']}  read-only checks",
                         "accent", True)])
-        header.append([])
-        return header
+        return header  # build_frame adds the breathing room below the banner
 
     def _tui_hints(self, rows: int) -> List:
         if rows < 14:
@@ -1224,12 +1223,12 @@ class SSLDoctorCLI:
         header = self._tui_header(width, rows)
         hints = self._tui_hints(rows)
         inner = max(4, width - 4)
-        panel_rows = tuimod.panel_height(rows - tuimod.top_margin(rows),
-                                         len(header), bool(hints))
-        body = session.transcript.tail(inner, panel_rows, session.scroll)
+        limit = tuimod.content_height(rows, len(header), bool(hints))
+        # no output box any more: return only real lines so the layout can sit
+        # them directly under the banner and grow downward
+        body = session.transcript.tail(inner, limit, session.scroll, fill=False)
         if session.scroll and body:
-            marker = f"  .. {session.scroll} lines back (PgDn to return)"
-            body[0] = marker
+            body[0] = f"  .. {session.scroll} lines back (PgDn to return)"
         status = session.status or [(self.status_text(), "muted", False)]
         return tuimod.build_frame(
             columns=columns, rows=rows, header=header, body=body, status=status,
@@ -1250,6 +1249,10 @@ class SSLDoctorCLI:
             sys.stdout = saved
             _CAPTURE = False
         session.transcript.flush_partial()
+        # blank line between commands: each command's output is its own block,
+        # and the layout centres blocks independently
+        if session.transcript.lines and session.transcript.lines[-1].strip():
+            session.transcript.append("")
         session.render()
 
     def _repl_tui(self) -> int:

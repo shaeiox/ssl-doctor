@@ -95,20 +95,60 @@ class FrameLayout(unittest.TestCase):
         narrow, _ = frame(columns=50)
         narrow = plain(narrow)
         self.assertTrue(all(len(line) == 50 for line in narrow))
-        self.assertTrue(any(line.startswith(" ┌─ output") for line in narrow))
+        self.assertTrue(all(line.startswith(" ") for line in narrow))
+        self.assertNotIn("┌", "\n".join(narrow))  # no output box any more
 
     def test_regions_appear_in_order(self):
         text = "\n".join(plain(frame()[0]))
-        order = ["HEADER", "┌─ output", "a finding", "status text",
-                 "┌─ command", "/scan shop.test", "hints here"]
+        order = ["HEADER", "a finding", "plain line", "status text",
+                 "/scan shop.test", "hints here"]
         positions = [text.index(token) for token in order]
         self.assertEqual(positions, sorted(positions))
 
-    def test_body_is_inside_the_panel_and_keeps_its_text(self):
+    def test_there_is_no_output_box(self):
+        text = "\n".join(plain(frame()[0]))
+        for marker in ("┌", "┐", "└", "┘", "│", "|", "output"):
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, text)
+
+    def test_transcript_sits_directly_under_the_header(self):
+        lines = plain(frame(body=["[   + PASS] a finding"])[0])
+        header_row = next(i for i, line in enumerate(lines) if "HEADER" in line)
+        finding_row = next(i for i, line in enumerate(lines) if "a finding" in line)
+        self.assertLessEqual(finding_row - header_row, 3)  # directly beneath
+
+    def test_chrome_follows_a_short_transcript(self):
+        """A short session reads as one centred block, not a pinned footer."""
+        lines = plain(frame(body=["only line"])[0])
+        body_row = next(i for i, line in enumerate(lines) if "only line" in line)
+        status_row = next(i for i, line in enumerate(lines) if "status text" in line)
+        self.assertLessEqual(status_row - body_row, 2)
+        self.assertGreater(len(lines) - 1 - status_row, 4)  # room left below
+
+    def test_body_keeps_its_text_inside_the_column(self):
         lines = plain(frame(body=["[   + PASS] a finding  - network"])[0])
         row = next(line for line in lines if "a finding" in line)
-        self.assertTrue(row.lstrip().startswith("│"))
-        self.assertTrue(row.rstrip().endswith("│"))
+        self.assertIn("[   + PASS] a finding  - network", row)
+        # the block is centred inside the column: equal space on both sides
+        inside = row[2:-2]
+        self.assertEqual(len(inside) - len(inside.rstrip()),
+                         len(inside) - len(inside.lstrip()))
+
+    def test_blocks_are_centred_but_keep_their_internal_alignment(self):
+        shifted = tui.center_blocks(["[ PASS] a", "        - evidence"], 40)
+        self.assertEqual(len(shifted), 2)
+        lead = len(shifted[0]) - len(shifted[0].lstrip(" "))
+        self.assertGreater(lead, 0)
+        # the continuation stays aligned under its parent line
+        self.assertEqual(len(shifted[1]) - len(shifted[1].lstrip(" ")),
+                         lead + 8)
+
+    def test_blank_lines_split_the_centring_blocks(self):
+        shifted = tui.center_blocks(["short", "", "a much longer line here"], 40)
+        self.assertEqual(shifted[1], "")
+        # each block is centred on its own width, so the shorter one sits deeper
+        self.assertLess(len(shifted[2]) - len(shifted[2].lstrip()),
+                        len(shifted[0]) - len(shifted[0].lstrip()))
 
     def test_cursor_sits_after_the_typed_text(self):
         lines, (row, column) = frame(prompt_text="/scan", cursor=5)
@@ -128,11 +168,11 @@ class FrameLayout(unittest.TestCase):
         self.assertEqual(len(lines), 10)
         text = "\n".join(plain(lines))
         self.assertNotIn("hints here", text)
-        self.assertIn("┌─ command", text)  # the bar survives
+        self.assertIn("/scan shop.test", text)  # the input survives
 
-    def test_panel_height_floor(self):
-        self.assertGreaterEqual(tui.panel_height(6, 4, True), 1)
-        self.assertEqual(tui.panel_height(30, 7, True), 16)
+    def test_content_height_floor(self):
+        self.assertGreaterEqual(tui.content_height(6, 4, True), 1)
+        self.assertEqual(tui.content_height(30, 7, True), 16)
 
 
 class TranscriptBehaviour(unittest.TestCase):
@@ -358,7 +398,7 @@ class ShellIntegration(unittest.TestCase):
         class Session:
             size = lambda self: (100, 30)  # noqa: E731
             transcript = type("T", (), {"tail": staticmethod(
-                lambda w, h, scroll=0: ["[   x FAIL] tls.chain  - network"])})()
+                lambda w, h, scroll=0, fill=True: ["[   x FAIL] tls.chain  - network"])})()
             status = []
             input = "/scan shop.example"
             cursor = 9
@@ -370,7 +410,7 @@ class ShellIntegration(unittest.TestCase):
 
         lines, cursor = app._tui_frame(Session())
         text = "\n".join(plain(lines))
-        self.assertIn("output", text)
+        self.assertNotIn("┌", text)  # no output box
         self.assertIn("tls.chain", text)
         self.assertIn("/scan shop.example", text)
         self.assertIn("shop.example:443", text)

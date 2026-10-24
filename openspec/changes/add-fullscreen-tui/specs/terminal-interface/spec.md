@@ -31,10 +31,11 @@ without the required capabilities SHALL keep the existing line-oriented REPL.
 
 ### Requirement: The application layout is centred and fixed width
 The frame SHALL be composed of a centred column no wider than 96 columns (and
-never wider than the terminal), containing, top to bottom: the header, a
-bounded output panel, a status line, a command bar and a key-hint footer. Every
-drawn line SHALL be exactly the terminal width so the column stays centred
-without relying on terminal quirks.
+never wider than the terminal), containing, top to bottom: the header, the
+transcript, a status line, a command bar and a key-hint footer. Every drawn line
+SHALL be exactly the terminal width so the column stays centred without relying
+on terminal quirks. (The boxed output panel this requirement originally
+specified is removed by `drop-output-frame`.)
 
 #### Scenario: Centred on a wide terminal
 - **WHEN** the terminal is 160 columns wide
@@ -57,22 +58,22 @@ application name and the creator credit in both forms.
 - **WHEN** the terminal is 16 rows tall
 - **THEN** the header is the compact text form and the output panel still renders
 
-### Requirement: Command output is captured into the output panel
-Output produced by any command SHALL be captured and rendered inside the
-bounded panel rather than written directly to the screen. The panel SHALL keep
-a scrollback buffer of the whole session, wrap long lines to the panel width
+### Requirement: Command output is captured into the transcript
+Output produced by any command SHALL be captured and rendered from the
+transcript rather than written directly to the screen. The transcript SHALL keep
+a scrollback buffer of the whole session, wrap long lines to the column width
 without dropping characters, and paint status rows by their status.
 
 #### Scenario: Long output
 - **WHEN** `/help` is executed in a 30-row terminal
-- **THEN** its output appears in the panel, wrapped to the panel width, and the earlier transcript remains scrollable
+- **THEN** its output appears in the transcript, wrapped to the column width, and the earlier transcript remains scrollable
 
 #### Scenario: Status colouring
 - **WHEN** a FAIL finding is printed
 - **THEN** its status marker is painted with the error role and the text is unchanged
 
 #### Scenario: Nothing is lost
-- **WHEN** output longer than the panel is produced
+- **WHEN** output longer than the screen is produced
 - **THEN** every line is retained in the scrollback, reachable by scrolling
 
 ### Requirement: The keyboard drives scrolling, history and editing
@@ -110,7 +111,7 @@ read with echo disabled and never rendered.
 
 #### Scenario: Running check
 - **WHEN** a network check runs
-- **THEN** the status line shows the spinner and verb, and the panel gains no progress lines
+- **THEN** the status line shows the spinner and verb, and the transcript gains no progress lines
 
 ### Requirement: Leaving the application restores the terminal
 On exit, interrupt or an unhandled error the system SHALL leave the alternate

@@ -9,11 +9,12 @@ report payload and the findings contract are unchanged.**
 ### What looks different
 
 - **Full-screen application mode**: the interactive session now opens in the
-  alternate screen as a centred column — header, scrollable output panel,
-  status line, command bar and key hints. Output is captured into the panel
-  (wrapped, never truncated), PageUp/PageDown scroll the transcript, and the
-  command bar has editing and history. Questions and the spinner live in the
-  status line, so the panel only ever shows results.
+  alternate screen as a centred column — header, transcript directly beneath it,
+  status line, dashed input and key hints. There is no output box: each
+  command's output is a centred block and the transcript is scrollable. Output is
+  captured (wrapped, never truncated), PageUp/PageDown scroll it, and the command
+  bar has editing and history. Questions and the spinner live in the status line,
+  so the transcript only ever shows results.
   Opt out with `--no-tui` or `SSL_DOCTOR_TUI=0`; batch runs, pipes and
   `TERM=dumb` keep the line-oriented REPL unchanged.
 
@@ -46,6 +47,13 @@ report payload and the findings contract are unchanged.**
   that fails.
 - `/diagnose` now prints its overall verdict (`PASS`/`FAIL`/`WARNING`) in words
   next to the title instead of encoding it in the title's colour only.
+
+### Fixed
+
+- `/timeout` never reached its handler: the instance attribute `cmd_timeout`
+  shadowed the `cmd_timeout()` method, so the command raised
+  `TypeError: 'float' object is not callable`. The remote-command timeout is now
+  stored as `command_timeout`; `/timeout` reports and sets both timeouts again.
 
 ### Compatibility
 

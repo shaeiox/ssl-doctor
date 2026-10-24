@@ -230,6 +230,24 @@ class HelpListing(unittest.TestCase):
         self.assertLess(buf.getvalue().index("/scan"), buf.getvalue().index("/version"))
 
 
+class SessionCommands(unittest.TestCase):
+    """Regression: `/timeout` must reach its handler, not a shadowing attribute."""
+
+    def test_timeout_command_reports_and_sets(self):
+        app = cli.SSLDoctorCLI()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertTrue(app.execute("/timeout"))
+            self.assertTrue(app.execute("/timeout 12 30"))
+        out = buf.getvalue()
+        self.assertIn("network timeout: 8.0s", out)
+        self.assertIn("remote command timeout: 20.0s", out)
+        self.assertIn("timeouts set: network 12.0s, remote commands 30.0s", out)
+        self.assertEqual(app.net_timeout, 12.0)
+        self.assertEqual(app.command_timeout, 30.0)
+        self.assertIn("network_timeout", app._meta())
+
+
 class Prompts(unittest.TestCase):
     """3.3 — questions look different, answer handling is identical."""
 
