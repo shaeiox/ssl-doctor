@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-24 · done: stream findings + typewriter effect merged, v0.4.0 tagged & pushed · next: none · blocker: none
+> resume 2026-10-24 · done: merged arena warm terminal UI, re-applied streaming+typewriter, v0.5.0 tagged & pushed · next: none · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md
