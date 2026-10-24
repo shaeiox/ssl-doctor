@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.6.0 — modern two-stroke startup banner
+
+Adds a modern two-stroke startup banner (wordmark, tagline, credit) sized for
+the terminal, with compact fallback for narrow terminals.
+
 ## v0.5.0 — warm terminal interface + streaming + typewriter
 
 Presentation-only restyle, following the Claude Code terminal design language.
