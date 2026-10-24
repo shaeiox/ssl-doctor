@@ -1,0 +1,616 @@
+# SSL Doctor — Program Execution Flow
+
+This document follows SSL Doctor from process start to process exit: entry
+points, argument handling, the command loop, what each command does internally,
+how findings become a diagnosis and a report, and how the session shuts down.
+File names are included at every step.
+
+Version covered: `0.3.0` (`ssl_doctor/__init__.py`).
+
+---
+
+## 1. High-level shape
+
+SSL Doctor has three executable surfaces that share the diagnostic library:
+
+| Surface | Entry point | Purpose |
+|---|---|---|
+| Interactive / batch CLI | `ssldoctor.py` → `ssl_doctor.cli.main` | The main program described below |
+| Scan agent | `ssldoctor.py agent ...` → `ssl_doctor.agent.main` | Long-polls a control plane for scan jobs |
+| Control-plane server | `packaging/entry_server.py` → `ssldoctor_service.server_main.main` | Web UI/API, database, monitoring, agents |
+
+The CLI is the primary flow. The agent and server flows are summarized in
+[section 10](#10-alternate-entry-points-agent-and-server).
+
+```text
+ssldoctor.py
+   │  imports
+   ▼
+ssl_doctor/cli.py :: main()
+   │
+   ├─ argv[0] == "agent" ──────────────► ssl_doctor/agent.py :: main()
+   │
+   ├─ -h / --help ─────────────────────► banner + help, exit 0
+   │
+   ├─ -c ... or a bare /command ───────► batch mode: execute each command
+   │                                      then exit 0 or 1
+   │
+   └─ otherwise ───────────────────────► REPL mode: prompt until /exit
+                                          then disconnect, print "bye", exit 0
+```
+
+---
+
+## 2. Starting the process
+
+### 2.1 Entry points
+
+- **`ssldoctor.py`** — development/source entry point. It imports
+  `main` from `ssl_doctor/cli.py` and calls
+  `raise SystemExit(main())`.
+- **`pyproject.toml`** — declares the installed console script
+  `ssl-doctor = "ssl_doctor.cli:main"`.
+- **`packaging/entry_cli.py`** — PyInstaller/frozen-build equivalent; it calls
+  the same `ssl_doctor.cli.main`.
+
+`ssl_doctor/cli.py` is imported first. At import time it:
+
+1. Imports the diagnostic modules:
+   - `ssl_doctor/findings.py` — findings model and session store
+   - `ssl_doctor/analyze.py` — correlation rules
+   - `ssl_doctor/certs.py` — certificate parsing, chain assessment, key matching
+   - `ssl_doctor/local.py` — checks on the local/client machine
+   - `ssl_doctor/netchecks.py` — remote DNS/TCP/TLS/HTTPS checks
+   - `ssl_doctor/report.py` — HTML/JSON rendering
+   - `ssl_doctor/server.py` — SSH transport and nginx analysis
+2. Decides whether colors are enabled: stdout is a TTY and `NO_COLOR` is unset
+   (`_USE_COLOR`).
+3. On Windows, issues an empty `os.system("")` to enable ANSI escape handling
+   in modern consoles.
+
+### 2.2 `main(argv)` — argument parsing
+
+`ssl_doctor/cli.py :: main()` performs these steps in order:
+
+1. Copies `sys.argv[1:]` (or an injected `argv`).
+2. **Agent branch:** if the first argument is exactly `agent`, imports
+   `ssl_doctor/agent.py` and returns `agent.main(argv[1:])`. An
+   `agent.AgentError` is printed in red and converted to exit code `1`.
+3. Creates one `SSLDoctorCLI` instance. Its constructor initializes:
+   - `store = findings.FindingStore()` — all findings for this session
+   - `net_timeout = 8.0`
+   - `cmd_timeout = 20.0`
+   - `server = None` — no SSH session yet
+   - `remote_facts = {}` — structured facts from the last remote scan
+   - `_diagnosis = None` — cached correlation result
+   - `_running = True`
+4. Scans the remaining arguments left to right:
+   - `-c <command>` — appends the command to the **batch list**
+   - `--timeout <seconds>` — sets only `cli.net_timeout` (invalid values are
+     ignored)
+   - `-h` / `--help` — prints the banner and help, returns `0`
+   - an argument starting with `/` — joins that argument and **all remaining
+     arguments** into one batch command and stops parsing
+   - anything else — silently skipped (`i += 1`)
+5. If the batch list is non-empty, runs **batch mode** (section 4).
+6. Otherwise starts the **REPL** (section 5).
+
+---
+
+## 3. Session state and the finding model
+
+Every check returns one or more `Finding` objects from
+`ssl_doctor/findings.py`:
+
+```text
+Finding
+  check          machine name, e.g. "tls.handshake"
+  title          human-readable title
+  status         PASS | FAIL | WARNING | NOT TESTED
+  scope          local | remote-net | server
+  evidence       list of human-readable evidence lines
+  detail         optional longer explanation
+  recommendation optional remediation
+  target         host:port or file path
+  ts             timestamp
+```
+
+`FindingStore` is an ordered, append-only collection with:
+
+- `add()` / `extend()` — record findings
+- `all()` — snapshot used by diagnosis and reports
+- `by_scope(scope)` — used by `/findings <scope>`
+- `clear()` — used by `/clear`
+- `counts()` and `__len__()` — summary helpers
+
+Diagnostic commands **do not print and discard** results. Each handler adds its
+findings to `FindingStore`, then prints them with `print_findings()` (also in
+`ssl_doctor/cli.py`). This is what makes later `/diagnose` and `/report` possible.
+
+---
+
+## 4. Batch mode
+
+Batch mode is selected by one or more `-c` arguments or by a bare `/command`.
+
+`ssl_doctor/cli.py :: main()`:
+
+1. Prints the banner (`SSLDoctorCLI.banner`).
+2. For each batch line:
+   - echoes `ssl-doctor> <line>`
+   - calls `cli.execute(line)`
+   - stops early if `execute()` returns `False` (i.e. the command was
+     `/exit` or `/quit`)
+3. If no diagnosis was produced but findings exist, it runs
+   `diagnose(cli.store.all(), {})` inside a `try/except`; failures are ignored.
+4. Returns:
+   - `1` if the diagnosis exists and `diagnosis.overall == "FAIL"`
+   - `0` otherwise (including no findings, or a WARNING/PASS result)
+
+This makes batch mode usable as a CI/smoke-test gate. Note that command
+exceptions are caught inside `execute()`, so a failing check does not
+automatically produce a non-zero exit code; the diagnosis does.
+
+---
+
+## 5. REPL mode — the command loop
+
+`ssl_doctor/cli.py :: SSLDoctorCLI.repl()`:
+
+```text
+banner()
+while self._running:
+    line = input("ssl-doctor> ")
+    on EOFError / KeyboardInterrupt:
+        break
+    if line is /exit, /quit, exit, or quit:
+        cmd_exit(); break
+    self.execute(line)
+
+if self.server: server.disconnect()
+print("bye")
+return 0
+```
+
+Important details:
+
+- The loop condition is `_running`. Only `/exit` (or its alias `/quit`) sets it
+  to `False`.
+- `exit` / `quit` without a slash are recognized by the REPL before dispatch.
+- Ctrl-C at the prompt exits the session cleanly. Ctrl-C **during** a command
+  is caught inside `execute()` and prints `interrupted`; the session continues.
+- At shutdown the SSH session is disconnected (which wipes the in-memory
+  password and removes the temporary askpass helper) and the process returns
+  `0`.
+
+---
+
+## 6. Executing one command
+
+`ssl_doctor/cli.py :: SSLDoctorCLI.execute(line)` is the single dispatch path
+for both REPL and batch input:
+
+1. Trim whitespace; an empty line returns `True`.
+2. If the line does not start with `/`:
+   - `help` or `?` (case-insensitive) is rewritten to `/help`
+   - anything else prints `error: commands start with '/'. Try /help` and
+     returns `True`
+3. Remove the leading `/` and split the rest with `shlex.split()`. A quoting
+   error is reported and returns `True`.
+4. If no arguments remain, return `True`.
+5. Lower-case the command name and look up a handler with
+   `getattr(self, f"cmd_{cmd}", None)`.
+6. Unknown command → `error: unknown command /<cmd>. Try /help`, return `True`.
+7. Call the handler with the remaining arguments inside two guards:
+   - `KeyboardInterrupt` → prints `interrupted`
+   - any other `Exception` → prints `TypeError: ...` style error
+8. Return `self._running`.
+
+This design means a bug in one check cannot terminate the session, and command
+handlers communicate “stop the program” solely by setting `_running = False`.
+
+Aliases are ordinary class attributes:
+
+- `cmd_quit = cmd_exit` — `/quit`
+- `cmd_remote = cmd_tls` — `/remote`
+
+---
+
+## 7. Command handlers in detail
+
+All handlers live in `ssl_doctor/cli.py` unless noted. Most follow the same
+pattern: run a library function under a `Spinner`, add findings to
+`self.store`, print them.
+
+| Command | Handler | What happens | Files involved |
+|---|---|---|---|
+| `/help` | `cmd_help` | Prints the static command table. | `ssl_doctor/cli.py` |
+| `/version` | `cmd_version` | Prints app name and version. | `ssl_doctor/__init__.py` |
+| `/timeout [net] [cmd]` | `cmd_timeout` | Shows or sets `net_timeout` and optionally `cmd_timeout`. | `ssl_doctor/cli.py` |
+| `/findings [scope]` | `cmd_findings` | Prints all findings, or filters by `local`, `remote-net`, `server`. | `ssl_doctor/findings.py` |
+| `/clear` | `cmd_clear` | Empties the store and clears the cached diagnosis. | `ssl_doctor/findings.py` |
+| `/cert inspect <file> [host]` | `cmd_cert` | Parses a PEM/DER certificate or chain file, checks dates/SANs/fingerprints and chain order. | `ssl_doctor/certs.py` → `inspect_cert_file` |
+| `/cert match <cert> <key>` | `cmd_cert` | Compares public-key digests only; never reads out key material. | `ssl_doctor/certs.py` → `match_cert_key` |
+| `/tls <host\|URL> [--sni name]` | `cmd_tls` | Full remote TLS/HTTPS suite. | `ssl_doctor/netchecks.py` → `run_remote_diagnostics` |
+| `/local [cert]` | `cmd_local` | Checks the machine running SSL Doctor. | `ssl_doctor/local.py` → `run_local_for_remote` |
+| `/scan ...` | `cmd_scan` | Guided multi-step workflow (section 7.2). | `cli.py`, `netchecks.py`, `local.py`, `server.py`, `analyze.py` |
+| `/server connect` | `cmd_server` → `_server_connect` | Interactive SSH setup and verification. | `ssl_doctor/server.py` |
+| `/server status` | `cmd_server` | Shows the current SSH/TLS target state. | `ssl_doctor/server.py` |
+| `/server overview` | `cmd_server` | Remote OS identity plus web-server/OpenSSL detection. | `ssl_doctor/server.py` |
+| `/server nginx [domain[:port]]` | `cmd_server` | Resolves the nginx vhost and audits its TLS configuration. | `ssl_doctor/server.py` → `nginx_scan` |
+| `/server cert <file> [key]` | `cmd_server` | Remote certificate inspection, key pairing, file permissions. | `ssl_doctor/server.py` |
+| `/server config` | `cmd_server` | Read-only scan of web-server TLS/vhost configuration. | `ssl_doctor/server.py` |
+| `/server logs` | `cmd_server` | Recent TLS-related service log entries, when readable. | `ssl_doctor/server.py` |
+| `/server compare` | `cmd_server` | Configured nginx certificate vs certificate served on the network. | `ssl_doctor/server.py` |
+| `/server disconnect` | `cmd_server` | Closes SSH and drops the session object. | `ssl_doctor/server.py` |
+| `/diagnose` | `cmd_diagnose` | Correlates all findings into ranked root causes. | `ssl_doctor/analyze.py` |
+| `/report [html\|json\|both] [path]` | `cmd_report` | Writes a report. | `ssl_doctor/report.py`, `ssl_doctor/contract.py` |
+| `/exit`, `/quit` | `cmd_exit` / `cmd_quit` | Disconnects SSH, sets `_running = False`. | `ssl_doctor/cli.py` |
+
+### 7.1 `/tls` — remote diagnostics
+
+`cmd_tls` parses positional arguments, accepts either a second positional port
+or `host:port` / URL syntax, and calls
+`netchecks.parse_target()` to normalize to `(host, port, scheme_hint, error)`.
+It then calls `_gather_remote()`:
+
+1. `netchecks.run_remote_diagnostics(host, port, sni, timeout)`.
+2. If a certificate was presented, inserts a `netchecks.domain_profile()`
+   finding at the front.
+3. Adds every finding to the store.
+4. Replaces `self.remote_facts` with the returned structured facts.
+5. Clears the cached `_diagnosis` (the findings changed).
+6. Prints the findings and suggests `/diagnose` or `/report html`.
+
+### 7.2 `/scan` — the guided workflow
+
+`cmd_scan` is the orchestration layer over the other commands:
+
+1. Target resolution:
+   - first positional argument, or an interactive prompt
+   - `netchecks.parse_target()` for `host`, `host:port`, or URL
+   - `--sni` is read by `_sni_arg()`
+2. Mode selection:
+   - `--server-only` → server side only
+   - `--client-only` → client side only
+   - otherwise combined
+   - in combined mode, unless `--with-server` was passed, it asks
+     `run authorized server-side checks too (SSH)? (yes/no)` (default `no`)
+3. Step count is chosen (`steps_total`): 3 for client-only, 2 for server-only,
+   3 combined-without-SSH, 4 combined-with-SSH.
+4. **Client phase** (modes `client` and `combined`):
+   - prints `Step N: domain identification + network checks`
+   - `_gather_remote()` → `netchecks.run_remote_diagnostics()`
+   - prints `Step N: client machine checks`
+   - `cmd_local([])` → `local.run_local_for_remote()`
+5. **Server phase** (mode `server`, or combined with SSH):
+   - `_scan_server_side(host, port, sni)`:
+     - if no presented certificate is known yet, measures the public endpoint
+       with `netchecks.check_dns()` and `netchecks.check_tls_basic()`, adds a
+       domain profile, and updates `remote_facts`
+     - if not connected, runs the interactive `_server_connect()`
+     - `ServerSession.overview()` + `webserver_detection()`
+     - `ServerSession.nginx_scan(domain, port)`
+     - `ServerSession.compare_configured_vs_presented(presented_sha256)`
+     - `ServerSession.log_scan()`
+   - in combined mode without SSH, prints a note explaining how to run the
+     server side later
+6. **Diagnosis phase:** calls `cmd_diagnose([])`.
+
+All server-side findings are scoped `server`; network findings are
+`remote-net`; local checks are `local`. This lets the correlation rules reason
+about origin correctly.
+
+### 7.3 `/server connect` — SSH setup
+
+`_server_connect()` in `ssl_doctor/cli.py`:
+
+1. Prompts for SSH host, port (default `22`), username
+   (default `getpass.getuser()`), and auth method
+   (`1=password`, `2=private key`).
+2. For a key: expands and checks the path; for a password: reads it with
+   `getpass.getpass()` (never echoed, never persisted).
+3. Prompts for the TLS target host (blank means the SSH host) and TLS port
+   (default `443`).
+4. Calls `server.host_key_status()`:
+   - `unreachable` → records a FAIL, stops
+   - `changed` → records a FAIL, refuses to connect (possible MITM), tells the
+     user to remove the stale entry from `~/.ssl-doctor/known_hosts`
+   - `unknown` → displays fingerprints and asks for explicit trust; on “yes”
+     calls `server.store_host_key()`
+   - `trusted` → proceeds
+5. Builds `server.SSHConfig`, replaces any existing session, creates
+   `server.ServerSession`, and calls `connect()`.
+6. `ServerSession.connect()` re-verifies the host key, runs a read-only
+   `ssh ... true` probe, and reports `ssh.hostkey` and `ssh.auth` findings.
+7. On success it notes the TLS target and suggests next commands.
+
+`ServerSession.run()` invokes the system `ssh` binary with:
+
+- `StrictHostKeyChecking=yes`
+- a private known-hosts file at `~/.ssl-doctor/known_hosts`
+- public-key or password-only authentication as configured
+- a command timeout (`cmd_timeout`)
+- for passwords, a temporary `SSH_ASKPASS` script in the private state
+  directory, fed through an environment variable
+
+The password is held only in memory, returned by `known_secrets()` solely for
+report redaction, and cleared by `disconnect()`.
+
+### 7.4 `/diagnose` — findings to causes
+
+`cmd_diagnose` calls `ssl_doctor/analyze.py :: diagnose(items, ctx)`. The
+correlation rules:
+
+- group findings by scope (`remote-net`, `server`, `local`)
+- start with transport failures: DNS → TCP → TLS handshake
+- then protocol/cipher negotiation
+- then the chain the server actually sent (`tls.chain`), nginx chain-file and
+  vhost findings, and root-only validation
+- then client trust-store/root-CA, clock skew, proxy, and Windows-specific
+  evidence
+- add expiry, hostname, multi-IP, SNI, weak-cipher, and HTTPS observations
+- sort causes by rank and classify certainty as `confirmed`, `probable`, or
+  `possible`
+
+The result is a `Diagnosis`:
+
+```text
+Diagnosis
+  causes: list[Cause]
+  notes:  list[str]
+  overall: "FAIL"    if any cause is confirmed
+           "WARNING" if any non-confirmed cause exists
+           "PASS"    if there are no causes
+```
+
+`cmd_diagnose` caches the result in `self._diagnosis` and prints the overall
+verdict, each cause with evidence and a fix, and any notes.
+
+### 7.5 `/report` — serializing the session
+
+`cmd_report`:
+
+1. Parses arguments: `html` (default), `json`, or `both`, plus an optional path.
+2. Refuses to write if the store is empty.
+3. Reuses `_diagnosis`; if it is `None`, computes one from the store.
+4. Builds `meta` from `_meta()`: target, timeouts, and whether SSH is connected.
+5. Collects secrets from `ServerSession.known_secrets()` for redaction.
+6. If a certificate was seen, calls `netchecks.export_facts()` to include the
+   structured leaf/chain facts.
+7. Chooses file names:
+   - JSON default: `ssl-doctor-report-<YYYYmmdd-HHMMSS>.json`
+   - HTML default: `ssl-doctor-report-<YYYYmmdd-HHMMSS>.html`
+   - an explicit path gets `.json` / `.html` appended when needed
+8. `report.write_json()` or `report.write_html()`.
+
+Both writers go through `report.build_payload()` in `ssl_doctor/report.py`,
+which:
+
+- counts PASS/FAIL/WARNING/NOT TESTED
+- builds the `schema_version`, tool/version, `generated_utc`, `meta`,
+  `summary`, `diagnosis`, `findings`, disclaimer, and optional `facts`
+- passes the document through `contract.redact()` in `ssl_doctor/contract.py`,
+  which scrubs private-key blocks and every supplied secret in raw, URL-encoded,
+  base64, and hex forms
+
+`write_html()` renders the already-redacted document with
+`report.html_from_payload()` into one self-contained HTML file.
+
+### 7.6 Command side effects on cached state
+
+- `/tls` (and therefore `/scan`'s client phase) **replaces**
+  `remote_facts` and **invalidates** `_diagnosis`.
+- `/clear` empties the store and invalidates `_diagnosis`.
+- Other commands append findings but do not invalidate a previously cached
+  diagnosis; `/diagnose` recomputes it explicitly, and `/report` only computes
+  one when the cache is empty. Run `/diagnose` again after adding checks if you
+  want the printed diagnosis to reflect them.
+
+---
+
+## 8. The remote diagnostic suite in order
+
+`ssl_doctor/netchecks.py :: run_remote_diagnostics()` is the core network
+pipeline used by `/tls` and `/scan`. It returns `(findings, facts)`.
+
+```text
+1. parse / record host, port, SNI
+2. check_dns()                      ─┐
+3. check_tcp()                       │ early exit on DNS/TCP failure:
+4. check_tls_basic()                 │ add NOT TESTED handshake finding
+   └─ read presented certificate      │ and return
+      and chain (read_presented_chain│
+      / _chain_via_s_client)         │
+5. certificate validity              │
+6. hostname match (SAN only)         │ early exit if handshake FAIL:
+7. check_presented_chain()           │ add protocol matrix, return
+8. check_tls_validation()            │
+9. check_tls_rootonly_validation()   │
+10. check_protocol_matrix()          │
+11. check_sni_difference()           │
+12. check_multi_ip()                 │
+13. check_weak_ciphers()             │
+14. check_https()                    │
+    └─ redirect chain, final URL,     │
+       server time                    │
+15. return findings + facts ─────────┘
+```
+
+The `facts` dictionary carries the parsed certificate, IPs, SNI, chain status,
+anchor, redirect hops, final URL, and server time. It is stored in
+`SSLDoctorCLI.remote_facts` and reused for local clock comparison and reports.
+
+---
+
+## 9. Shutdown and exit codes
+
+### Interactive mode
+
+1. `/exit`, `/quit`, `exit`, `quit`, EOF, or Ctrl-C at the prompt ends the loop.
+2. `cmd_exit` disconnects SSH if a session exists.
+3. `repl()` disconnects again defensively, prints `bye`, returns `0`.
+4. `ssldoctor.py` raises `SystemExit(0)`.
+
+### Batch mode
+
+1. Stops after the last command or after a command sets `_running = False`.
+2. Optionally computes a diagnosis.
+3. Returns `1` only when the diagnosis overall is `FAIL`; otherwise `0`.
+4. `ssldoctor.py` raises `SystemExit` with that value.
+
+### Agent mode
+
+- `enroll` success → `0`; failed enrollment raises `AgentError` and the CLI
+  returns `1`.
+- `run --once` → `0` on a successful poll/job, `1` on service/network error.
+- a revoked/unknown agent during `run` → `2`.
+- usage error → `64`.
+
+---
+
+## 10. Alternate entry points: agent and server
+
+### 10.1 Scan agent — `ssl_doctor/agent.py`
+
+Selected when the CLI receives `agent` as its first argument.
+
+```text
+ssl_doctor/cli.py :: main()
+  └─ ssl_doctor/agent.py :: main()
+       ├─ "enroll <url> <token>" → AgentClient.enroll()
+       │                           save_state(~/.ssl-doctor/agent.json, 0600)
+       └─ "run [--once]"         → load_state()
+                                   serve()
+                                     └─ long-poll /v1/agent/jobs/next
+                                        handle_job()
+                                          ├─ client role → run_client_checks()
+                                          │                 netchecks + local + report
+                                          └─ server role → run_server_checks()
+                                                            server.LocalSession + nginx + netchecks
+                                        upload result document
+```
+
+Key properties:
+
+- Outbound HTTPS only; the agent listens on nothing.
+- A job declares only a kind and target; nothing from the service is executed.
+- Jobs for the other role are declined.
+- Uploaded documents are built by `report.build_payload()` and therefore obey
+  the same redaction and findings contract.
+- Backoff doubles from 1 s to 60 s on transient failures.
+
+### 10.2 Control-plane server — `service/ssldoctor_service/`
+
+`packaging/entry_server.py` imports `ssldoctor_service.server_main.main()`.
+Subcommands are `init`, `run`, `upgrade`, `backup`, `verify-audit`, and
+`version`.
+
+- `server_main.cmd_init` creates the data directory, embedded PostgreSQL
+  cluster, config (`0600`), migrations, application role, and owner API token.
+- `server_main.cmd_run` starts PostgreSQL, starts a monitor scheduler thread,
+  creates the FastAPI app with `app.create_app(Database(...))`, and runs
+  Uvicorn. It stops PostgreSQL in a `finally` block.
+- `app.py` serves the member API and agent API; tenant isolation is enforced by
+  database row-level security through `db.org(org_id)`.
+- `monitor.py` schedules and dispatches recurring scans and evaluates expiry.
+- `audit.py`, `identity.py`, `scim.py`, `ui.py`, `render.py`, `db.py`, and the
+  SQL files in `migrations/` support auditing, SSO/SCIM, the HTML UI, schema,
+  and persistence.
+
+Packaging glue lives in `packaging/build.py`, `packaging/entry_agent.py`,
+`packaging/entry_cli.py`, `packaging/entry_server.py`, `packaging/release.py`,
+and `packaging/winsvc.py`.
+
+---
+
+## 11. End-to-end sequence diagram
+
+```text
+User                cli.py                  netchecks/local/server      analyze        report
+ │                    │                            │                       │             │
+ │ python ssldoctor.py│                            │                       │             │
+ ├───────────────────►│ main()                     │                       │             │
+ │                    │ parse argv                 │                       │             │
+ │                    │ REPL / batch               │                       │             │
+ │  /scan example.com │                            │                       │             │
+ ├───────────────────►│ execute()                  │                       │             │
+ │                    │ shlex + dispatch            │                       │             │
+ │                    ├─ cmd_scan ─────────────────►│                       │             │
+ │                    │                            │ run_remote_diagnostics│             │
+ │                    │                            ├──────────────────────►│             │
+ │                    │                            │<── findings + facts ──┤             │
+ │                    │                            │ run_local_for_remote  │             │
+ │                    │                            ├──────────────────────►│             │
+ │                    │                            │<── findings ──────────┤             │
+ │                    │                            │ (optional SSH/nginx)  │             │
+ │                    │ store.extend()             │                       │             │
+ │                    ├─ cmd_diagnose ─────────────┼──────────────────────►│             │
+ │                    │<── Diagnosis ──────────────┼───────────────────────┤             │
+ │  /report html      │                            │                       │             │
+ ├───────────────────►│ cmd_report ────────────────┼───────────────────────┼────────────►│
+ │                    │                            │                       │  redact +   │
+ │                    │                            │                       │  write file │
+ │  /exit             │                            │                       │             │
+ ├───────────────────►│ cmd_exit                   │                       │             │
+ │                    │ server.disconnect()        │                       │             │
+ │                    │ break loop, "bye", return 0│                       │             │
+ │◄───────────────────┤                            │                       │             │
+```
+
+---
+
+## 12. File map
+
+| File | Role in the execution flow |
+|---|---|
+| `ssldoctor.py` | Source entry point; calls `ssl_doctor.cli.main()` |
+| `pyproject.toml` | Declares the `ssl-doctor` console script and package |
+| `ssl_doctor/__init__.py` | Version (`0.3.0`) and application name |
+| `ssl_doctor/cli.py` | Argument parsing, batch mode, REPL, dispatch, all command handlers, spinner/colors, `/scan` orchestration |
+| `ssl_doctor/findings.py` | `Finding` model, statuses/scopes, `FindingStore` |
+| `ssl_doctor/netchecks.py` | Target parsing, domain profile, DNS/TCP/TLS/HTTPS suite, presented-chain reading |
+| `ssl_doctor/certs.py` | PEM/DER parsing, chain assessment, hostname matching, cert/key digest matching |
+| `ssl_doctor/local.py` | Local machine checks: OS, clock skew, proxy, Windows stores, certutil, Schannel |
+| `ssl_doctor/server.py` | SSH config/session, host-key trust store, nginx config parsing and vhost resolution, remote checks |
+| `ssl_doctor/analyze.py` | Correlation rules producing ranked causes and overall verdict |
+| `ssl_doctor/report.py` | Findings-contract payload, JSON writer, self-contained HTML renderer |
+| `ssl_doctor/contract.py` | Schema version, validation, and secret/private-key redaction |
+| `ssl_doctor/agent.py` | Agent enroll/run, job polling, role-bound check execution |
+| `service/ssldoctor_service/server_main.py` | `ssldoctor-server` CLI, embedded PostgreSQL lifecycle, init/run/upgrade/backup/verify-audit |
+| `service/ssldoctor_service/app.py` | FastAPI member and agent API |
+| `service/ssldoctor_service/monitor.py` | Scheduled scans, dispatch, expiry evaluation |
+| `service/ssldoctor_service/db.py` | Database access and tenant-scoped queries |
+| `service/ssldoctor_service/audit.py` | Audit-log verification |
+| `service/ssldoctor_service/identity.py` | Identity/SSO support |
+| `service/ssldoctor_service/scim.py` | SCIM provisioning |
+| `service/ssldoctor_service/ui.py` | Server-rendered UI |
+| `service/ssldoctor_service/render.py` | UI rendering helper |
+| `service/ssldoctor_service/migrations/*.sql` | Database schema and migrations |
+| `packaging/entry_cli.py` | Frozen-build CLI entry point |
+| `packaging/entry_agent.py` | Frozen-build agent entry point |
+| `packaging/entry_server.py` | Frozen-build server entry point |
+| `packaging/build.py` | Build orchestration |
+| `packaging/release.py` | Release bundling |
+| `packaging/winsvc.py` | Windows service wrapper |
+| `tests/` | Unit, integration, TLS fixture, nginx, air-gap, contract, and end-to-end tests |
+| `service/tests/` | Control-plane, tenancy, identity, monitoring, audit, migration tests |
+| `schemas/findings-1.0.schema.json`, `schemas/findings-1.1.schema.json` | Published findings-contract schemas |
+
+---
+
+## 13. One-paragraph summary
+
+`ssldoctor.py` calls `ssl_doctor/cli.py :: main`, which either delegates to the
+agent entry point or builds a `SSLDoctorCLI`. That object owns a
+`FindingStore`, timeouts, the optional SSH session, and remote scan facts. The
+program then either runs a batch of `-c`/slash commands or enters a REPL. Each
+line is split with `shlex` and dispatched to a `cmd_*` method. Commands run
+read-only checks in `netchecks.py`, `local.py`, `certs.py`, or `server.py`,
+convert results to `Finding` objects, append them to the store, and print them.
+`/diagnose` sends the whole store through `analyze.py` to produce ranked causes
+and an overall PASS/WARNING/FAIL verdict. `/report` builds a findings-contract
+document, redacts secrets and private keys in `contract.py`, and writes JSON
+and/or self-contained HTML via `report.py`. `/exit` disconnects SSH, clears the
+password, stops the loop, prints `bye`, and returns exit code `0`; batch mode
+instead returns `1` only when the final diagnosis is `FAIL`.

@@ -70,24 +70,24 @@
 
 ## 10. Identity and access (spec: identity-access)
 
-- [ ] 10.1 Implement OIDC and SAML SSO, with per-organization enforcement; verify that password sign-in under enforced SSO is refused
-- [ ] 10.2 Implement roles and a central permission check; verify that a viewer starting a scan and an engineer revoking an agent are both forbidden
-- [ ] 10.3 Implement SCIM deprovisioning and token revocation on removal; verify a removed member's API token is refused
+- [x] 10.1 Implement OIDC and SAML SSO, with per-organization enforcement; verify that password sign-in under enforced SSO is refused
+- [x] 10.2 Implement roles and a central permission check; verify that a viewer starting a scan and an engineer revoking an agent are both forbidden
+- [x] 10.3 Implement SCIM deprovisioning and token revocation on removal; verify a removed member's API token is refused
 
 ## 11. Audit logging (spec: audit-logging)
 
-- [ ] 11.1 Record audit entries for all listed actions, through one helper; verify that agent revocation produces the expected entry
-- [ ] 11.2 Implement the per-organization hash chain, an insert-only DB role and an integrity-verification command; verify that altering a stored entry is detected at that entry
-- [ ] 11.3 Implement JSONL audit export by date range for owners and admins; verify the export contains only that organization's entries for the range
+- [x] 11.1 Record audit entries for all listed actions, through one helper; verify that agent revocation produces the expected entry
+- [x] 11.2 Implement the per-organization hash chain, an insert-only DB role and an integrity-verification command; verify that altering a stored entry is detected at that entry
+- [x] 11.3 Implement JSONL audit export by date range for owners and admins; verify the export contains only that organization's entries for the range
 
 ## 12. Self-hosted deployment (spec: self-hosted-deployment)
 
-- [ ] 12.1 Add `ssldoctor-server` with embedded PostgreSQL (`init`, `run`, `upgrade`, `backup`, `verify-audit`); verify `init` + `run` on an empty data dir answers `/healthz`
-- [ ] 12.2 Add PyInstaller build specs for `ssl-doctor`, `ssl-doctor-agent` and `ssldoctor-server`, and build the Linux binaries; verify each runs from the bundle with no Python on PATH (`env -i`), and that the server binary passes its health check
+- [x] 12.1 Add `ssldoctor-server` with embedded PostgreSQL (`init`, `run`, `upgrade`, `backup`, `verify-audit`); verify `init` + `run` on an empty data dir answers `/healthz`
+- [x] 12.2 Add PyInstaller build specs for `ssl-doctor`, `ssl-doctor-agent` and `ssldoctor-server`, and build the Linux binaries; verify each runs from the bundle with no Python on PATH (`env -i`), and that the server binary passes its health check
 - [ ] 12.3 Add a Windows CI job building the three `.exe` files plus Windows service registration (agent, server); verify on the Windows runner that the service installs, starts and answers health checks
-- [ ] 12.4 Build the signed offline bundle (`SHA256SUMS` + Ed25519 signature + CycloneDX SBOM + public key + offline verification instructions); verify that a modified bundle fails `openssl pkeyutl -verify`
-- [ ] 12.5 Run an air-gapped install test (network namespace with no egress) from the bundle and scan an internal fixture target; verify installation and the scan succeed
-- [ ] 12.6 Add an upgrade test from the previous minor version's data dir; verify that results and audit integrity survive the upgrade
+- [x] 12.4 Build the signed offline bundle (`SHA256SUMS` + Ed25519 signature + CycloneDX SBOM + public key + offline verification instructions); verify that a modified bundle fails `openssl pkeyutl -verify`
+- [x] 12.5 Run an air-gapped install test (network namespace with no egress) from the bundle and scan an internal fixture target; verify installation and the scan succeed
+- [x] 12.6 Add an upgrade test from the previous minor version's data dir; verify that results and audit integrity survive the upgrade
 
 ## 13. Integration
 

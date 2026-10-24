@@ -36,3 +36,53 @@ jobs:
         run: python -m pip install . "./service[dev]"
       - name: Run service suite (throwaway PostgreSQL via pgserver)
         run: PYTHONPATH=service python -m unittest discover -s service/tests -v
+
+  executables:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build dependencies
+        run: python -m pip install . "./service[dev]" "pyinstaller>=6.6" "cyclonedx-bom>=4"
+      - name: Install pywin32 (Windows service host)
+        if: runner.os == 'Windows'
+        run: python -m pip install pywin32
+      - name: Build executables
+        run: python packaging/build.py
+      - name: Smoke-test Linux binaries (no Python on PATH) + bundle + air-gap
+        if: runner.os == 'Linux'
+        run: |
+          env -i PATH=/usr/sbin:/sbin HOME=/tmp dist/linux/ssl-doctor /version
+          SSLDOCTOR_SERVER_EXE=$PWD/dist/linux/ssldoctor-server/ssldoctor-server \
+            PYTHONPATH=service:service/tests python -m unittest test_server_main test_upgrade -v
+          python -m unittest discover -s tests -p "test_release_bundle.py" -v
+          sudo -E env "PATH=$PATH" python -m unittest discover -s tests -p "test_airgap.py" -v
+      - name: Windows service install, start, health check
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $srv = "$PWD\dist\windows\ssldoctor-server\ssldoctor-server.exe"
+          & dist\windows\ssl-doctor.exe /version
+          & $srv init --data C:\ssldoctor-data --org "CI" --listen 127.0.0.1:18080
+          & $srv service install --data C:\ssldoctor-data
+          & $srv service start
+          $ok = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            try { $r = Invoke-RestMethod http://127.0.0.1:18080/healthz; if ($r.status -eq "ok") { $ok = $true; break } } catch {}
+            Start-Sleep -Seconds 2
+          }
+          Get-Service SSLDoctorServer | Format-List Status, StartType
+          if (-not $ok) { throw "server service did not become healthy" }
+          & $srv service stop
+          & $srv service remove
+          & dist\windows\ssl-doctor-agent.exe run --state C:\missing.json; if ($LASTEXITCODE -eq 0) { throw "agent should fail without state" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: executables-${{ runner.os }}
+          path: dist/

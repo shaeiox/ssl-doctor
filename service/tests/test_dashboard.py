@@ -29,7 +29,8 @@ def browser(org="A", role="owner"):
     """A signed-in browser session (cookie jar)."""
     with httpx.Client(base_url=SVC.url, timeout=60, follow_redirects=False) as c:
         r = c.post("/ui/login", data={"token": SVC.tokens[(org, role)]})
-        assert r.status_code == 303 and r.headers["location"] == "/ui", r.text
+        assert r.status_code == 200 and "url=/ui" in r.text, (r.status_code, r.text)
+        assert c.cookies.get("ssldoctor_session"), "no session cookie"
         yield c
 
 
@@ -110,3 +111,18 @@ class DashboardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(pgfixture.available(), "PostgreSQL binaries not available")
+class SessionTests(unittest.TestCase):
+
+    def test_cookie_holds_session_not_api_token(self):
+        with browser() as c:
+            self.assertNotEqual(c.cookies.get("ssldoctor_session"), SVC.tokens[("A", "owner")])
+
+    def test_logout_revokes_session(self):
+        with browser() as c:
+            cookie = c.cookies.get("ssldoctor_session")
+            c.get("/ui/logout")
+        with httpx.Client(base_url=SVC.url, cookies={"ssldoctor_session": cookie}) as c:
+            self.assertEqual(c.get("/ui").status_code, 303)

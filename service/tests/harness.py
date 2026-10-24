@@ -33,11 +33,8 @@ class Service:
                 if role == "owner":
                     self.orgs[org] = dbmod.bootstrap_org(self.admin_dsn, f"org {org}", tok)
                 else:
-                    import psycopg
-                    with psycopg.connect(self.admin_dsn) as conn:
-                        conn.execute("INSERT INTO app.api_tokens (org_id, name, token_hash, "
-                                     "role) VALUES (%s, %s, %s, %s)",
-                                     (self.orgs[org], role, dbmod.sha256_hex(tok), role))
+                    dbmod.add_user_with_token(self.admin_dsn, self.orgs[org],
+                                              f"{role}@{org.lower()}.example", role, tok)
                 self.tokens[(org, role)] = tok
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))

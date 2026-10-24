@@ -1,0 +1,17 @@
+[Unit]
+Description=SSL Doctor scan agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ssldoctor
+ExecStart=/opt/ssl-doctor/bin/ssl-doctor-agent run --state /var/lib/ssl-doctor/agent.json
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ssl-doctor
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

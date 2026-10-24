@@ -1,5 +1,6 @@
 """tenant-workspaces (group 8): targets, jobs, immutable history, isolation."""
 
+import os
 import unittest
 
 import pgfixture
@@ -40,8 +41,10 @@ def org_world(org):
         claimed = cl.next_job(wait=5)
         res = cl.upload(claimed["job_id"], doc("PASS", "PASS"))
         ch = c.post("/v1/channels", json={"kind": "email", "address": f"ops@{org}.example"})
+        user = c.post("/v1/members", json={"email": f"m-{os.urandom(4).hex()}@{org}.example",
+                                           "role": "viewer"}).json()
     return {"agent": st, "target": t["id"], "job": job["id"], "result": res["result_id"],
-            "channel": ch.json()["id"]}
+            "channel": ch.json()["id"], "user": user["id"]}
 
 
 @unittest.skipUnless(pgfixture.available(), "PostgreSQL binaries not available")
@@ -98,8 +101,9 @@ class CrossTenantTests(unittest.TestCase):
         from ssldoctor_service.app import create_app
         ids = {"target_id": self.a["target"], "job_id": self.a["job"],
                "result_id": self.a["result"], "agent_id": self.a["agent"]["agent_id"],
-               "channel_id": self.a["channel"]}
-        bodies = {("PUT", "/v1/targets/{target_id}/monitoring"): {"interval_seconds": 3600}}
+               "channel_id": self.a["channel"], "user_id": self.a["user"]}
+        bodies = {("PUT", "/v1/targets/{target_id}/monitoring"): {"interval_seconds": 3600},
+                  ("PATCH", "/v1/members/{user_id}"): {"role": "viewer"}}
         exercised = set()
         routes = [r for r in create_app(SVC.db).routes
                   if "{" in getattr(r, "path", "") and r.path.startswith("/v1/")
@@ -116,7 +120,7 @@ class CrossTenantTests(unittest.TestCase):
             resp = c.get("/v1/compare", params={"a": self.a["result"], "b": self.b["result"]})
             self.assertEqual(resp.status_code, 404)
             exercised.add(("GET", "/v1/compare"))
-        self.assertGreaterEqual(len(exercised), 11)
+        self.assertGreaterEqual(len(exercised), 13)
 
     def test_lists_show_only_own_objects(self):
         with SVC.client("B") as c:

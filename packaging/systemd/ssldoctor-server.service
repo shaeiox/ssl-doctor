@@ -1,0 +1,19 @@
+[Unit]
+Description=SSL Doctor platform server (API, dashboard, scheduler, embedded PostgreSQL)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ssldoctor
+ExecStart=/opt/ssl-doctor/ssldoctor-server/ssldoctor-server run --data /var/lib/ssldoctor-server
+Restart=always
+RestartSec=5
+TimeoutStopSec=60
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/ssldoctor-server
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

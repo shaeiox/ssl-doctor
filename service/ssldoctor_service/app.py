@@ -20,12 +20,13 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from ssl_doctor import contract
 
+from . import audit
 from .db import Database, sha256_hex
 from .monitor import (IntervalTooShort, dispatch, enqueue_scan, evaluate,
                       set_monitoring)
@@ -35,8 +36,8 @@ MAX_POLL_SECONDS = 30.0
 
 # role -> permissions (enforced centrally in `require`)
 PERMISSIONS = {
-    "owner": {"view", "scan", "targets", "agents", "members", "settings"},
-    "admin": {"view", "scan", "targets", "agents", "members", "settings"},
+    "owner": {"view", "scan", "targets", "agents", "members", "settings", "audit"},
+    "admin": {"view", "scan", "targets", "agents", "members", "settings", "audit"},
     "engineer": {"view", "scan", "targets"},
     "viewer": {"view"},
 }
@@ -47,6 +48,9 @@ class Member:
     token_id: UUID
     org_id: UUID
     role: str
+    user_id: Optional[UUID] = None
+    actor: str = ""                 # audit identity: user:<id>
+    ip: Optional[str] = None        # request source address (audit)
 
 
 @dataclass
@@ -91,6 +95,36 @@ class ChannelIn(BaseModel):
     secret: Optional[str] = Field(None, min_length=16, max_length=200)
 
 
+class MemberIn(BaseModel):
+    email: str = Field(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+$")
+    role: str = Field(pattern="^(owner|admin|engineer|viewer)$")
+    display_name: Optional[str] = Field(None, max_length=200)
+
+
+class RoleIn(BaseModel):
+    role: str = Field(pattern="^(owner|admin|engineer|viewer)$")
+
+
+class TokenIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class SSOConfigIn(BaseModel):
+    protocol: str = Field(pattern="^(oidc|saml)$")
+    enforced: bool = False
+    default_role: str = Field("viewer", pattern="^(admin|engineer|viewer)$")
+    jit_provisioning: bool = False
+    oidc_issuer: Optional[str] = None
+    oidc_client_id: Optional[str] = None
+    oidc_client_secret: Optional[str] = None
+    oidc_authorize_url: Optional[str] = None
+    oidc_token_url: Optional[str] = None
+    oidc_jwks_url: Optional[str] = None
+    saml_idp_entity_id: Optional[str] = None
+    saml_idp_sso_url: Optional[str] = None
+    saml_idp_cert: Optional[str] = None
+
+
 class EnrollIn(BaseModel):
     token: str = Field(min_length=16, max_length=200)
 
@@ -119,13 +153,18 @@ def create_app(db: Database) -> FastAPI:
         with db.system() as conn:
             r = conn.execute("SELECT * FROM app.auth_api_token(%s)",
                              (sha256_hex(token),)).fetchone()
-        return Member(r["token_id"], r["org_id"], r["role"]) if r else None
+        return Member(r["token_id"], r["org_id"], r["role"], r["user_id"],
+                      actor=f"user:{r['user_id']}") if r else None
 
-    def member(authorization: Optional[str] = Header(None)) -> Member:
+    def member(request: Request, authorization: Optional[str] = Header(None)) -> Member:
         m = resolve_member(_bearer(authorization))
         if not m:
             raise HTTPException(401, "invalid or revoked token")
+        m.ip = request.client.host if request.client else None
         return m
+
+    def log(conn, m: Member, action: str, obj: Optional[str] = None, **details):
+        audit.record(conn, m.org_id, m.actor, action, obj, m.ip, details)
 
     def require(permission: str):
         def dep(m: Member = Depends(member)) -> Member:
@@ -160,6 +199,7 @@ def create_app(db: Database) -> FastAPI:
             conn.execute("INSERT INTO app.enrollment_tokens (org_id, token_hash, agent_role, "
                          "agent_name, expires_at) VALUES (%s, %s, %s, %s, %s)",
                          (m.org_id, sha256_hex(token), body.role, body.name, expires))
+            log(conn, m, "agent.enrollment_token", f"enrollment:{body.name}", role=body.role)
         return {"token": token, "expires_at": expires.isoformat(), "role": body.role}
 
     @app.get("/v1/agents")
@@ -176,8 +216,9 @@ def create_app(db: Database) -> FastAPI:
             r = conn.execute("UPDATE app.agents SET revoked_at = coalesce(revoked_at, now()) "
                              "WHERE id = %s AND org_id = %s RETURNING id, revoked_at",
                              (agent_id, m.org_id)).fetchone()
-        if not r:
-            raise HTTPException(404, "agent not found")
+            if not r:
+                raise HTTPException(404, "agent not found")
+            log(conn, m, "agent.revoke", f"agent:{agent_id}")
         return _row(r)
 
     # ---------------- targets
@@ -194,6 +235,7 @@ def create_app(db: Database) -> FastAPI:
             for aid in body.agent_ids:
                 conn.execute("INSERT INTO app.target_agents (org_id, target_id, agent_id) "
                              "VALUES (%s, %s, %s)", (m.org_id, t["id"], aid))
+            log(conn, m, "target.create", f"target:{t['id']}", host=body.host, port=body.port)
         return {**_row(t), "agent_ids": [str(a) for a in body.agent_ids]}
 
     def _target(conn, target_id: UUID, org_id: UUID):
@@ -228,6 +270,7 @@ def create_app(db: Database) -> FastAPI:
                 jobs = enqueue_scan(conn, m.org_id, target_id)
                 if not jobs:
                     raise HTTPException(409, "target has no active agents assigned")
+                log(conn, m, "scan.start", f"target:{target_id}", jobs=len(jobs))
                 return [_row(j) for j in jobs]
             else:
                 assignments = [(a.agent_id, a.kind) for a in body.assignments]
@@ -240,6 +283,7 @@ def create_app(db: Database) -> FastAPI:
                                  "VALUES (%s, %s, %s, %s) RETURNING *",
                                  (m.org_id, target_id, aid, kind)).fetchone()
                     for aid, kind in assignments]
+            log(conn, m, "scan.start", f"target:{target_id}", jobs=len(jobs))
         return [_row(j) for j in jobs]
 
     @app.get("/v1/jobs/{job_id}")
@@ -294,6 +338,7 @@ def create_app(db: Database) -> FastAPI:
                m: Member = Depends(require("view"))):
         with db.org(m.org_id) as conn:
             doc = _result(conn, result_id, m.org_id)["document"]
+            log(conn, m, "report.export", f"result:{result_id}", format=format)
         if format == "json":
             return Response(json.dumps(doc, indent=2), media_type="application/json",
                             headers={"Content-Disposition":
@@ -315,6 +360,9 @@ def create_app(db: Database) -> FastAPI:
                                    body.expiry_threshold_days, datetime.now(timezone.utc))
             except IntervalTooShort as exc:
                 raise HTTPException(422, str(exc))
+            log(conn, m, "target.monitoring", f"target:{target_id}",
+                interval_seconds=body.interval_seconds,
+                expiry_threshold_days=body.expiry_threshold_days)
         return _row(r)
 
     @app.get("/v1/targets/{target_id}/alerts")
@@ -338,6 +386,7 @@ def create_app(db: Database) -> FastAPI:
                              "secret) VALUES (%s, %s, %s, %s) RETURNING id, kind, address, "
                              "created_at", (m.org_id, body.kind, body.address,
                                             body.secret)).fetchone()
+            log(conn, m, "channel.create", f"channel:{r['id']}", kind=body.kind)
         return _row(r)
 
     @app.get("/v1/channels")
@@ -356,19 +405,160 @@ def create_app(db: Database) -> FastAPI:
                 raise HTTPException(409, "channel has delivery history; it cannot be deleted")
             r = conn.execute("DELETE FROM app.notification_channels WHERE id = %s AND "
                              "org_id = %s RETURNING id", (channel_id, m.org_id)).fetchone()
-        if not r:
-            raise HTTPException(404, "channel not found")
+            if not r:
+                raise HTTPException(404, "channel not found")
+            log(conn, m, "channel.delete", f"channel:{channel_id}")
         return Response(status_code=204)
+
+    # ---------------- members & API tokens
+    def _member_row(u):
+        return _row({k: u[k] for k in ("id", "email", "display_name", "role", "active",
+                                       "external_id", "created_at", "removed_at")})
+
+    def _owners(conn, org_id):
+        return conn.execute("SELECT count(*) AS n FROM app.users WHERE org_id = %s AND "
+                            "role = 'owner' AND active", (org_id,)).fetchone()["n"]
+
+    @app.get("/v1/members")
+    def list_members(m: Member = Depends(require("view"))):
+        with db.org(m.org_id) as conn:
+            rows = conn.execute("SELECT * FROM app.users WHERE org_id = %s ORDER BY "
+                                "created_at", (m.org_id,)).fetchall()
+        return [_member_row(u) for u in rows]
+
+    @app.post("/v1/members", status_code=201)
+    def add_member(body: MemberIn, m: Member = Depends(require("members"))):
+        if body.role == "owner" and m.role != "owner":
+            raise HTTPException(403, "only owners may grant the owner role")
+        import psycopg
+        with db.org(m.org_id) as conn:
+            try:
+                u = conn.execute("INSERT INTO app.users (org_id, email, display_name, role) "
+                                 "VALUES (%s, %s, %s, %s) RETURNING *",
+                                 (m.org_id, body.email, body.display_name, body.role)).fetchone()
+            except psycopg.errors.UniqueViolation:
+                raise HTTPException(409, "a member with this email already exists")
+            log(conn, m, "member.create", f"user:{u['id']}", email=body.email, role=body.role)
+        return _member_row(u)
+
+    @app.patch("/v1/members/{user_id}")
+    def change_role(user_id: UUID, body: RoleIn, m: Member = Depends(require("members"))):
+        with db.org(m.org_id) as conn:
+            u = conn.execute("SELECT * FROM app.users WHERE id = %s AND org_id = %s AND "
+                             "active FOR UPDATE", (user_id, m.org_id)).fetchone()
+            if not u:
+                raise HTTPException(404, "member not found")
+            if "owner" in (body.role, u["role"]) and m.role != "owner":
+                raise HTTPException(403, "only owners may grant or remove the owner role")
+            if u["role"] == "owner" and body.role != "owner" and _owners(conn, m.org_id) <= 1:
+                raise HTTPException(409, "an organization must keep at least one owner")
+            u = conn.execute("UPDATE app.users SET role = %s WHERE id = %s RETURNING *",
+                             (body.role, user_id)).fetchone()
+            log(conn, m, "member.role_change", f"user:{user_id}", role=body.role)
+        return _member_row(u)
+
+    @app.delete("/v1/members/{user_id}", status_code=204)
+    def remove_member(user_id: UUID, m: Member = Depends(require("members"))):
+        from .identity import deactivate_user
+        with db.org(m.org_id) as conn:
+            u = conn.execute("SELECT role FROM app.users WHERE id = %s AND org_id = %s AND "
+                             "active", (user_id, m.org_id)).fetchone()
+            if not u:
+                raise HTTPException(404, "member not found")
+            if u["role"] == "owner" and (m.role != "owner" or _owners(conn, m.org_id) <= 1):
+                raise HTTPException(409 if m.role == "owner" else 403,
+                                    "cannot remove the last owner" if m.role == "owner"
+                                    else "only owners may remove an owner")
+            deactivate_user(conn, m.org_id, user_id)
+            log(conn, m, "member.remove", f"user:{user_id}")
+        return Response(status_code=204)
+
+    @app.post("/v1/tokens", status_code=201)
+    def create_token(body: TokenIn, m: Member = Depends(require("view"))):
+        """A personal API token for the caller (inherits the caller's role)."""
+        token = secrets.token_urlsafe(32)
+        with db.org(m.org_id) as conn:
+            r = conn.execute("INSERT INTO app.api_tokens (org_id, name, token_hash, role, "
+                             "user_id) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                             (m.org_id, body.name, sha256_hex(token), m.role,
+                              m.user_id)).fetchone()
+        return {"id": str(r["id"]), "token": token}
+
+    # ---------------- single sign-on configuration (owners/admins)
+    @app.put("/v1/sso")
+    def put_sso(body: SSOConfigIn, m: Member = Depends(require("settings"))):
+        need = (["oidc_issuer", "oidc_client_id", "oidc_client_secret", "oidc_authorize_url",
+                 "oidc_token_url", "oidc_jwks_url"] if body.protocol == "oidc" else
+                ["saml_idp_entity_id", "saml_idp_sso_url", "saml_idp_cert"])
+        missing = [f for f in need if not getattr(body, f)]
+        if missing:
+            raise HTTPException(422, f"missing for {body.protocol}: {', '.join(missing)}")
+        cols = list(SSOConfigIn.model_fields)
+        with db.org(m.org_id) as conn:
+            before = conn.execute("SELECT enforced FROM app.sso_configs WHERE org_id = %s",
+                                  (m.org_id,)).fetchone()
+            conn.execute(
+                f"INSERT INTO app.sso_configs (org_id, {', '.join(cols)}) VALUES "
+                f"(%s, {', '.join(['%s'] * len(cols))}) ON CONFLICT (org_id) DO UPDATE SET "
+                + ", ".join(f"{c} = EXCLUDED.{c}" for c in cols) + ", updated_at = now()",
+                [m.org_id] + [getattr(body, c) for c in cols])
+            log(conn, m, "sso.configure", "sso", protocol=body.protocol)
+            if (before["enforced"] if before else False) != body.enforced:
+                log(conn, m, "sso.enforce", "sso", enforced=body.enforced)
+        return {"protocol": body.protocol, "enforced": body.enforced}
+
+    @app.post("/v1/sso/scim-token", status_code=201)
+    def scim_token(m: Member = Depends(require("settings"))):
+        token = secrets.token_urlsafe(32)
+        with db.org(m.org_id) as conn:
+            r = conn.execute("UPDATE app.sso_configs SET scim_token_hash = %s WHERE org_id = %s "
+                             "RETURNING org_id", (sha256_hex(token), m.org_id)).fetchone()
+            if not r:
+                raise HTTPException(409, "configure single sign-on first")
+            log(conn, m, "sso.configure", "scim", change="scim-token-rotated")
+        return {"token": token}
+
+    from .scim import mount_scim
+    mount_scim(app, db)
+
+    # ---------------- audit log (owners/admins)
+    @app.get("/v1/audit")
+    def export_audit(since: datetime = Query(...), until: datetime = Query(...),
+                     m: Member = Depends(require("audit"))):
+        """JSON Lines export of the org's audit entries in [since, until)."""
+        with db.org(m.org_id) as conn:
+            rows = conn.execute("SELECT seq, entry, prev_hash, hash FROM app.audit_log "
+                                "WHERE org_id = %s AND created_at >= %s AND created_at < %s "
+                                "ORDER BY seq", (m.org_id, since, until)).fetchall()
+            log(conn, m, "audit.export", None, since=since.isoformat(),
+                until=until.isoformat(), entries=len(rows))
+        body = "".join(json.dumps({"seq": r["seq"], "entry": r["entry"],
+                                   "prev_hash": r["prev_hash"], "hash": r["hash"]}) + "\n"
+                       for r in rows)
+        return Response(body, media_type="application/x-ndjson", headers={
+            "Content-Disposition": 'attachment; filename="ssl-doctor-audit.jsonl"'})
+
+    @app.get("/v1/audit/verify")
+    def verify_audit(m: Member = Depends(require("audit"))):
+        with db.org(m.org_id) as conn:
+            ok, bad, reason = audit.verify_org(conn, m.org_id)
+        return {"ok": ok, "first_bad_entry": bad, "detail": reason}
 
     # ---------------- agent protocol
     @app.post("/v1/agent/enroll", status_code=201)
-    def enroll(body: EnrollIn):
+    def enroll(body: EnrollIn, request: Request):
         credential = secrets.token_urlsafe(32)
         with db.system() as conn:
             r = conn.execute("SELECT * FROM app.enroll_agent(%s, %s)",
                              (sha256_hex(body.token), sha256_hex(credential))).fetchone()
-        if not r:
-            raise HTTPException(403, "enrollment token invalid, expired or already used")
+            if not r:
+                raise HTTPException(403, "enrollment token invalid, expired or already used")
+            # same transaction: scope to the agent's org and record the enrollment
+            conn.execute("SELECT set_config('app.org_id', %s, true)", (str(r["org_id"]),))
+            audit.record(conn, r["org_id"], f"agent:{r['agent_id']}", "agent.enroll",
+                         f"agent:{r['agent_id']}",
+                         request.client.host if request.client else None,
+                         {"role": r["role"], "name": r["name"]})
         return {"agent_id": str(r["agent_id"]), "org_id": str(r["org_id"]),
                 "role": r["role"], "name": r["name"], "credential": credential}
 

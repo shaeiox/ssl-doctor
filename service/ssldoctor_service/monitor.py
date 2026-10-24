@@ -30,6 +30,7 @@ from email.message import EmailMessage
 from typing import Dict, List, Optional
 from uuid import UUID
 
+from . import audit
 from .db import Database
 
 STATEFUL = ("expiry_soon", "expired", "chain_incomplete", "endpoint_inconsistent")
@@ -88,7 +89,10 @@ def schedule(db: Database, now: datetime) -> int:
                 "monitor_interval_seconds IS NOT NULL AND next_scan_at <= %s "
                 "FOR UPDATE SKIP LOCKED", (org_id, now)).fetchall()
             for t in due:
-                jobs += len(enqueue_scan(conn, org_id, t["id"]))
+                created = enqueue_scan(conn, org_id, t["id"])
+                jobs += len(created)
+                audit.record(conn, org_id, "system", "scan.start", f"target:{t['id']}",
+                             None, {"jobs": len(created), "trigger": "schedule"}, now=now)
                 conn.execute("UPDATE app.targets SET next_scan_at = %s WHERE id = %s",
                              (now + timedelta(seconds=t["monitor_interval_seconds"]), t["id"]))
     return jobs

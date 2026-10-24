@@ -325,6 +325,9 @@ class ServerSession:
         self.last_remote_cert_sha256: str = ""
         self.nginx_cert_path: str = ""
         self.nginx_key_path: str = ""
+        # nginx invocation for config dumps; override for non-default installs,
+        # e.g. SSLDOCTOR_NGINX_CMD="/usr/local/nginx/sbin/nginx -p /usr/local/nginx"
+        self.nginx_cmd: str = os.environ.get("SSLDOCTOR_NGINX_CMD", "nginx")
 
     # -- plumbing ----------------------------------------------------------
     def _base_argv(self) -> List[str]:
@@ -601,7 +604,8 @@ class ServerSession:
         if (err := self._need_conn()):
             return [err]
         rc, so, se, fatal = self.run(
-            "(nginx -T 2>/dev/null | grep -iE 'server_name|listen|ssl_certificate' | head -n 40; "
+            f"({self.nginx_cmd} -T 2>/dev/null | grep -iE 'server_name|listen|ssl_certificate' "
+            "| head -n 40; "
             "apache2ctl -S 2>/dev/null | head -n 30) ; "
             "grep -rniE 'ssl_certificate|SSLS.*ertificate' /etc/nginx/conf.d /etc/nginx/sites-enabled "
             "/etc/apache2/sites-enabled /etc/httpd/conf.d 2>/dev/null | head -n 30")
@@ -654,7 +658,7 @@ class ServerSession:
         out: List[F.Finding] = []
         sources = ""
         # 1. try full dump (needs privileged account on most systems)
-        rc, so, se, fatal = self.run("nginx -T 2>/dev/null")
+        rc, so, se, fatal = self.run(f"{self.nginx_cmd} -T 2>/dev/null")
         if not fatal and rc == 0 and so.strip():
             sources = so
             used = "nginx -T (full effective configuration)"

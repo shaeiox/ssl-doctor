@@ -8,8 +8,9 @@ import pgfixture
 # forces the question "does it carry org_id and RLS?".
 TENANT_TABLES = ["organizations", "api_tokens", "enrollment_tokens", "agents", "targets",
                  "target_agents", "scan_jobs", "scan_results",
-                 "notification_channels", "alert_state", "alerts"]
-MIGRATIONS = ["0001_init.sql", "0002_monitoring.sql"]
+                 "notification_channels", "alert_state", "alerts", "audit_log",
+                 "users", "sessions", "sso_configs", "sso_states"]
+MIGRATIONS = ["0001_init.sql", "0002_monitoring.sql", "0003_audit.sql", "0004_identity.sql"]
 
 
 @unittest.skipUnless(pgfixture.available(), "PostgreSQL binaries not available")
