@@ -11,4 +11,5 @@
 - server-ssh-nginx → Read-only SSH, nginx vhost resolution, chain linkage, configured-vs-presented   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/server-ssh-nginx.md
 - commands-reference → Actual executed commands documented (local/remote, traced to source)   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/commands-reference.md
 - evidence-based-probes → Endpoint states, comparable-only comparison, SNI observations, probe reconciliation, cause limitations   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/evidence-based-probes.md
+- protocol-policy-evidence → Relaxed vs default cipher policy, per-version support classes, client-limited probes, contract 1.4   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/protocol-policy-evidence.md
 - tls-handshake-attribution → failure_kind classification, stall retry, probe address pinning, network-vs-server attribution   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/tls-handshake-attribution.md

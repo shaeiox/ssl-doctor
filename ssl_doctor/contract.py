@@ -21,8 +21,9 @@ import re
 import urllib.parse
 from typing import Any, Dict, Iterable, List
 
-SCHEMA_VERSION = "1.3"   # 1.1: facts block; 1.2: failure classification;
-                         # 1.3: cause limitations, observation classes, endpoint state
+SCHEMA_VERSION = "1.4"   # 1.1: facts block; 1.2: failure classification;
+                         # 1.3: cause limitations, observation classes, endpoint state;
+                         # 1.4: legacy-protocol acceptance classes
 SUPPORTED_MAJOR = 1
 
 # Machine-readable classification of a failed probe.  "What went wrong" is
@@ -54,6 +55,17 @@ OBSERVATIONS: Dict[str, str] = {
         "the certificate served without SNI could not be obtained",
     "probe-inconclusive":
         "at least one protocol-version probe produced no definite result",
+    "legacy-accepted-default":
+        "deprecated TLS versions were accepted with the default cipher policy",
+    "legacy-accepted-relaxed-only":
+        "deprecated TLS versions were accepted only when legacy cipher suites were "
+        "offered; a default-configured client is refused by the server",
+    "legacy-accepted-unverified":
+        "deprecated TLS versions answered only under a relaxed cipher policy and the "
+        "default-policy probe could not establish ordinary-client compatibility",
+    "tls12-relaxed-only":
+        "TLS 1.2 answers only when legacy cipher suites are offered, so a "
+        "default-configured client is refused",
 }
 
 # Endpoint probe states (see netchecks._probe_endpoint).
@@ -116,6 +128,8 @@ _SCOPE = ["local", "remote-net", "server"]
 _CHECK_RE = r"^[a-z]+(\.[a-z0-9_]+)+$"
 _FAILURE_KINDS = [""] + list(FAILURE_KINDS)
 _OBSERVATIONS = [""] + list(OBSERVATIONS)
+_PROBE_SUPPORT = ["", "default", "relaxed-only", "relaxed-only-unverified",
+                  "rejected", "inconclusive"]
 
 SCHEMA: Dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -213,6 +227,15 @@ SCHEMA: Dict[str, Any] = {
                 "probe_policy": {"type": ["object", "null"], "properties": {
                     "negotiated": {"type": "string"},
                     "relaxed_versions": {"type": "array", "items": {"type": "string"}},
+                    # 1.4: which policy actually proved each version
+                    "support": {"type": "object", "properties": {
+                        "TLS 1.0": {"type": "string", "enum": _PROBE_SUPPORT},
+                        "TLS 1.1": {"type": "string", "enum": _PROBE_SUPPORT},
+                        "TLS 1.2": {"type": "string", "enum": _PROBE_SUPPORT},
+                        "TLS 1.3": {"type": "string", "enum": _PROBE_SUPPORT},
+                    }},
+                    "confirmed_legacy": {"type": "array", "items": {"type": "string"}},
+                    "unverified_legacy": {"type": "array", "items": {"type": "string"}},
                 }},
             },
         },

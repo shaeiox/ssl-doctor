@@ -1,9 +1,10 @@
 # Findings contract (`findings/1.x`)
 
 Every JSON report, agent upload and service export is a findings document.
-Current schema: [`schemas/findings-1.3.schema.json`](../schemas/findings-1.3.schema.json)
+Current schema: [`schemas/findings-1.4.schema.json`](../schemas/findings-1.4.schema.json)
 (source of truth: `ssl_doctor/contract.py`). Earlier minor versions stay
-published: [`findings-1.2`](../schemas/findings-1.2.schema.json),
+published: [`findings-1.3`](../schemas/findings-1.3.schema.json),
+[`findings-1.2`](../schemas/findings-1.2.schema.json),
 [`findings-1.1`](../schemas/findings-1.1.schema.json),
 [`findings-1.0`](../schemas/findings-1.0.schema.json).
 
@@ -13,6 +14,7 @@ published: [`findings-1.2`](../schemas/findings-1.2.schema.json),
 | 1.1 | Optional `facts` block: `leaf` (`sha256`, `subject`, `not_after`) and `chain_status` (`complete`/`incomplete`/`broken`/`unread`). Monitoring uses it for drift and expiry |
 | 1.2 | Optional `failure_kind` on every finding, and `handshake_ip` / `handshake_failure` in `facts`. Separates *what went wrong* from the finding status, so a stall is never read as a protocol/cipher rejection |
 | 1.3 | Optional `observation` on findings (what was *seen*, not a failure), `limitations` on every cause (where its evidence is incomplete), and `endpoints` / `endpoint_comparison` / `probe_policy` in `facts`. Lets the diagnosis separate observations from defects and state its confidence honestly |
+| 1.4 | Per-version probe classes in `facts.probe_policy.support` (`default`, `relaxed-only`, `relaxed-only-unverified`, `rejected`, `inconclusive`) plus `confirmed_legacy` / `unverified_legacy`, and three new observations that say which policy actually proved deprecated-TLS acceptance. A relaxed-policy handshake can no longer be reported as ordinary-client support |
 
 ## Versioning
 
@@ -54,7 +56,11 @@ into a configuration defect on its own. `""` means "nothing notable observed".
 | `endpoint-comparison-inconclusive` | `tls.multiip` | fewer than two endpoints yielded comparable certificate evidence |
 | `sni-certificate-differs` | `tls.sni` | a different certificate is served when the client sends no SNI (normal for name-based virtual hosting) |
 | `sni-without-probe-failed` | `tls.sni` | the certificate served without SNI could not be obtained |
-| `probe-inconclusive` | `tls.protocols` | at least one protocol-version probe produced no definite result |
+| `probe-inconclusive` | `tls.protocols` | at least one protocol-version probe produced no definite result and no stronger class applied |
+| `legacy-accepted-default` | `tls.protocols` | a deprecated version (TLS 1.0/1.1) was accepted with the default cipher policy, so an ordinary client can negotiate it |
+| `legacy-accepted-relaxed-only` | `tls.protocols` | a deprecated version answered only when legacy cipher suites were offered, and the default-policy probe was refused: the server still speaks it, but a default-configured client is rejected |
+| `legacy-accepted-unverified` | `tls.protocols` | a deprecated version answered only under the relaxed policy and the default-policy probe could not produce a result (client limitation or timeout), so ordinary-client compatibility is unknown |
+| `tls12-relaxed-only` | `tls.protocols` | TLS 1.2 answers only when legacy cipher suites are offered, and the default-policy probe was refused: default-configured clients cannot negotiate it |
 
 ## Cause limitations (`limitations`)
 
@@ -62,6 +68,21 @@ Every cause lists the material gaps in its evidence, for example "only the first
 endpoints returned by DNS were compared" or "legacy acceptance was probed with a
 relaxed cipher policy". A cause with no limitations is one that rests on a
 direct, complete measurement.
+
+## Protocol probe policy (`facts.probe_policy`)
+
+| Key | Meaning |
+|---|---|
+| `negotiated` | the protocol the primary handshake negotiated, if any |
+| `relaxed_versions` | versions that needed `ALL:@SECLEVEL=0` to answer |
+| `support` | per version (`TLS 1.0` … `TLS 1.3`): `default`, `relaxed-only`, `relaxed-only-unverified`, `rejected`, `inconclusive` |
+| `confirmed_legacy` | deprecated versions accepted under the default policy (`default` only) |
+| `unverified_legacy` | deprecated versions accepted under the relaxed policy whose default-policy probe gave no result |
+
+`default` is the only class that establishes ordinary-client interoperability. A
+version the primary handshake negotiated is never reported as `rejected`. A probe
+the local client could not perform (no applicable protocol or cipher in the
+default context) is `relaxed-only-unverified` or `inconclusive`, never `rejected`.
 
 ## Endpoint states (`facts.endpoints`)
 

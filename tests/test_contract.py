@@ -144,7 +144,30 @@ class FailureKindTests(unittest.TestCase):
                       ["properties"])
         self.assertIn("limitations", contract.SCHEMA["properties"]["diagnosis"]
                       ["properties"]["causes"]["items"]["properties"])
-        self.assertEqual(contract.SCHEMA_VERSION, "1.3")
+        self.assertEqual(contract.SCHEMA_VERSION, "1.4")
+
+    def test_protocol_evidence_classes_are_declared(self):
+        """1.4 declares which policy proved each version, and the legacy classes."""
+        props = contract.SCHEMA["properties"]["findings"]["items"]["properties"]
+        for value in ("legacy-accepted-default", "legacy-accepted-relaxed-only",
+                      "legacy-accepted-unverified", "tls12-relaxed-only",
+                      "probe-inconclusive"):
+            with self.subTest(observation=value):
+                self.assertIn(value, props["observation"]["enum"])
+        policy = contract.SCHEMA["properties"]["facts"]["properties"]["probe_policy"]
+        for key in ("support", "confirmed_legacy", "unverified_legacy"):
+            self.assertIn(key, policy["properties"])
+        doc = self.doc()
+        doc["facts"] = {"probe_policy": {"support": {"TLS 1.0": "relaxed-only",
+                                                     "TLS 1.2": "default"},
+                                         "confirmed_legacy": ["TLS 1.2"],
+                                         "unverified_legacy": []}}
+        self.assertEqual(contract.validate(doc), [])
+        doc["facts"]["probe_policy"]["support"]["TLS 1.0"] = "probably"
+        self.assertTrue(contract.validate(doc))
+        # 1.3 stays published without the new classes
+        with open(os.path.join(ROOT, "schemas", "findings-1.3.schema.json")) as fh:
+            self.assertNotIn("tls12-relaxed-only", json.dumps(json.load(fh)))
 
 
 @unittest.skipUnless(openssl_available(), "openssl binary not available")

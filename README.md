@@ -61,6 +61,17 @@ relaxed `ALL:@SECLEVEL=0` policy or with default settings, and an inconclusive
 probe is reported as inconclusive - never as a refusal - while a version the
 primary handshake negotiated is never reported as unsupported.
 
+Deprecated TLS 1.0/1.1 are always probed a second time with default settings,
+because a handshake with `ALL:@SECLEVEL=0` only shows that the server's stack can
+still negotiate the version when legacy cipher suites are offered - not that an
+ordinary client can. `facts.probe_policy.support` records `default`,
+`relaxed-only`, `relaxed-only-unverified`, `rejected` or `inconclusive` per
+version. `relaxed-only` is a warning with the policy limitation attached,
+`relaxed-only-unverified` is a warning plus a diagnosis note and no claim about
+server support, and a probe this client could not perform (no protocols or
+ciphers available in its default context) is reported as a limitation of the
+test, never as a server refusal.
+
 Handshake failures carry a machine-readable `failure_kind` (`connect-timeout`,
 `negotiation-timeout`, `tls-alert`, `network-error`). A timeout is retried once:
 if the second attempt completes, the finding is `WARNING` and the diagnosis says

@@ -595,6 +595,23 @@ ACCEPTED = "accepted"
 REFUSED = "refused"
 INCONCLUSIVE = "inconclusive"
 UNSUPPORTED = "unsupported"
+# The *client* could not offer this version (build or security policy), so no
+# statement about the server is possible.  Kept apart from "refused", which
+# means the peer answered and said no.
+CLIENT_LIMITED = "client-limited"
+
+_LOCAL_LIMITATION_MARKERS = (
+    "no protocols available", "no ciphers available", "no cipher can be selected",
+    "unsupported protocol", "ca md too weak", "unknown protocol",
+)
+
+
+def _is_local_probe_limitation(exc: BaseException) -> bool:
+    """True when the failure came from this client before the peer answered."""
+    msg = str(exc).lower()
+    if "alert" in msg:            # a TLS alert is the peer's answer, not our limit
+        return False
+    return any(marker in msg for marker in _LOCAL_LIMITATION_MARKERS)
 
 
 def _probe_version(host: str, port: int, sni: Optional[str], label: str,
@@ -603,8 +620,8 @@ def _probe_version(host: str, port: int, sni: Optional[str], label: str,
     """Probe one pinned protocol version.
 
     Returns (state, detail) where state is accepted / refused / inconclusive /
-    unsupported.  A timeout or a local limitation is *inconclusive*: it says
-    nothing about whether the server supports the version.
+    unsupported / client-limited.  A timeout says nothing about the server; a
+    client limitation says nothing at all beyond "this client cannot test it".
     """
     if not hasattr(ssl, "TLSVersion"):
         return UNSUPPORTED, "this Python/OpenSSL build cannot pin protocol versions"
@@ -612,7 +629,7 @@ def _probe_version(host: str, port: int, sni: Optional[str], label: str,
         ctx = _make_context(verify=False, min_v=version, max_v=version,
                             ciphers=_RELAXED_CIPHER_POLICY if relaxed else None)
     except Exception as exc:      # noqa: BLE001 - a local limitation, not a verdict
-        return INCONCLUSIVE, f"local probe error: {type(exc).__name__}: {exc}"[:120]
+        return CLIENT_LIMITED, f"local probe error: {type(exc).__name__}: {exc}"[:120]
     try:
         s = _handshake(host, port, sni, ctx, timeout, connect_ip=connect_ip)
         negotiated = s.version() or "?"
@@ -621,23 +638,45 @@ def _probe_version(host: str, port: int, sni: Optional[str], label: str,
     except (_ConnectTimeout, _NegotiationTimeout) as exc:
         return INCONCLUSIVE, f"probe timed out: {exc}"
     except ssl.SSLError as exc:
-        return REFUSED, str(exc).splitlines()[0][:80]
+        first = str(exc).splitlines()[0][:80]
+        if _is_local_probe_limitation(exc):
+            return CLIENT_LIMITED, first
+        return REFUSED, first
     except OSError as exc:
         return INCONCLUSIVE, f"network error: {str(exc).splitlines()[0][:100]}"
     except Exception as exc:                      # noqa: BLE001 - stay inconclusive
         return INCONCLUSIVE, f"local probe error: {type(exc).__name__}: {exc}"[:120]
 
 
+# Per-version support classification (facts["probe_policy"]["support"]).
+SUPPORT_DEFAULT = "default"            # accepted with the default cipher policy
+SUPPORT_RELAXED_ONLY = "relaxed-only"  # accepted only when legacy suites are offered
+SUPPORT_UNVERIFIED = "relaxed-only-unverified"  # accepted relaxed; ordinary clients untestable
+SUPPORT_REJECTED = "rejected"
+SUPPORT_INCONCLUSIVE = "inconclusive"
+
+_LEGACY_VERSIONS = ("TLS 1.0", "TLS 1.1")
+
+
 def check_protocol_matrix(host: str, port: int, sni: Optional[str],
                           timeout: float, connect_ip: Optional[str] = None,
                           negotiated: Optional[str] = None,
                           facts: Optional[Dict] = None) -> F.Finding:
-    """Probe each TLS protocol version individually and report it honestly.
+    """Probe each TLS protocol version and separate what was actually proven.
 
-    `negotiated` is the protocol the primary handshake established.  A version
-    that the primary handshake negotiated is never reported as refused or
-    unsupported; if its own probe is inconclusive, it stays inconclusive and
-    cites the primary success.
+    Two questions are answered per version and kept apart:
+
+    * can the server negotiate it at all (the probe under the version's own
+      policy, relaxed cipher suites for legacy versions), and
+    * can an ordinary, default-configured client negotiate it (the same probe
+      with this client's default security settings).
+
+    Only the second establishes "legacy TLS is enabled for ordinary clients".
+    A relaxed-only acceptance is reported as limited evidence, not as a verdict
+    about normal clients.
+
+    `negotiated` is the protocol the primary handshake established; a version it
+    proved is never reported as refused or unsupported.
     """
     target = f"{host}:{port}"
     facts = facts if facts is not None else {}
@@ -653,17 +692,21 @@ def check_protocol_matrix(host: str, port: int, sni: Optional[str],
                 ("TLS 1.3", ssl.TLSVersion.TLSv1_3, False)]
     primary_label = _VERSION_LABELS.get(negotiated or "", "")
     started = time.monotonic()
-    budget = timeout * PROBE_BUDGET_FACTOR * len(versions)
-    rows, accepted_versions, refused_versions = [], [], []
-    inconclusive_versions, relaxed_accepted = [], []
-    relaxed_used = [label for label, _v, relaxed in versions if relaxed]
+    rows: List[str] = []
+    support: Dict[str, str] = {}
+    refused_versions: List[str] = []
+    inconclusive_versions: List[str] = []
+    limited_versions: List[str] = []
     attempts = 0
 
     def attempts_left() -> bool:
-        return attempts < PROBE_BUDGET_FACTOR * len(versions) and \
-            (time.monotonic() - started) < budget
+        return attempts < PROBE_BUDGET_FACTOR * (len(versions) + 3) and \
+            (time.monotonic() - started) < timeout * PROBE_BUDGET_FACTOR * \
+            (len(versions) + 3)
 
-    for label, version, relaxed in versions:
+    def attempt(label: str, version, relaxed: bool) -> Tuple[str, str, bool]:
+        """One probe, retried once when the result is inconclusive."""
+        nonlocal attempts
         attempts += 1
         state, detail = _probe_version(host, port, sni, label, version, timeout,
                                        connect_ip, relaxed)
@@ -672,101 +715,163 @@ def check_protocol_matrix(host: str, port: int, sni: Optional[str],
             attempts += 1
             retried = True
             state, detail = _probe_version(host, port, sni, label, version,
-                                            timeout, connect_ip, relaxed)
+                                           timeout, connect_ip, relaxed)
+        return state, detail, retried
 
-        if state == ACCEPTED:
-            accepted_versions.append(label)
-            if relaxed:
-                relaxed_accepted.append(label)
-                rows.append(f"{label}: accepted under relaxed cipher policy "
-                            f"({detail})" + (" after 1 retry" if retried else ""))
-            else:
-                rows.append(f"{label}: accepted ({detail})" +
-                            (" after 1 retry" if retried else ""))
-        elif state == REFUSED:
-            if label == primary_label:
-                # Contradiction: the primary handshake proved this version works.
-                inconclusive_versions.append(label)
-                rows.append(f"{label}: inconclusive - probe answered with an error "
-                            f"({detail}), although the primary handshake negotiated "
-                            f"{negotiated}")
-            else:
+    for label, version, legacy in versions:
+        # ---- 1. can the server negotiate this version at all? ----------------
+        state, detail, retried = attempt(label, version, legacy)
+        if state == REFUSED and label == primary_label:
+            # The primary handshake proved this version works; never call it refused.
+            inconclusive_versions.append(label)
+            support[label] = SUPPORT_INCONCLUSIVE
+            rows.append(f"{label}: inconclusive - probe answered with an error "
+                        f"({detail}), although the primary handshake negotiated "
+                        f"{negotiated}")
+            continue
+        if state != ACCEPTED:
+            if state == REFUSED:
                 refused_versions.append(label)
+                support[label] = SUPPORT_REJECTED
                 rows.append(f"{label}: refused ({detail})")
-        elif state == UNSUPPORTED:
-            inconclusive_versions.append(label)
-            rows.append(f"{label}: inconclusive - {detail}")
-        else:
-            inconclusive_versions.append(label)
-            cite = (f"; the primary handshake negotiated {negotiated}"
-                    if label == primary_label else "")
-            budget_note = ("" if retried else
-                           "; retry skipped: probe budget exhausted")
-            rows.append(f"{label}: inconclusive - {detail}{cite}{budget_note}")
+            elif state == CLIENT_LIMITED:
+                limited_versions.append(label)
+                support[label] = SUPPORT_INCONCLUSIVE
+                rows.append(f"{label}: inconclusive - this client could not offer the "
+                            f"version ({detail})")
+            else:
+                inconclusive_versions.append(label)
+                support[label] = SUPPORT_INCONCLUSIVE
+                cite = (f"; the primary handshake negotiated {negotiated}"
+                        if label == primary_label else "")
+                budget_note = ("" if retried else
+                               "; retry skipped: probe budget exhausted")
+                rows.append(f"{label}: inconclusive - {detail}{cite}{budget_note}")
+            continue
 
-    # TLS 1.2 can be negotiated by both policies; the default-policy probe is
-    # what tells "a modern client can connect" apart from "only a lowered
-    # security level can".
-    interop_line = ""
-    if "TLS 1.2" in accepted_versions and attempts_left():
-        state, detail = _probe_version(host, port, sni, "TLS 1.2",
-                                       ssl.TLSVersion.TLSv1_2, timeout, connect_ip,
-                                       False)
-        if state == ACCEPTED:
-            interop_line = (f"TLS 1.2: also accepted with the default cipher policy "
-                            f"({detail}) - a default-configured modern client can use it")
-        elif state == REFUSED:
-            interop_line = ("TLS 1.2: accepted only under the relaxed cipher policy - "
-                            "a default-configured modern client is refused")
-        else:
-            interop_line = (f"TLS 1.2: default-policy probe inconclusive ({detail}) - "
-                            "client interoperability not established")
-        rows.append(interop_line)
+        accepted_note = " after 1 retry" if retried else ""
+        rows.append((f"{label}: accepted under relaxed cipher policy ({detail})"
+                     if legacy else f"{label}: accepted ({detail})") + accepted_note)
+        if not legacy:
+            support[label] = SUPPORT_DEFAULT
+            continue
 
-    facts["probe_policy"] = {"negotiated": negotiated or "",
-                             "relaxed_versions": relaxed_used}
+        # ---- 2. can an ordinary, default-configured client negotiate it? -----
+        d_state, d_detail, d_retried = attempt(label, version, False)
+        if d_state == ACCEPTED:
+            support[label] = SUPPORT_DEFAULT
+            rows.append(f"{label}: also accepted with the default cipher policy "
+                        f"({d_detail}) - a default-configured modern client can "
+                        f"negotiate it")
+        elif d_state == REFUSED:
+            support[label] = SUPPORT_RELAXED_ONLY
+            rows.append(f"{label}: accepted only under the relaxed cipher policy - "
+                        f"the server refuses a default-configured client ({d_detail})")
+        else:
+            support[label] = SUPPORT_UNVERIFIED
+            rows.append(f"{label}: default-policy probe cannot establish ordinary-client "
+                        f"compatibility ({d_detail}) - acceptance shown only when "
+                        f"legacy cipher suites were offered")
+
+    legacy_confirmed = [v for v in _LEGACY_VERSIONS
+                        if support.get(v) in (SUPPORT_DEFAULT, SUPPORT_RELAXED_ONLY)]
+    legacy_unverified = [v for v in _LEGACY_VERSIONS
+                         if support.get(v) == SUPPORT_UNVERIFIED]
+    accepted_any = [v for v, st in support.items()
+                    if st in (SUPPORT_DEFAULT, SUPPORT_RELAXED_ONLY, SUPPORT_UNVERIFIED)]
+
+    facts["probe_policy"] = {
+        "negotiated": negotiated or "",
+        "relaxed_versions": [label for label, _v, legacy in versions if legacy],
+        "support": support,
+        "confirmed_legacy": legacy_confirmed,
+        "unverified_legacy": legacy_unverified,
+    }
 
     status, notes = F.PASS, []
-    if not accepted_versions:
+    if not accepted_any:
         status = F.FAIL
         notes.append("no TLS version completed a handshake")
-    elif accepted_versions == ["TLS 1.3"]:
+    elif accepted_any == ["TLS 1.3"]:
         notes.append("only TLS 1.3 supported")
-    if any(v in accepted_versions for v in ("TLS 1.0", "TLS 1.1")):
-        if status == F.PASS:
-            status = F.WARNING
-        notes.append("deprecated TLS 1.0/1.1 are accepted by the server "
-                     "(security/policy risk and a sign of legacy configuration)")
-    if "TLS 1.2" not in accepted_versions and accepted_versions:
+
+    if legacy_confirmed:
         status = F.WARNING
-        notes.append("TLS 1.2 was not accepted - many clients cannot connect")
+        confirmed_default = [v for v in legacy_confirmed
+                             if support[v] == SUPPORT_DEFAULT]
+        relaxed_only = [v for v in legacy_confirmed
+                        if support[v] == SUPPORT_RELAXED_ONLY]
+        if confirmed_default:
+            notes.append(f"deprecated {', '.join(confirmed_default)} accepted with the "
+                         f"default cipher policy - ordinary clients can negotiate "
+                         f"them (security/policy risk)")
+        if relaxed_only:
+            notes.append(f"deprecated {', '.join(relaxed_only)} accepted only when "
+                         f"legacy cipher suites are offered; a default-configured "
+                         f"client is refused (security/policy risk)")
+    elif legacy_unverified:
+        status = F.WARNING
+        notes.append(f"deprecated {', '.join(legacy_unverified)} answered a handshake "
+                     f"only when legacy cipher suites were offered; whether ordinary "
+                     f"clients can negotiate them was NOT established by this probe")
+
+    if support.get("TLS 1.2") == SUPPORT_RELAXED_ONLY:
+        status = F.WARNING
+        notes.append("TLS 1.2 is reachable only with legacy cipher suites - many "
+                     "clients with default settings cannot connect")
+    if support.get("TLS 1.2") == SUPPORT_REJECTED and accepted_any:
+        status = F.WARNING
+        notes.append("TLS 1.2 was refused - many clients cannot connect")
     if inconclusive_versions:
         if status == F.PASS:
             status = F.WARNING
         notes.append("probe inconclusive for " + ", ".join(inconclusive_versions) +
-                     " - no conclusion about server support is drawn for those "
-                     "versions")
-    if relaxed_accepted:
-        notes.append("legacy acceptance was probed with a relaxed cipher policy "
-                     "(ALL:@SECLEVEL=0); see the interoperability line for what a "
-                     "default-configured client gets")
+                     " - no conclusion about server support is drawn for those versions")
+    if limited_versions:
+        notes.append("this client could not offer " + ", ".join(limited_versions) +
+                     " - that is a limitation of the test, not a server property")
+
+    observation = ""
+    if any(support.get(v) == SUPPORT_DEFAULT for v in legacy_confirmed):
+        observation = "legacy-accepted-default"
+    elif legacy_confirmed:
+        observation = "legacy-accepted-relaxed-only"
+    elif legacy_unverified:
+        observation = "legacy-accepted-unverified"
+    elif support.get("TLS 1.2") == SUPPORT_RELAXED_ONLY:
+        observation = "tls12-relaxed-only"
+    elif inconclusive_versions:
+        observation = "probe-inconclusive"
 
     failure_kind = ""
-    if not accepted_versions:
+    if not accepted_any:
         if refused_versions and len(refused_versions) == len(versions):
             failure_kind = "no-version-accepted"
         elif len(inconclusive_versions) == len(versions):
             failure_kind = "no-version-answered"
-    observation = "probe-inconclusive" if inconclusive_versions else ""
-    if observation and not failure_kind:
+    elif inconclusive_versions and not failure_kind:
         failure_kind = "probe-inconclusive"
+
+    if status == F.PASS:
+        recommendation = ""
+    elif legacy_confirmed:
+        recommendation = ("Disable TLS 1.0/1.1 (and legacy cipher suites) and serve "
+                          "TLS 1.2 and 1.3 only.")
+    elif legacy_unverified:
+        recommendation = ("Treat legacy TLS as enabled until proven otherwise: probe "
+                          "the endpoint from a client whose default policy can still "
+                          "offer TLS 1.0/1.1, then disable them if accepted.")
+    elif support.get("TLS 1.2") == SUPPORT_RELAXED_ONLY:
+        recommendation = ("Configure TLS 1.2 to accept modern cipher suites under the "
+                          "default policy so ordinary clients can connect, then remove "
+                          "the legacy suites.")
+    else:
+        recommendation = ("Enable TLS 1.2 and 1.3 with the default cipher policy and "
+                          "investigate the versions that were refused or inconclusive.")
 
     return F.Finding(
         "tls.protocols", "TLS protocol version support", status, F.SCOPE_REMOTE_NET,
-        rows,
-        detail="; ".join(notes),
-        recommendation=("Enable TLS 1.2 (and 1.3) and disable 1.0/1.1 for a modern, "
-                        "interoperable configuration." if status != F.PASS else ""),
+        rows, detail="; ".join(notes), recommendation=recommendation,
         target=target, failure_kind=failure_kind, observation=observation)
 
 

@@ -361,25 +361,52 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
             "- install the proxy's root CA or create a bypass for this destination.")
 
     # ---- protocol hardening observations (warnings only) ----------------------
-    if matrix and matrix.status == F.WARNING:
-        limits = []
-        relaxed = [r.split(":")[0] for r in matrix.evidence
-                   if "relaxed cipher policy" in r]
-        if relaxed:
-            limits.append("legacy acceptance was probed with a relaxed cipher policy "
-                          f"(ALL:@SECLEVEL=0): {', '.join(relaxed)}")
-        if matrix.observation == "probe-inconclusive":
-            limits.append("at least one version probe produced no definite result")
+    # Which legacy conclusion the evidence supports decides the cause; the
+    # probe classes are typed so no evidence text has to be parsed here.
+    if matrix and matrix.observation == "legacy-accepted-default":
+        add("possible", "server",
+            "The server accepts deprecated TLS 1.0/1.1 with the default cipher "
+            "policy - ordinary clients can negotiate them",
+            matrix.evidence + ([matrix.detail] if matrix.detail else []),
+            matrix.recommendation, bump=50)
+    elif matrix and matrix.observation == "legacy-accepted-relaxed-only":
+        add("possible", "server",
+            "The server accepts deprecated TLS 1.0/1.1 only when legacy cipher "
+            "suites are offered - a default-configured client is refused",
+            matrix.evidence + ([matrix.detail] if matrix.detail else []),
+            matrix.recommendation, bump=50,
+            limitations=["legacy acceptance requires the relaxed cipher policy "
+                         "(ALL:@SECLEVEL=0); an ordinary client cannot reach it"])
+    elif matrix and matrix.observation == "legacy-accepted-unverified":
+        # Only a lowered security level negotiated these versions.  That says
+        # nothing about ordinary clients, so it stays a test limitation.
+        note("Deprecated TLS may be enabled: " +
+             (matrix.detail or "the server answered only under a relaxed cipher "
+                               "policy") +
+             ". Ordinary-client compatibility was not established, so no "
+             "protocol-risk cause is raised - retest from a client that can offer "
+             "these versions under its default settings.")
+    elif matrix and matrix.observation == "tls12-relaxed-only":
+        add("possible", "server",
+            "TLS 1.2 is reachable only with legacy cipher suites - a "
+            "default-configured client is refused",
+            matrix.evidence + ([matrix.detail] if matrix.detail else []),
+            matrix.recommendation, bump=50,
+            limitations=["TLS 1.2 acceptance required the relaxed cipher policy "
+                         "(ALL:@SECLEVEL=0); many default-configured clients "
+                         "cannot negotiate it"])
+    elif matrix and matrix.status == F.WARNING:
         add("possible", "server",
             "Protocol configuration carries compatibility/security risks",
             matrix.evidence + ([matrix.detail] if matrix.detail else []),
-            matrix.recommendation, bump=50, limitations=limits)
-    if matrix and matrix.observation == "probe-inconclusive":
+            matrix.recommendation, bump=50)
+    if matrix and matrix.failure_kind == "probe-inconclusive":
+        # A probe that produced no answer is a gap in the evidence, never a
+        # statement about what the server supports.
         inconclusive = [r for r in matrix.evidence if "inconclusive" in r]
-        note("Protocol probe inconclusive: " + ("; ".join(inconclusive) or
-                                               "a version probe returned no result") +
-             " - this is a probe result, not evidence that the server refuses the "
-             "version")
+        note("Protocol probe inconclusive: " +
+             ("; ".join(inconclusive) or "a version probe returned no result") +
+             " - this is a probe result, not evidence about server support")
     if nginx_prot and nginx_prot.status == F.WARNING and not (matrix and
                                                               matrix.status == F.WARNING):
         add("possible", "server", "nginx protocol configuration carries risks",

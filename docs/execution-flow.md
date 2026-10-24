@@ -489,14 +489,26 @@ change on the strength of a fingerprint difference.
 ### Protocol matrix
 
 `check_protocol_matrix(..., negotiated=<primary protocol>, facts=...)` probes each
-version with a per-version policy (relaxed `ALL:@SECLEVEL=0` for 1.0-1.2, default
-for 1.3) and reports per row: accepted / accepted under relaxed cipher policy /
-refused / inconclusive. A version the primary handshake negotiated is never
-reported as refused or unsupported; an inconclusive row is retried once inside a
-budget of `timeout × PROBE_BUDGET_FACTOR × versions`, and the finding carries
-`observation="probe-inconclusive"`. When TLS 1.2 is accepted under the relaxed
-policy, a default-policy probe adds an interoperability line (a modern client can
-connect, or only the lowered security level can).
+version and classifies it per version: `default` (accepted with the default cipher
+policy), `relaxed-only` (TLS 1.0/1.1 answered only under `ALL:@SECLEVEL=0` and the
+default-policy probe was refused), `relaxed-only-unverified` (relaxed answer but
+the default-policy probe was client-limited or timed out), `rejected`, or
+`inconclusive`. TLS 1.3 is probed under the default policy only; relaxed-policy
+acceptance of TLS 1.0/1.1 proves only that the server's stack can still negotiate
+the version when legacy suites are offered, so it never becomes a claim about
+ordinary clients. A version the primary handshake negotiated is never reported as
+refused; an inconclusive row is retried once inside a budget of
+`timeout × PROBE_BUDGET_FACTOR × (versions + 3)`. The finding's observation is
+`legacy-accepted-default`, `legacy-accepted-relaxed-only`,
+`legacy-accepted-unverified`, `tls12-relaxed-only` or `probe-inconclusive`;
+`legacy-accepted-default`, `legacy-accepted-relaxed-only` and
+`tls12-relaxed-only` raise a server cause (the last two with a listed limitation),
+`legacy-accepted-unverified` and `probe-inconclusive` produce a diagnosis note. When TLS 1.2 is
+accepted under the relaxed policy, a default-policy probe adds an interoperability
+line (a modern client can connect, or only the lowered security level can).
+`_is_local_probe_limitation()` separates `NO_PROTOCOLS_AVAILABLE`,
+`NO_CIPHERS_AVAILABLE`, `CA MD TOO WEAK` and local context errors from a server
+answer, so a client that cannot build the offer is never reported as a refusal.
 
 `analyze.diagnose()` attributes from `failure_kind`, not from the status:
 timeouts and resets are probable **network** causes whose advice is to repeat the

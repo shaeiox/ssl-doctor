@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased — legacy-protocol evidence
+
+A single warning on `tls.protocols` could claim that "deprecated TLS 1.0/1.1 are
+accepted by the server" after probing them only with `ALL:@SECLEVEL=0`. A lowered
+security level proves that the server's stack can still negotiate a version when
+legacy cipher suites are offered; it does not prove that an ordinary,
+default-configured client can connect. The findings contract moves to **1.4**
+(additive: per-version `support` classes and four new observations; 1.0–1.3 stay
+published and keep validating).
+
+### Root causes fixed
+
+- `check_protocol_matrix` probed TLS 1.0/1.1 exclusively under the relaxed cipher
+  policy, so acceptance was reported as ordinary-client support. A default-policy
+  probe now runs for every legacy version that answers, and the two facts are
+  recorded separately.
+- A probe the local client could not perform (`NO_PROTOCOLS_AVAILABLE`,
+  `NO_CIPHERS_AVAILABLE`, `CA MD TOO WEAK`, a local SSL-context error) was returned
+  as `refused`, i.e. as a server answer. With a modern OpenSSL build the default
+  context has no TLS 1.0/1.1 ciphers, so a legitimate client limitation would have
+  read as a server refusal.
+
+### Changed verdicts by check id
+
+| Check id | Before | Now |
+|---|---|---|
+| `tls.protocols` | TLS 1.0/1.1 were probed only with `ALL:@SECLEVEL=0`; any answer became `[POSSIBLE · server] "deprecated TLS 1.0/1.1 are accepted by the server"` and the generic "protocol configuration carries compatibility/security risks" cause | Four per-version classes (`default`, `relaxed-only`, `relaxed-only-unverified`, `rejected`/`inconclusive`) and four observations. `default` ⇒ ordinary clients can negotiate the version; `relaxed-only` ⇒ a default-configured client is refused, reported with an explicit limitation; `relaxed-only-unverified` ⇒ a note, a WARNING and no cause about server support. Client-side probe limits are reported as a limitation of the test, never as a refusal |
+
+### Tests
+
+- `tests/test_protocol_policy.py` (new): legacy accepted under the default policy,
+  relaxed-only acceptance, an unverifiable default-policy probe, TLS 1.2 default
+  support, TLS 1.3 support, refusals, timeouts before/after the handshake, and the
+  diagnosis certainty, limitations and remediation that each case earns.
+- `tests/test_probe_consistency.py` updated where it pinned the superseded
+  semantics (`relaxed`-only tables, `client-limited` local errors, per-row
+  inconclusive assertions).
+
 ## Unreleased — evidence-based probes
 
 Three unsupported warnings from a single scan are fixed at their source, and the

@@ -16,3 +16,4 @@ P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
   commands-reference ✓v 2026-10-24 v1
   tls-handshake-attribution ✓v 2026-10-24 v1
   evidence-based-probes ✓v 2026-10-24 v1
+  protocol-policy-evidence ✓v 2026-10-24 v1

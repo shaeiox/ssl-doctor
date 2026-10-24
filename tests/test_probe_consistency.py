@@ -51,10 +51,19 @@ DROP = ("inconclusive", "network error: EOF occurred in violation of protocol")
 
 
 def standard(over=None):
-    """Default table: legacy accepted (relaxed), 1.3 accepted, TLS1.2 default accepted."""
-    table = {("TLS 1.0", "relaxed"): [OK10], ("TLS 1.1", "relaxed"): [OK11],
+    """Default table: a modern server (legacy refused), 1.2 default, 1.3 accepted."""
+    table = {("TLS 1.0", "relaxed"): [REJECT], ("TLS 1.1", "relaxed"): [REJECT],
              ("TLS 1.2", "relaxed"): [OK12], ("TLS 1.2", "default"): [OK12],
              ("TLS 1.3", "default"): [OK13]}
+    if over:
+        table.update(over)
+    return table
+
+
+def legacy_table(over=None):
+    """A server that still answers TLS 1.0/1.1 only with legacy cipher suites."""
+    table = standard({("TLS 1.0", "relaxed"): [OK10], ("TLS 1.0", "default"): [REJECT],
+                      ("TLS 1.1", "relaxed"): [OK11], ("TLS 1.1", "default"): [REJECT]})
     if over:
         table.update(over)
     return table
@@ -89,7 +98,8 @@ class PrimaryReconciliationTests(unittest.TestCase):
 
     def test_both_probes_succeed(self):
         f, _calls, _ = probe_matrix(standard())
-        self.assertEqual(f.status, F.WARNING)   # TLS 1.0/1.1 accepted: policy risk
+        # a modern server refuses legacy versions, so the matrix is clean
+        self.assertEqual(f.status, F.PASS)
         self.assertIn("TLS 1.3: accepted (TLSv1.3)", f.evidence)
         self.assertEqual(f.observation, "")
         self.assertEqual(f.failure_kind, "")
@@ -97,8 +107,10 @@ class PrimaryReconciliationTests(unittest.TestCase):
     def test_no_inconclusive_rows_means_no_inconclusive_observation(self):
         f, _calls, _ = probe_matrix(
             {("TLS 1.0", "relaxed"): [REJECT], ("TLS 1.1", "relaxed"): [REJECT],
-             ("TLS 1.2", "relaxed"): [OK12], ("TLS 1.3", "default"): [OK13]})
+             ("TLS 1.2", "relaxed"): [OK12], ("TLS 1.2", "default"): [OK12],
+             ("TLS 1.3", "default"): [OK13]})
         self.assertEqual(f.observation, "")
+        self.assertEqual(f.failure_kind, "")
 
 
 class ProbeFailureTests(unittest.TestCase):
@@ -125,19 +137,23 @@ class ProbeFailureTests(unittest.TestCase):
                 ("inconclusive", "local probe error: ValueError: cannot pin version")]}))
         self.assertIn("local probe error", " ".join(f.evidence))
         self.assertEqual(f.observation, "probe-inconclusive")
-        self.assertNotIn("refused", " ".join(f.evidence))
+        row = [r for r in f.evidence if r.startswith("TLS 1.3")][0]
+        self.assertIn("inconclusive", row)
+        self.assertNotIn("refused", row)
 
     def test_probe_seam_never_raises_for_local_limitations(self):
         """The real _probe_version turns an unusable context into inconclusive."""
         state, detail = netchecks._probe_version("127.0.0.1", 1, "shop.test",
                                                  "TLS 9.9", object(), 0.2, None, False)
-        self.assertEqual(state, "inconclusive")
+        # a client that cannot build the offer is a local limitation, not a refusal
+        self.assertEqual(state, "client-limited")
         self.assertIn("local probe error", detail)
 
     def test_retry_success_counts_as_accepted(self):
         f, _calls, _ = probe_matrix(
             {("TLS 1.0", "relaxed"): [REJECT], ("TLS 1.1", "relaxed"): [REJECT],
-             ("TLS 1.2", "relaxed"): [OK12], ("TLS 1.3", "default"): [STALL, OK13]})
+             ("TLS 1.2", "relaxed"): [OK12], ("TLS 1.2", "default"): [OK12],
+             ("TLS 1.3", "default"): [STALL, OK13]})
         row = [r for r in f.evidence if r.startswith("TLS 1.3")][0]
         self.assertIn("accepted", row)
         self.assertIn("retry", row)
@@ -160,25 +176,25 @@ class RelaxedPolicyTests(unittest.TestCase):
 
     def test_relaxed_acceptance_with_default_refusal_states_the_limit(self):
         f, _calls, _ = probe_matrix(
-            {("TLS 1.0", "relaxed"): [OK10], ("TLS 1.1", "relaxed"): [OK11],
-             ("TLS 1.2", "relaxed"): [OK12], ("TLS 1.2", "default"): [REJECT],
-             ("TLS 1.3", "default"): [OK13]})
+            legacy_table({("TLS 1.2", "relaxed"): [OK12],
+                          ("TLS 1.2", "default"): [REJECT]}))
         text = " ".join(f.evidence).lower()
         self.assertIn("only under the relaxed cipher policy", text)
         self.assertIn("default-configured", text)
         self.assertEqual(f.status, F.WARNING)
+        self.assertEqual(f.observation, "legacy-accepted-relaxed-only")
 
     def test_default_policy_acceptance_states_interoperability(self):
         f, _calls, _ = probe_matrix(standard())
         self.assertIn("default cipher policy", " ".join(f.evidence).lower())
 
     def test_relaxed_rows_are_labelled(self):
-        f, _calls, _ = probe_matrix(standard())
+        f, _calls, _ = probe_matrix(legacy_table())
         row = [r for r in f.evidence if r.startswith("TLS 1.0")][0]
         self.assertIn("relaxed cipher policy", row)
 
     def test_deprecated_version_still_warns_when_tls13_is_in_use(self):
-        f, _calls, _ = probe_matrix(standard())
+        f, _calls, _ = probe_matrix(legacy_table())
         self.assertEqual(f.status, F.WARNING)
         self.assertIn("deprecated", f.detail.lower())
         self.assertTrue(f.recommendation)
@@ -196,20 +212,19 @@ class ProbeDiagnosisTests(unittest.TestCase):
         # no cause may claim the server refuses or lacks a version
         for c in d.causes:
             joined = " ".join([c.summary] + c.evidence).lower()
-            self.assertNotIn("lack", joined)
-            self.assertNotIn("refused", joined)
-        policy = [c for c in d.causes if "protocol configuration" in c.summary.lower()]
-        self.assertTrue(policy, "the legacy-version security warning must survive")
-        self.assertTrue(any("no definite result" in lim
-                            for lim in policy[0].limitations))
+            self.assertNotIn("does not support", joined)
+            self.assertNotIn("lacks", joined)
+        # an inconclusive probe never becomes a claim about server support
+        self.assertFalse([c for c in d.causes if "tls 1.3" in c.summary.lower()])
         self.assertTrue(any("inconclusive" in n.lower() for n in d.notes), d.notes)
 
     def test_policy_warning_keeps_a_possible_cause_with_limitations(self):
-        f, _calls, _ = probe_matrix(standard())
+        f, _calls, _ = probe_matrix(legacy_table())
         d = diagnose([f])
-        policy = [c for c in d.causes if "protocol" in c.summary.lower()]
+        policy = [c for c in d.causes if c.origin == "server"]
         self.assertTrue(policy)
         self.assertEqual(policy[0].certainty, "possible")
+        self.assertIn("only when legacy cipher suites are offered", policy[0].summary)
         self.assertTrue(policy[0].limitations)
 
 
