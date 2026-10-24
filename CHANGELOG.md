@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — warm terminal interface
+## v0.5.0 — warm terminal interface + streaming + typewriter
 
 Presentation-only restyle, following the Claude Code terminal design language.
 **Commands, flags, accepted answers, check ids, verdicts, exit codes, the JSON
