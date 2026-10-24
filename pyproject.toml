@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ssl-doctor"
+dynamic = ["version"]
+description = "Offline SSL/TLS diagnostic tool for IT support engineers"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["jsonschema>=4.18"]
+
+[project.scripts]
+ssl-doctor = "ssl_doctor.cli:main"
+
+[tool.setuptools]
+packages = ["ssl_doctor"]
+
+[tool.setuptools.dynamic]
+version = { attr = "ssl_doctor.__version__" }

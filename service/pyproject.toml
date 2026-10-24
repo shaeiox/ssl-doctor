@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ssldoctor-service"
+dynamic = ["version"]
+description = "SSL Doctor control plane (multi-tenant API, agents, results history)"
+requires-python = ">=3.10"
+dependencies = [
+    "ssl-doctor",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "psycopg[binary]>=3.1",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = ["httpx>=0.27", "pgserver", "jsonschema>=4.18"]
+
+[tool.setuptools]
+packages = ["ssldoctor_service"]
+
+[tool.setuptools.package-data]
+ssldoctor_service = ["migrations/*.sql"]
+
+[tool.setuptools.dynamic]
+version = { attr = "ssldoctor_service.__version__" }
