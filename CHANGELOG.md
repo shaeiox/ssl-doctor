@@ -1,5 +1,60 @@
 # Changelog
 
+## Unreleased — full-screen shell, streamed result frames, chat composer
+
+Presentation only: commands, flags, accepted answers, check ids, verdicts, exit
+codes, the JSON report payload and the findings contract are unchanged.
+
+- **Full-screen application mode**: the interactive session opens in the
+  alternate screen as a terminal-like log — wordmark, then everything you run
+  appended underneath it on one left margin. Nothing is centred: the column is
+  the window width (capped at 120) and every row starts at the same gutter.
+  Output is captured wrapped, never truncated, and stays scrollable; the command
+  bar has editing and history, and the spinner and questions live in the status
+  line. Opt out with `--no-tui` or `SSL_DOCTOR_TUI=0`; batch runs, pipes and
+  `TERM=dumb` keep the line-oriented REPL unchanged.
+- **Mouse-wheel scrolling**: the transcript scrolls with the wheel, three rows a
+  notch. Reporting is enabled only while the command bar (or a question) is
+  reading, so wheel bytes can never reach a running check; `PgUp`/`PgDn` still
+  work.
+- **`/` completion**: typing a partial command name shows up to three matches
+  with their descriptions. `Tab` completes the highlighted one, `↑`/`↓` move the
+  highlight, `Esc` or a space dismisses the list. The list is built from the same
+  command table `/help` renders.
+- **A framed block per result**: each command's findings are drawn in one
+  rounded frame whose title is the command, with a row per check (glyph, status,
+  check id, title), the evidence/detail/`fix:` lines inside the border, and the
+  counters in the closing border. Frames are shared with the line-oriented REPL
+  and fall back to `+ - |` corners where box drawing is unavailable.
+- **Centred classic banner**: the two-stroke wordmark, its double rules, the
+  tagline and `creator: eleven · v<version>` are centred — on the terminal in the
+  line REPL and batch runs, in the application column in the full-screen shell.
+  The wordmark is centred as one block, so every letter keeps its shape.
+- **Chat-style composer** replaces the dashed `| > ` command bar, in the shell and
+  the line REPL alike: a rounded box with the label (`ssl-doctor`, the question
+  being asked, or the running check) and the session summary in its top border,
+  a `❯` input row with a dim placeholder that scrolls to keep the caret visible,
+  and the key hints plus `⏎ send` in its bottom border. Terracotta = ready,
+  lavender = waiting for an answer, grey = a check is running.
+- **Streaming keeps the frame**: on an interactive terminal a result frame opens
+  when a phase starts and each finding is drawn into it as its check completes,
+  with the counters in the closing border — instead of bare rows outside any box.
+  Inside the shell the spinner runs in the composer, so the screen keeps
+  redrawing while a long check streams.
+
+### Fixed
+
+- The shell's capture stream reports itself as a terminal, so after the merge
+  with streaming every finding would have been printed as a bare row and the
+  screen would only redraw when the command ended. Streaming now draws into the
+  result frame and keeps the composer's spinner running.
+- `/server compare` printed its finding twice when output was not streamed.
+- A finding a check returned without emitting it could be missing from streamed
+  output; each phase now reconciles what was emitted with what was returned.
+- The typewriter effect no longer types into the shell's capture.
+- `failure kind` and `observation` lines are kept inside result frames (they were
+  only shown by the unframed printer).
+
 ## v0.7.0 — evidence-grounded TLS diagnosis
 
 Diagnosis fixes from the handshake-attribution, evidence-based-probe,
@@ -150,10 +205,11 @@ report payload and the findings contract are unchanged.**
   `error`, `muted`, `subtle`, `surface`) with TrueColor → 256 → 16 → plain
   degradation. `NO_COLOR` wins over everything; new `SSL_DOCTOR_COLOR=never|always`
   exists for demos and captures. Piped output stays plain.
-- **One frame per command**: findings print as rows inside a single box for the
-  command that produced them, with the passed/failed/warnings/not-tested
-  counters as the footer. Evidence, detail and `fix:` text are never truncated;
-  narrow terminals wrap with a hanging indent.
+- **One frame per command**: findings print as rows inside a single rounded box
+  for the command that produced them, with the passed/failed/warnings/not-tested
+  counters in the closing border. Evidence, detail and `fix:` text are never
+  truncated; narrow terminals wrap inside the border and shorten the counter text
+  instead.
 - **Dashed ASCII input frame** with a `| > ` prompt and a muted status line
   (`target · 12 findings · 1 fail · timeout 8s · ssh off`) that is suppressed in
   batch (`-c`) runs and in plain mode.
@@ -171,6 +227,13 @@ report payload and the findings contract are unchanged.**
   that fails.
 - `/diagnose` now prints its overall verdict (`PASS`/`FAIL`/`WARNING`) in words
   next to the title instead of encoding it in the title's colour only.
+
+### Fixed
+
+- `/timeout` never reached its handler: the instance attribute `cmd_timeout`
+  shadowed the `cmd_timeout()` method, so the command raised
+  `TypeError: 'float' object is not callable`. The remote-command timeout is now
+  stored as `command_timeout`; `/timeout` reports and sets both timeouts again.
 
 ### Compatibility
 

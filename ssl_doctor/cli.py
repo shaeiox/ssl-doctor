@@ -2,9 +2,9 @@
 
 A persistent REPL with slash commands.  Presentation follows the Claude Code
 terminal design language: semantic colour roles that degrade from TrueColor to
-256 to 16 to plain, one frame per command, dashed ASCII input, hot-pink frames
-around machine work and lavender frames around questions put back to the
-operator.  Colour disables automatically when stdout is not a terminal, when
+256 to 16 to plain, one frame per command, a rounded chat-style composer,
+hot-pink frames around machine work and lavender frames around questions put
+back to the operator.  Colour disables automatically when stdout is not a terminal, when
 NO_COLOR is set, or when the terminal cannot render the glyphs.
 
 Also supports one-shot batch usage:
@@ -14,6 +14,7 @@ Also supports one-shot batch usage:
 
 from __future__ import annotations
 
+import contextlib
 import getpass
 import os
 import random
@@ -42,7 +43,8 @@ _TW_BATCH = False
 def _tw_type(text: str) -> None:
     """Print text, using the typewriter effect when active."""
     global _TW_ENABLED, _TW_CPS, _TW_BATCH
-    active = (_TW_ENABLED and not _TW_BATCH
+    # never into the full-screen capture: the shell redraws on its own ticks
+    active = (_TW_ENABLED and not _TW_BATCH and not _CAPTURE
               and bool(getattr(sys.stdout, "isatty", lambda: False)()))
     if not active:
         print(text)
@@ -213,8 +215,20 @@ def resolve_glyphs(mode: str, stream=None) -> Glyphs:
 
 _MODE = resolve_color_mode()
 _GLYPHS = resolve_glyphs(_MODE)
+# While the full-screen shell captures a command's output, colour must not leak
+# into the transcript: the renderer re-applies status colours when it draws.
+_CAPTURE = False
+# Width of the transcript while the shell is open. Non-zero means "we are being
+# drawn by the shell", so result frames are sized to the column.
+_CAPTURE_WIDTH = 0
 # Compatibility alias: older code and third-party snippets read this.
 _USE_COLOR = _MODE != ColorMode.PLAIN
+
+
+def set_capture_width(width: int) -> None:
+    """Tell the printers how wide the shell's transcript is (0 = not in one)."""
+    global _CAPTURE_WIDTH
+    _CAPTURE_WIDTH = max(0, int(width))
 
 
 def set_color_mode(mode: str) -> None:
@@ -225,9 +239,14 @@ def set_color_mode(mode: str) -> None:
     _USE_COLOR = mode != ColorMode.PLAIN
 
 
+def _plain_output() -> bool:
+    """True when output must be plain: no colour, no block frames."""
+    return _CAPTURE or _MODE == ColorMode.PLAIN
+
+
 def paint(text: str, role: str = "", bold: bool = False, dim: bool = False) -> str:
     """Colour one string by semantic role; no-op in plain mode."""
-    if _MODE == ColorMode.PLAIN or not text:
+    if _plain_output() or not text:
         return text
     codes = []
     if role:
@@ -285,6 +304,36 @@ def block_width(label: str = "") -> int:
     return width
 
 
+# One table for the shell's completion menu; /help keeps the full usage text.
+COMMANDS: List[tuple] = [
+    ("/scan", "full workflow: domain, then client and server checks"),
+    ("/tls", "remote TLS/HTTPS diagnostics for a host"),
+    ("/cert", "inspect a certificate file or match a private key"),
+    ("/server", "SSH setup, nginx config, logs and comparison"),
+    ("/local", "diagnostics for this machine"),
+    ("/diagnose", "correlate findings into root causes"),
+    ("/findings", "list everything recorded this session"),
+    ("/report", "write an HTML or JSON report"),
+    ("/timeout", "show or set the network timeout"),
+    ("/clear", "discard recorded findings"),
+    ("/version", "show the version"),
+    ("/exit", "leave ssl-doctor"),
+]
+
+
+def command_completions(prefix: str, limit: int = 3) -> List[tuple]:
+    """Commands matching `prefix`, best match first, for the completion menu."""
+    word = (prefix or "").strip().lower()
+    if not word.startswith("/"):
+        return []
+    word = word.split(" ", 1)[0]
+    exact = [row for row in COMMANDS if row[0] == word]
+    starts = [row for row in COMMANDS if row[0].startswith(word) and row[0] != word]
+    inside = [row for row in COMMANDS if word.lstrip("/") and word.strip("/") in row[0]
+              and row not in starts and row not in exact]
+    return (exact + starts + inside)[:max(0, limit)]
+
+
 def _wrap(text: str, width: int) -> List[str]:
     """Wrap without dropping characters; long tokens are broken, not elided."""
     if width <= 0:
@@ -292,12 +341,6 @@ def _wrap(text: str, width: int) -> List[str]:
     lines = textwrap.wrap(text, width=max(12, width), break_long_words=True,
                           break_on_hyphens=False) or [""]
     return lines
-
-
-def dashed_rule(width: int) -> str:
-    """Signature input rule: hyphens and pipes, never Unicode box drawing."""
-    width = max(MIN_BLOCK_WIDTH, width)
-    return " ".join("-" for _ in range(max(1, (width + 1) // 2)))
 
 
 # --------------------------------------------------------------- indicators
@@ -313,6 +356,19 @@ SPINNER_VERBS = (
 )
 
 
+_TUI_SESSION = None
+
+
+def _active_tui():
+    """The running full-screen session, if any (used by Spinner)."""
+    return _TUI_SESSION
+
+
+def set_active_tui(session) -> None:
+    global _TUI_SESSION
+    _TUI_SESSION = session
+
+
 class Spinner:
     """Signature thinking indicator; one plain line when output is redirected."""
 
@@ -322,8 +378,16 @@ class Spinner:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._dirty = False
+        self._session = None
 
     def __enter__(self) -> "Spinner":
+        session = _active_tui()
+        if session is not None:
+            # the transcript must not gain progress lines: the status line owns them
+            self._session = session
+            session.start_status([(f"{SPINNER_CYCLE[2]} {self.verb}{_GLYPHS.ellipsis} "
+                                   f"{self.text}", "primary", True)])
+            return self
         if _MODE != ColorMode.PLAIN:
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
@@ -358,6 +422,10 @@ class Spinner:
         self._dirty = False
 
     def __exit__(self, *exc) -> None:
+        if self._session is not None:
+            self._session.stop_status()
+            self._session = None
+            return
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=0.5)
@@ -449,65 +517,221 @@ def _frame_bottom(line_text: str, width: int, role: str = "tool",
             + paint(" " + _GLYPHS.h * dashes + corner, role))
 
 
-def _print_row(f: F.Finding, verbose: bool, width: int, check_width: int) -> None:
-    role = _STATUS_ROLE.get(f.status, "")
-    bar = paint(_GLYPHS.vert, "tool")
-    glyph = paint(_status_glyph(f.status), role, bold=True)
-    status = paint(f"{f.status:<10}", role, bold=True)
-    check = paint(f"{f.check:<{check_width}}", "muted")
-    prefix = f"{_status_glyph(f.status)} {f.status:<10} {f.check:<{check_width}}"
-    head = f"{INDENT}{bar} {glyph} {status} {check}"
-    available = width - len(INDENT) - 2 - len(prefix)
-    if available >= 20:
-        title_lines = _wrap(f.title, available)
-        _tw_type(head + title_lines[0])
-        pad = " " * (len(INDENT) + 2 + len(prefix))
-        for extra in title_lines[1:]:
-            _tw_type(pad + extra)
-    else:
-        # narrow terminal: the title drops below the status row instead of
-        # wrapping one word per line next to it
-        _tw_type(f"{INDENT}{bar} {glyph} {status} {paint(f.check, 'muted')}")
-        title_indent = f"{INDENT}{bar}   "
-        for chunk in _wrap(f.title, width - len(INDENT) - 5):
-            _tw_type(title_indent + chunk)
-    if not verbose:
-        return
+def _spans_text(spans) -> str:
+    return "".join(text for text, _, _ in spans)
 
-    sub = f"{INDENT}{bar}   "
-    body_width = width - len(INDENT) - 4
+
+def _span_len(spans) -> int:
+    return sum(len(text) for text, _, _ in spans)
+
+
+def _paint_line(spans) -> str:
+    return "".join(paint(text, role, bold) for text, role, bold in spans)
+
+
+def _box_row(content, inner: int) -> List:
+    """One interior row: gutter, left border, padded content, right border."""
+    room = max(0, inner - _span_len(content))
+    return [(INDENT, "", False), (_GLYPHS.vert, "tool", False), (" ", "", False),
+            *content, (" " * room, "", False), (" ", "", False),
+            (_GLYPHS.vert, "tool", False)]
+
+
+def _box_title(label: str, inner: int) -> str:
+    title = (label or "results").strip()
+    room = inner - len(INDENT) - 6
+    if room >= 6 and len(title) > room:
+        title = title[:max(4, room - len(_GLYPHS.ellipsis))] + _GLYPHS.ellipsis
+    return title
+
+
+def _box_counts(items: List[F.Finding], room: int) -> List:
+    """Counters for the closing border, shortened until they fit `room`."""
+    sep = f" {_GLYPHS['sep']} " if _GLYPHS.unicode else " - "
+    segments = _counts_segments(items)
+    text = sep.join(part for part, _ in segments)
+    if len(text) > room:
+        kept = [seg for seg in segments if not seg[0].startswith("0 ")]
+        segments = kept or segments
+        text = sep.join(part for part, _ in segments)
+    if len(text) > room:
+        return [(text[:max(0, room)], "muted", False)]
+    spans: List = []
+    for index, (part, role) in enumerate(segments):
+        if index:
+            spans.append((sep, "muted", False))
+        spans.append((part, role, False))
+    return spans
+
+
+def _box_geometry(width: int):
+    """(width, inner) for a result frame; every row is exactly `width` columns."""
+    width = max(30, width)
+    return width, max(16, width - len(INDENT) - 4)
+
+
+def _box_top(label: str, width: int) -> List:
+    width, inner = _box_geometry(width)
+    h = _GLYPHS.h
+    title = _box_title(label, inner)
+    fill = max(1, width - len(INDENT) - len(f"{h} {title} ") - 2)
+    return [(INDENT, "", False), (_GLYPHS.corner("╭", "+") + h + " ", "tool", False),
+            (title, "primary", True),
+            (" " + h * fill + _GLYPHS.corner("╮", "+"), "tool", False)]
+
+
+def _box_note(text: str, width: int) -> List[List]:
+    """A muted interior row, e.g. the phase a streaming frame is waiting on."""
+    _, inner = _box_geometry(width)
+    return [_box_row([(chunk, "muted", False)], inner)
+            for chunk in _wrap(f"{_GLYPHS['run']} {text}", inner)]
+
+
+def _box_finding(f: F.Finding, width: int, check_width: int,
+                 verbose: bool = True) -> List[List]:
+    """The interior rows of one finding: status row, evidence, detail, fix."""
+    _, inner = _box_geometry(width)
+    role = _STATUS_ROLE.get(f.status, "")
+    glyph = _status_glyph(f.status)
+    prefix = f"{glyph} {f.status:<10} {f.check:<{check_width}}"
+    room = inner - len(prefix) - 2
+    rows: List[List] = []
+    if room >= 20:
+        chunks = _wrap(f.title, room)
+        rows.append(_box_row([(f"{glyph} ", role, True),
+                              (f"{f.status:<10} ", role, True),
+                              (f"{f.check:<{check_width}}", "muted", False),
+                              (chunks[0], "", False)], inner))
+        for chunk in chunks[1:]:
+            rows.append(_box_row([(" " * len(prefix), "", False),
+                                  (chunk, "", False)], inner))
+    else:
+        rows.append(_box_row([(f"{glyph} ", role, True),
+                              (f.status, role, True)], inner))
+        for chunk in _wrap(f"{f.check}  {f.title}", inner - 2):
+            rows.append(_box_row([(chunk, "", False)], inner))
+    if not verbose:
+        return rows
     for line in f.evidence:
-        chunks = _wrap(line, body_width - 2)
-        _tw_type(f"{sub}{paint(_GLYPHS['bullet'], 'muted')} {chunks[0]}")
+        chunks = _wrap(line, inner - 7)
+        rows.append(_box_row([("  " + _GLYPHS["bullet"] + " ", "muted", False),
+                              (chunks[0], "", False)], inner))
         for chunk in chunks[1:]:
-            _tw_type(f"{sub}  {chunk}")
+            rows.append(_box_row([("    ", "", False), (chunk, "", False)], inner))
+    for label, value in (("failure kind", f.failure_kind),
+                         ("observation", f.observation)):
+        if value:
+            rows.append(_box_row([("    ", "", False),
+                                  (f"{label}: {value}", "muted", False)], inner))
     if f.detail:
-        for chunk in _wrap(f.detail, body_width):
-            _tw_type(sub + paint(chunk, dim=True))
+        for chunk in _wrap(f.detail, inner - 7):
+            rows.append(_box_row([("    ", "", False), (chunk, "muted", False)], inner))
     if f.recommendation:
-        chunks = _wrap(f"fix: {f.recommendation}", body_width)
-        _tw_type(sub + paint(chunks[0], "accent"))
-        for chunk in chunks[1:]:
-            _tw_type(f"{sub}{paint(chunk, 'accent')}")
+        for chunk in _wrap(f"fix: {f.recommendation}", inner - 7):
+            rows.append(_box_row([("    ", "", False), (chunk, "accent", False)], inner))
+    return rows
+
+
+def _box_bottom(items: List[F.Finding], width: int) -> List:
+    width, inner = _box_geometry(width)
+    h = _GLYPHS.h
+    footer = _box_counts(items, inner - 6)
+    used = sum(len(text) for text, _, _ in footer)
+    tail_fill = max(1, width - len(INDENT) - used - 5)
+    return [(INDENT, "", False), (_GLYPHS.corner("╰", "+") + h + " ", "tool", False),
+            *footer, (" " + h * tail_fill + _GLYPHS.corner("╯", "+"), "tool", False)]
+
+
+# A streamed frame opens before its findings are known, so its check column
+# uses the cap instead of the longest id.
+STREAM_CHECK_WIDTH = 20
+
+
+def _box_lines(items: List[F.Finding], width: int, label: str = "",
+               verbose: bool = True) -> List[List]:
+    """Draw one result frame: title, one row per check, counters in the base.
+
+    Returns rows as spans so the line REPL can paint them and the full-screen
+    shell can capture them as plain text. Every row is exactly `width` columns,
+    and text wraps rather than being elided.
+    """
+    check_width = min(max(len(f.check) for f in items) + 2, STREAM_CHECK_WIDTH)
+    rows: List[List] = [_box_top(label, width)]
+    for f in items:
+        rows.extend(_box_finding(f, width, check_width, verbose))
+    rows.append(_box_bottom(items, width))
+    return rows
+
+
+def _framed() -> bool:
+    """Result frames are drawn unless output is plain and not captured."""
+    return not (_plain_output() and not _CAPTURE_WIDTH)
+
+
+def _frame_width() -> int:
+    return _CAPTURE_WIDTH or block_width(_BLOCK_LABEL)
+
+
+def _print_spans(spans) -> None:
+    _tw_type(_spans_text(spans) if _CAPTURE_WIDTH else _paint_line(spans))
 
 
 def print_findings(items: List[F.Finding], verbose: bool = True) -> None:
-    """Print a command's findings: framed rows on a terminal, plain otherwise."""
+    """Print a command's results: one framed block, or plain rows when piped."""
     if not items:
         return
-    if _MODE == ColorMode.PLAIN:
+    if not _framed():
         for f in items:
             print_finding(f, verbose)
         _tw_type(paint("\n" + _counts_text(items, " - "), "muted", dim=True))
         return
+    for spans in _box_lines(items, _frame_width(), _BLOCK_LABEL, verbose):
+        _print_spans(spans)
 
-    width = block_width(_BLOCK_LABEL)
-    check_width = min(max(len(f.check) for f in items) + 2, 24)
-    _tw_type(_frame_top(_BLOCK_LABEL, width))
-    for f in items:
-        _print_row(f, verbose, width, check_width)
-    _tw_type(_frame_bottom(_counts_line(items), width,
-                        visible_len=len(_counts_text(items, " · "))))
+
+class LiveFrame:
+    """A result frame that is drawn while its findings arrive.
+
+    The top border and the phase row print on open, each finding prints as its
+    check completes, and the counters close the frame -- so streaming keeps the
+    same box a finished command gets. Plain output streams bare rows instead.
+    """
+
+    def __init__(self, text: str, label: Optional[str] = None) -> None:
+        self.text = text
+        self.label = _BLOCK_LABEL if label is None else label
+        self.items: List[F.Finding] = []
+        self.width = _frame_width()
+        self._open = False
+
+    def open(self) -> "LiveFrame":
+        if _framed():
+            _print_spans(_box_top(self.label, self.width))
+            for spans in _box_note(self.text, self.width):
+                _print_spans(spans)
+        else:
+            _tw_type(paint(f"... {self.text}", "muted", dim=True))
+        self._open = True
+        sys.stdout.flush()
+        return self
+
+    def add(self, f: F.Finding) -> None:
+        self.items.append(f)
+        if _framed():
+            for spans in _box_finding(f, self.width, STREAM_CHECK_WIDTH):
+                _print_spans(spans)
+        else:
+            print_finding(f)
+        sys.stdout.flush()
+
+    def close(self) -> None:
+        if not self._open:
+            return
+        self._open = False
+        if _framed():
+            _print_spans(_box_bottom(self.items, self.width))
+        elif self.items:
+            _tw_type(paint("\n" + _counts_text(self.items, " - "), "muted", dim=True))
 
 
 def _status_line_status(status: str) -> str:
@@ -564,39 +788,83 @@ def banner_tagline() -> str:
     return sep.join(BANNER_TAGLINE_PARTS)
 
 
-def _banner_credit() -> str:
-    return f"{BANNER_CREDIT}  {_GLYPHS['sep']}  v{__version__}"
+def banner_rows(columns: int, note: bool = True) -> List[List[tuple]]:
+    """The banner as rows of (text, role, bold) spans, before centring.
 
-
-def banner_lines(columns: Optional[int] = None) -> List[str]:
-    """Return the banner as painted lines, sized for the terminal."""
-    columns = terminal_width() if columns is None else columns
+    One description serves both presentations: the line REPL paints and
+    centres it on the terminal, the full-screen shell centres it in its column.
+    The two-stroke wordmark needs its own width plus margins; below that the
+    banner collapses to a compact text form. `note` adds the read-only line.
+    """
+    sep = _GLYPHS["sep"]
     limit = max(20, columns - 2)  # never wider than the terminal
     art = wordmark(BANNER_NAME, _GLYPHS.block)
     art_width = max(len(row) for row in art)
-    # the full wordmark needs its own width plus margins; below that, compact
     if limit >= art_width + 4:
-        content = max(art_width, len(banner_tagline()), len(BANNER_NOTE),
-                      len(_banner_credit()))
-        width = min(content + 4, limit)
-        lines = [paint(_GLYPHS.double * width, "primary")]
-        for row in art:
-            lines.append(INDENT + paint(row, "primary", bold=True))
-        lines.append("")
-        lines.append(INDENT + paint(banner_tagline(), "muted"))
-        lines.append(INDENT + paint(_banner_credit(), "accent", bold=True))
-        lines.append(INDENT + paint(BANNER_NOTE, "muted", dim=True))
-        lines.append(paint(_GLYPHS.double * width, "primary"))
-        return lines
-
+        width = min(max(art_width, len(banner_tagline())) + 4, limit)
+        rule = [(_GLYPHS.double * width, "primary", False)]
+        rows = [rule]
+        rows.extend([(row, "primary", True)] for row in art)
+        rows.append([(banner_tagline(), "muted", False)])
+        rows.append([(BANNER_CREDIT, "accent", True),
+                     (f"  {sep}  v{__version__}", "muted", False)])
+        if note:
+            rows.append([(BANNER_NOTE, "muted", False)])
+        rows.append(rule)
+        return rows
     width = max(20, min(limit, MAX_BLOCK_WIDTH))
-    lines = [paint(_GLYPHS.double * width, "primary"),
-             INDENT + paint(BANNER_NAME, "primary", bold=True)
-             + paint(f"  ·  v{__version__}", "muted"),
-             INDENT + paint("offline ssl/tls diagnostics", "muted"),
-             INDENT + paint(BANNER_CREDIT, "accent", bold=True),
-             paint(_GLYPHS.double * width, "primary")]
+    rule = [(_GLYPHS.double * width, "primary", False)]
+    return [rule,
+            [(BANNER_NAME, "primary", True), (f"  {sep}  v{__version__}", "muted", False)],
+            [("offline ssl/tls diagnostics", "muted", False)],
+            [(BANNER_CREDIT, "accent", True)],
+            rule]
+
+
+def banner_lines(columns: Optional[int] = None) -> List[str]:
+    """Return the banner as painted lines, centred on the terminal."""
+    columns = terminal_width() if columns is None else columns
+    lines = []
+    for spans in banner_rows(columns):
+        text_len = sum(len(text) for text, _, _ in spans)
+        lead = " " * max(0, (columns - text_len) // 2)
+        lines.append(lead + "".join(paint(text, role, bold) for text, role, bold in spans)
+                     if spans else "")
     return lines
+
+
+class _Phase:
+    """Collects one phase's findings for :meth:`SSLDoctorCLI._results`."""
+
+    def __init__(self, text: str, live: bool) -> None:
+        self.live = live
+        self.frame = LiveFrame(text)
+        self.items: List[F.Finding] = []
+
+    def add(self, f: F.Finding, first: bool = False) -> None:
+        """Record one finding; `first` orders it ahead in a finished frame
+        (a live frame has already drawn its predecessors)."""
+        if any(f is seen for seen in self.items):
+            return
+        if first:
+            self.items.insert(0, f)
+        else:
+            self.items.append(f)
+        if self.live:
+            self.frame.add(f)
+
+    def done(self, items) -> List[F.Finding]:
+        """Reconcile with what the checks returned; returns them as a list."""
+        found = list(items) if isinstance(items, (list, tuple)) else [items]
+        for f in found:
+            self.add(f)
+        return found
+
+    def close(self) -> None:
+        if self.live:
+            self.frame.close()
+        else:
+            print_findings(self.items)
 
 
 # ------------------------------------------------------------------- CLI
@@ -606,11 +874,13 @@ class SSLDoctorCLI:
     def __init__(self) -> None:
         self.store = F.FindingStore()
         self.net_timeout = 8.0
-        self.cmd_timeout = 20.0
+        self.command_timeout = 20.0  # remote command timeout (seconds)
         self.server: Optional[servermod.ServerSession] = None
         self.remote_facts: Dict = {}
         self._diagnosis = None
         self._running = True
+        self._tui = None  # set while the full-screen shell is active
+        self.use_tui: Optional[bool] = None  # None = decide from the terminal
         self._BATCH_MODE = False
         # typewriter state
         self._typewriter_enabled = False
@@ -648,11 +918,31 @@ class SSLDoctorCLI:
         _tw_type(paint(text, "muted"))
 
     # ---- frames -------------------------------------------------------
-    def _rule(self) -> str:
-        return paint(dashed_rule(block_width()), "muted")
+    def _composer_edge(self, top: bool) -> str:
+        """Top or bottom border of the line REPL's composer, painted.
 
-    def status_line(self) -> str:
-        """One muted line: what is in scope, what was found, what is open."""
+        The same rounded box the full-screen shell draws; only the input row
+        has no right border, since the terminal echoes what is typed.
+        """
+        from . import tui as tuimod
+        inner = block_width() - len(INDENT)
+        if top:
+            spans = tuimod.composer_border(
+                [(APP_NAME.lower().replace(" ", "-"), "primary", True)],
+                [(self.status_text(), "muted", False)], inner,
+                (_GLYPHS.corner("╭", "+"), _GLYPHS.corner("╮", "+")),
+                _GLYPHS.h, "primary")
+        else:
+            sep = f" {_GLYPHS['sep']} " if _GLYPHS.unicode else " - "
+            spans = tuimod.composer_border(
+                [(sep.join(("/help", "Ctrl-D quit")), "muted", False)],
+                [(self._send_hint(), "muted", False)], inner,
+                (_GLYPHS.corner("╰", "+"), _GLYPHS.corner("╯", "+")),
+                _GLYPHS.h, "primary")
+        return INDENT + "".join(paint(text, role, bold) for text, role, bold in spans)
+
+    def status_text(self) -> str:
+        """Plain one-liner: what is in scope, what was found, what is open."""
         target = ""
         if self.remote_facts.get("host"):
             target = f"{self.remote_facts['host']}:{self.remote_facts.get('port', 443)}"
@@ -668,7 +958,8 @@ class SSLDoctorCLI:
                 parts.append(f"{counts[F.FAIL]} fail")
         parts.append(f"timeout {self.net_timeout:g}s")
         parts.append("ssh " + ("on" if (self.server and self.server.connected) else "off"))
-        return paint(" · ".join(parts), "muted", dim=True)
+        separator = f" {_GLYPHS['sep']} " if _GLYPHS.unicode else " - "
+        return separator.join(parts)
 
     def _question_frame(self, label: str, hints: str, default: str) -> str:
         """Lavender frame for a question that is waiting on the operator."""
@@ -683,6 +974,8 @@ class SSLDoctorCLI:
         return f"{INDENT}{paint(bar, 'accent')}  {paint(_GLYPHS['run'], 'accent', bold=True)} "
 
     def prompt(self, label: str, default: str = "") -> str:
+        if self._tui is not None:
+            return self._tui.ask(label, default)
         if _MODE == ColorMode.PLAIN:
             suffix = f" [{default}]" if default else ""
             try:
@@ -707,7 +1000,7 @@ class SSLDoctorCLI:
             target = f"{tgt['host']}:{tgt.get('port', 443)}"
         return {"target": target,
                 "network_timeout": self.net_timeout,
-                "command_timeout": self.cmd_timeout,
+                "command_timeout": self.command_timeout,
                 "ssh_connected": bool(self.server and self.server.connected)}
 
     # ---------------- command dispatch ----------------
@@ -794,14 +1087,14 @@ class SSLDoctorCLI:
     def cmd_timeout(self, args: List[str]) -> None:
         if not args:
             self.out(f"network timeout: {self.net_timeout}s · remote command timeout: "
-                     f"{self.cmd_timeout}s  (usage: /timeout <net_s> [cmd_s])")
+                     f"{self.command_timeout}s  (usage: /timeout <net_s> [cmd_s])")
             return
         try:
             self.net_timeout = float(args[0])
             if len(args) > 1:
-                self.cmd_timeout = float(args[1])
+                self.command_timeout = float(args[1])
             self.out(f"timeouts set: network {self.net_timeout}s, "
-                     f"remote commands {self.cmd_timeout}s")
+                     f"remote commands {self.command_timeout}s")
         except ValueError:
             self.error("usage: /timeout <net_s> [cmd_s]")
 
@@ -860,8 +1153,9 @@ class SSLDoctorCLI:
                 return
             path = os.path.expanduser(rest[0])
             hostname = rest[1] if len(rest) > 1 else ""
-            items = self._run_phase(f"inspecting {os.path.basename(path)}",
-                                    certmod.inspect_cert_file, path, hostname)
+            with self._results(f"inspecting {os.path.basename(path)}") as phase:
+                items = phase.done(certmod.inspect_cert_file(path, hostname,
+                                                             emit=phase.add))
             self.store.extend(items)
             return
         if args[0] == "match":
@@ -870,8 +1164,9 @@ class SSLDoctorCLI:
                 return
             cpath, kpath = (os.path.expanduser(a) for a in args[1:3])
             self.note("key material is never displayed; only digests are compared")
-            items = self._run_phase("comparing public keys",
-                                    certmod.match_cert_key, cpath, kpath)
+            with self._results("comparing public keys") as phase:
+                items = phase.done(certmod.match_cert_key(cpath, kpath,
+                                                          emit=phase.add))
             self.store.extend(items)
             return
         self.error("usage: /cert inspect <file> [hostname] | /cert match <cert> <key>")
@@ -884,60 +1179,43 @@ class SSLDoctorCLI:
                 return args[i + 1]
         return None
 
-    def _emit_finding(self, f: F.Finding) -> None:
-        print_finding(f)
+    @contextlib.contextmanager
+    def _results(self, text: str):
+        """Run one check phase; its findings always land in one result frame.
 
-    def _run_phase(self, text: str, fn, *args, **kwargs):
-        if self._STREAM_OUTPUT:
-            self.out(paint(f"... {text}", "muted", dim=True))
-            sys.stdout.flush()
-            emit = self._emit_finding
-            try:
-                result = fn(*args, emit=emit, **kwargs)
-            except TypeError:
-                result = fn(*args, **kwargs)
-                self._emit_result(result)
-            return result
-        with Spinner(text):
-            result = fn(*args, **kwargs)
-        self._print_result(result)
-        return result
-
-    def _emit_result(self, result) -> None:
-        if result is None:
-            return
-        if isinstance(result, tuple):
-            result = result[0]
-        if isinstance(result, list):
-            for f in result:
-                self._emit_finding(f)
-        else:
-            self._emit_finding(result)
-
-    def _print_result(self, result) -> None:
-        if result is None:
-            return
-        if isinstance(result, tuple):
-            result = result[0]
-        if isinstance(result, list):
-            print_findings(result)
-        else:
-            print_finding(result)
+        Streaming (an interactive terminal outside batch mode) opens the frame
+        first and adds each finding as its check completes; otherwise the
+        spinner runs and the finished frame is drawn at the end.  Yields the
+        phase: pass `phase.add` as `emit` and hand the returned findings to
+        `phase.done()` so one a check returned without emitting is not lost.
+        """
+        phase = _Phase(text, live=self._STREAM_OUTPUT)
+        try:
+            if phase.live:
+                phase.frame.open()
+                # the shell's status line owns progress (and keeps redrawing);
+                # in the line REPL the frame's phase row says what is running
+                with (Spinner(text) if _active_tui() is not None
+                      else contextlib.nullcontext()):
+                    yield phase
+            else:
+                with Spinner(text):
+                    yield phase
+        finally:
+            phase.close()
 
     def _gather_remote(self, host: str, port: int, sni: Optional[str],
                       profile: bool = True) -> List[F.Finding]:
-        text = f"running remote TLS diagnostics against {host}:{port}"
-        result = self._run_phase(text, netchecks.run_remote_diagnostics,
-                                 host, port, sni=sni, timeout=self.net_timeout)
-        items, facts = result
-        if profile and facts.get("cert"):
-            prof = netchecks.domain_profile(
-                host, port, facts.get("ips", []), facts)
-            items.insert(0, prof)
-            if self._STREAM_OUTPUT:
-                self._emit_finding(prof)
-            else:
-                print_finding(prof)
+        with self._results(f"running remote TLS diagnostics against "
+                           f"{host}:{port}") as phase:
+            items, facts = netchecks.run_remote_diagnostics(
+                host, port, sni=sni, timeout=self.net_timeout, emit=phase.add)
+            phase.done(items)
+            if profile and facts.get("cert"):
+                prof = netchecks.domain_profile(
+                    host, port, facts.get("ips", []), facts)
+                items.insert(0, prof)
+                phase.add(prof, first=True)
         self.store.extend(items)
         self.remote_facts = facts
         self._diagnosis = None
@@ -963,8 +1241,9 @@ class SSLDoctorCLI:
     # ---------------- /local ----------------
     def cmd_local(self, args: List[str]) -> None:
         cert_path = args[0] if args else None
-        items = self._run_phase("collecting local system information",
-                                localmod.run_local_for_remote, self.remote_facts, cert_path)
+        with self._results("collecting local system information") as phase:
+            items = phase.done(localmod.run_local_for_remote(
+                self.remote_facts, cert_path, emit=phase.add))
         self.store.extend(items)
 
     # ---------------- /scan (guided) ----------------
@@ -1037,45 +1316,24 @@ class SSLDoctorCLI:
             return
         srv = self.server
         domain = srv.cfg.tls_host or host
-        if self._STREAM_OUTPUT:
-            self.out(paint("... reading server identity (read-only)", "muted", dim=True))
-            sys.stdout.flush()
-            items = srv.overview(emit=self._emit_finding) + srv.webserver_detection(emit=self._emit_finding)
-        else:
-            with Spinner("reading server identity (read-only)"):
-                items = srv.overview() + srv.webserver_detection()
-            print_findings(items)
+        with self._results("reading server identity (read-only)") as phase:
+            items = phase.done(srv.overview(emit=phase.add)
+                               + srv.webserver_detection(emit=phase.add))
         self.store.extend(items)
 
-        if self._STREAM_OUTPUT:
-            self.out(paint(f"... examining nginx SSL configuration for '{domain}:{port}'", "muted", dim=True))
-            sys.stdout.flush()
-            items = srv.nginx_scan(domain, port, emit=self._emit_finding)
-        else:
-            with Spinner(f"examining nginx SSL configuration for '{domain}:{port}'"):
-                items = srv.nginx_scan(domain, port)
-            print_findings(items)
+        with self._results(f"examining nginx SSL configuration for "
+                           f"'{domain}:{port}'") as phase:
+            items = phase.done(srv.nginx_scan(domain, port, emit=phase.add))
         self.store.extend(items)
 
         presented = ""
         cert = self.remote_facts.get("cert")
         if cert:
             presented = cert.sha256
-        cmp_f = srv.compare_configured_vs_presented(
-            presented, emit=self._emit_finding if self._STREAM_OUTPUT else None)
-        if not self._STREAM_OUTPUT:
-            print_finding(cmp_f)
-        items = [cmp_f]
-
-        if self._STREAM_OUTPUT:
-            self.out(paint("... scanning TLS service logs (read-only)", "muted", dim=True))
-            sys.stdout.flush()
-            log_items = srv.log_scan(emit=self._emit_finding)
-        else:
-            with Spinner("scanning TLS service logs (read-only)"):
-                log_items = srv.log_scan()
-            print_findings(log_items)
-        items = items + log_items
+        with self._results("comparing configured and presented certificates, "
+                           "scanning TLS service logs (read-only)") as phase:
+            items = phase.done([srv.compare_configured_vs_presented(
+                presented, emit=phase.add)] + srv.log_scan(emit=phase.add))
         self.store.extend(items)
 
     # ---------------- /server ----------------
@@ -1106,13 +1364,9 @@ class SSLDoctorCLI:
             return
         srv = self.server
         if sub == "overview":
-            if self._STREAM_OUTPUT:
-                self.out(paint("... querying server", "muted", dim=True))
-                sys.stdout.flush()
-                items = srv.overview(emit=self._emit_finding) + srv.webserver_detection(emit=self._emit_finding)
-            else:
-                with Spinner("querying server"):
-                    items = srv.overview() + srv.webserver_detection()
+            with self._results("querying server") as phase:
+                items = phase.done(srv.overview(emit=phase.add)
+                                   + srv.webserver_detection(emit=phase.add))
         elif sub == "nginx":
             domain, port = srv.cfg.tls_host, srv.cfg.tls_port
             if len(args) > 1:
@@ -1122,13 +1376,9 @@ class SSLDoctorCLI:
                     return
                 if ":" not in args[1].split("//")[-1]:
                     port = srv.cfg.tls_port      # bare domain: session's TLS port
-            if self._STREAM_OUTPUT:
-                self.out(paint(f"... examining nginx SSL configuration for '{domain}:{port}'", "muted", dim=True))
-                sys.stdout.flush()
-                items = srv.nginx_scan(domain, port, emit=self._emit_finding)
-            else:
-                with Spinner(f"examining nginx SSL configuration for '{domain}:{port}'"):
-                    items = srv.nginx_scan(domain, port)
+            with self._results(f"examining nginx SSL configuration for "
+                               f"'{domain}:{port}'") as phase:
+                items = phase.done(srv.nginx_scan(domain, port, emit=phase.add))
         elif sub == "cert":
             if len(args) < 2:
                 self.error("usage: /server cert <remote-cert-path> [remote-key-path]")
@@ -1136,53 +1386,30 @@ class SSLDoctorCLI:
             cert_path = args[1]
             key_path = args[2] if len(args) > 2 else ""
             self.note("key material stays on the server; only digests are compared")
-            if self._STREAM_OUTPUT:
-                self.out(paint(f"... inspecting {cert_path} on the server", "muted", dim=True))
-                sys.stdout.flush()
-                items = srv.scan_cert(cert_path, key_path, emit=self._emit_finding)
-                paths = [cert_path] + ([key_path] if key_path else [])
-                perm_items = srv.file_permissions(paths)
-                for f in perm_items:
-                    self._emit_finding(f)
-                items = items + perm_items
-            else:
-                with Spinner(f"inspecting {cert_path} on the server"):
-                    items = srv.scan_cert(cert_path, key_path)
-                    paths = [cert_path] + ([key_path] if key_path else [])
-                    items += srv.file_permissions(paths)
+            paths = [cert_path] + ([key_path] if key_path else [])
+            with self._results(f"inspecting {cert_path} on the server") as phase:
+                items = phase.done(srv.scan_cert(cert_path, key_path, emit=phase.add)
+                                   + srv.file_permissions(paths))
         elif sub == "config":
-            if self._STREAM_OUTPUT:
-                self.out(paint("... reading TLS/vhost configuration (read-only)", "muted", dim=True))
-                sys.stdout.flush()
-                items = srv.tls_config_scan(emit=self._emit_finding)
-            else:
-                with Spinner("reading TLS/vhost configuration (read-only)"):
-                    items = srv.tls_config_scan()
+            with self._results("reading TLS/vhost configuration (read-only)") as phase:
+                items = phase.done(srv.tls_config_scan(emit=phase.add))
         elif sub == "logs":
-            if self._STREAM_OUTPUT:
-                self.out(paint("... scanning service logs (read-only)", "muted", dim=True))
-                sys.stdout.flush()
-                items = srv.log_scan(emit=self._emit_finding)
-            else:
-                with Spinner("scanning service logs (read-only)"):
-                    items = srv.log_scan()
+            with self._results("scanning service logs (read-only)") as phase:
+                items = phase.done(srv.log_scan(emit=phase.add))
         elif sub == "compare":
             presented = ""
             cert = self.remote_facts.get("cert")
             if cert:
                 presented = cert.sha256
-            cmp_f = srv.compare_configured_vs_presented(
-                presented, emit=self._emit_finding if self._STREAM_OUTPUT else None)
-            if not self._STREAM_OUTPUT:
-                print_finding(cmp_f)
-            items = [cmp_f]
+            with self._results("comparing configured and presented "
+                               "certificates") as phase:
+                items = phase.done([srv.compare_configured_vs_presented(
+                    presented, emit=phase.add)])
         else:
             self.error("usage: /server connect|status|overview|nginx [domain]|cert|"
                        "config|logs|compare|disconnect")
             return
         self.store.extend(items)
-        if not self._STREAM_OUTPUT:
-            print_findings(items)
 
     def _server_connect(self) -> None:
         self.out(paint("SSH connection setup (credentials are never displayed "
@@ -1203,7 +1430,10 @@ class SSLDoctorCLI:
         if auth == "1":
             method = "password"
             try:
-                password = getpass.getpass("SSH password (hidden): ")
+                if self._tui is not None:
+                    password = self._tui.read_secret("SSH password (hidden)")
+                else:
+                    password = getpass.getpass("SSH password (hidden): ")
             except EOFError:
                 self.error("cannot read password in this terminal")
                 return
@@ -1257,7 +1487,7 @@ class SSLDoctorCLI:
         cfg = servermod.SSHConfig(
             host=host, port=int(ssh_port_s), username=user, auth=method,
             key_path=key_path, connect_timeout=timeout,
-            command_timeout=self.cmd_timeout,
+            command_timeout=self.command_timeout,
             tls_host=tls_host or host, tls_port=tls_port)
         if self.server:
             self.server.disconnect()
@@ -1348,34 +1578,217 @@ class SSLDoctorCLI:
         for p in written:
             self.out(f"report written: {paint(os.path.abspath(p), 'accent')}")
 
+    # ---------------- full-screen shell ----------------
+    def _capture_width(self, session) -> int:
+        """Width of the transcript inside the shell's column (0 if unknown)."""
+        from . import tui as tuimod
+        try:
+            columns, _ = session.size()
+        except Exception:
+            return 0
+        # one column of breathing room on the right of the frame
+        return max(0, tuimod.block_width(columns) - tuimod.GUTTER * 2 - 2)
+
+    def _tui_header(self, width: int, rows: int) -> List[List]:
+        """The centred banner: the full wordmark when the screen has the room.
+
+        The full form takes nine rows, so short screens keep the compact one
+        and leave the rows to the transcript.
+        """
+        # build_frame centres it and adds the room below
+        return banner_rows(width if rows >= 24 else min(width, 40), note=False)
+
+    def _composer_state(self, session) -> str:
+        if getattr(session, "question", ""):
+            return "ask"
+        return "busy" if getattr(session, "status", None) else "ready"
+
+    def _tui_hints(self, session, state: str, inner: int) -> List:
+        """Key hints for the composer's bottom border, fitted by dropping the
+        least important ones rather than clipping a word."""
+        if state == "busy":
+            return []
+        arrows = "↑↓" if _GLYPHS.unicode else "up/down"
+        if state == "ask":
+            hint = _answer_hints(session.question, getattr(session, "default", ""))
+            parts = [hint] if hint else ["Enter accepts the default"]
+        elif getattr(session, "menu", None):
+            parts = ["Tab complete", f"{arrows} select", "Esc close"]
+        else:
+            parts = ["Tab complete", f"{arrows} history", "PgUp scroll",
+                     "/help", "Ctrl-D quit"]
+        sep = f" {_GLYPHS['sep']} " if _GLYPHS.unicode else " - "
+        room = max(10, inner - 4 - len(self._send_hint()) - 4)
+        while len(sep.join(parts)) > room and len(parts) > 1:
+            parts.pop(-2 if len(parts) > 2 else -1)
+        return [(sep.join(parts), "muted", False)]
+
+    @staticmethod
+    def _send_hint() -> str:
+        return "⏎ send" if _GLYPHS.unicode else "Enter send"
+
+    def _composer_placeholder(self, session, state: str) -> str:
+        if state == "busy":
+            return "running " + ("—" if _GLYPHS.unicode else "-") + \
+                " Ctrl-C to interrupt"
+        if state == "ask":
+            if getattr(session, "masked", False):
+                return "input is hidden"
+            default = getattr(session, "default", "")
+            return f"type an answer, or Enter for {default}" if default \
+                else "type an answer"
+        return "Type a command, e.g. /scan example.com"
+
+    def _tui_menu(self, session, inner: int) -> List[List]:
+        """The three-row completion list, drawn on top of the command bar."""
+        if not getattr(session, "menu", None):
+            return []
+        name_width = min(max(len(name) for name, _ in session.menu), 12)
+        rows: List[List] = []
+        for index, (name, description) in enumerate(session.menu[:3]):
+            chosen = index == getattr(session, "menu_index", 0)
+            marker = _GLYPHS["run"] if chosen else " "
+            room = max(8, inner - name_width - 4)
+            if len(description) > room:
+                description = description[:max(4, room - len(_GLYPHS.ellipsis))] + _GLYPHS.ellipsis
+            rows.append([(marker + " ", "primary" if chosen else "muted", chosen),
+                         (f"{name:<{name_width}}", "primary", chosen),
+                         ("  ", "", False),
+                         (description, "" if chosen else "muted", False)])
+        return rows
+
+    def _tui_frame(self, session):
+        """Compose the frame; called by the shell on every redraw."""
+        from . import tui as tuimod
+        columns, rows = session.size()
+        width = tuimod.block_width(columns)
+        header = self._tui_header(width, rows)
+        inner = max(4, width - tuimod.GUTTER * 2)
+        menu = self._tui_menu(session, inner)
+        state = self._composer_state(session)
+        limit = tuimod.content_height(rows, len(header), len(menu))
+        # left-aligned log: only real lines, so the composer follows the output
+        body = session.transcript.tail(inner, limit, session.scroll, fill=False)
+        if session.scroll and body:
+            body[0] = f".. {session.scroll} lines back (PgDn or wheel down to return)"
+        # the label says what the composer is for; a question or a running
+        # check replaces it, and the session summary sits on the right
+        label = session.status if state != "ready" else [(APP_NAME.lower().replace(" ", "-"),
+                                                           "primary", True)]
+        return tuimod.build_frame(
+            columns=columns, rows=rows, header=header, body=body,
+            status=[(self.status_text(), "muted", False)],
+            prompt_text=session.display_text(), painter=paint, glyphs=_GLYPHS,
+            cursor=session.cursor, menu=menu, label=label, state=state,
+            placeholder=self._composer_placeholder(session, state),
+            hints=self._tui_hints(session, state, inner),
+            send=[] if state == "busy" else [(self._send_hint(), "muted", False)])
+
+    def _tui_run(self, session, line: str) -> None:
+        """Execute one command with its output captured into the transcript."""
+        global _CAPTURE
+        # result frames are drawn to the transcript, not to the terminal
+        set_capture_width(self._capture_width(session))
+        session.transcript.append(f"ssl-doctor> {line}")
+        captured = session.capture()
+        saved = sys.stdout
+        _CAPTURE = True
+        try:
+            sys.stdout = captured
+            self.execute(line)
+        finally:
+            sys.stdout = saved
+            _CAPTURE = False
+        session.transcript.flush_partial()
+        # blank line between commands so each command's output reads as a block
+        if session.transcript.lines and session.transcript.lines[-1].strip():
+            session.transcript.append("")
+        session.render()
+
+    def _repl_tui(self) -> int:
+        from . import tui as tuimod
+        session = tuimod.TuiSession(renderer=self._tui_frame,
+                                    completer=command_completions)
+        set_capture_width(self._capture_width(session))
+        self._tui = session
+        set_active_tui(session)
+        try:
+            with session:
+                session.transcript.append(
+                    paint(f"Welcome. {APP_NAME} is read-only; credentials are "
+                          f"never logged.", "muted"))
+                session.transcript.append("")
+                while self._running:
+                    try:
+                        line = session.read_line()
+                    except KeyboardInterrupt:
+                        # Ctrl-C at the command bar ends the session, exactly as in
+                        # the line-oriented REPL; the shell restores the terminal.
+                        break
+                    if line is None:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if line.lower() in ("/exit", "/quit", "exit", "quit"):
+                        self.cmd_exit([])
+                        break
+                    session.scroll = 0
+                    self._tui_run(session, line)
+                    if not self._running:
+                        break
+        finally:
+            set_active_tui(None)
+            set_capture_width(0)
+            self._tui = None
+            if self.server:
+                self.server.disconnect()
+        self.note("bye")
+        return 0
+
     # ---------------- REPL ----------------
     def banner(self) -> None:
         for line in banner_lines():
             self.out(line)
-        self.out(paint("Type /help for the command list.", "muted", dim=True))
+        hint = "Type /help for the command list."
+        # the call to action sits under the centred banner, centred with it
+        self.out(" " * max(0, (terminal_width() - len(hint)) // 2)
+                 + paint(hint, "muted", dim=True))
         self.out("")
 
     def repl(self) -> int:
+        from . import tui as tuimod
+        if self.use_tui is None:
+            self.use_tui = tuimod.enabled()
+        if self.use_tui:
+            try:
+                return self._repl_tui()
+            except Exception as exc:  # never strand the terminal
+                self.note(f"full-screen mode unavailable: {type(exc).__name__}: {exc}")
+                self.use_tui = False
         self.banner()
         framed = _MODE != ColorMode.PLAIN
         while self._running:
             if framed:
-                self.out(self.status_line())
-                self.out(self._rule())
-                prompt_text = paint("| > ", "primary", bold=True)
+                self.out(self._composer_edge(top=True))
+                mark = "❯ " if _GLYPHS.unicode else "> "
+                prompt_text = (INDENT + paint(_GLYPHS.vert, "primary") + " "
+                               + paint(mark, "primary", bold=True))
             else:
                 prompt_text = "ssl-doctor> "
             try:
                 line = input(prompt_text)
             except (EOFError, KeyboardInterrupt):
                 if framed:
-                    self.out("\r" + self._rule())
+                    # nothing echoed a newline: close the box below the prompt
+                    self.out("")
+                    self.out(self._composer_edge(top=False))
                 self.out("")
                 break
             if framed:
-                # close the input box before any output; the leading CR keeps
+                # close the composer before any output; the leading CR keeps
                 # the frame tidy when the terminal never echoed a newline
-                self.out("\r" + self._rule())
+                self.out("\r" + self._composer_edge(top=False))
             if line.strip().lower() in ("/exit", "/quit", "exit", "quit"):
                 self.cmd_exit([])
                 break
@@ -1411,6 +1824,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             except ValueError:
                 pass
             i += 2
+        elif argv[i] in ("--no-tui", "--plain"):
+            cli.use_tui = False
+            i += 1
         elif argv[i] == "--typewriter":
             cli._typewriter_enabled = True
             global _TW_ENABLED
