@@ -183,8 +183,9 @@ default foreground, and captions, scope, timings and counts muted or dim.
 
 ### Requirement: Layout uses two-space indent and single-line gaps
 Content SHALL be left-aligned with a two-space indent, and blocks SHALL be
-separated by one blank line. There SHALL be no figlet or ASCII-art banner and
-no centred text.
+separated by one blank line. Aside from the startup banner (see the
+`add-modern-banner` change, which supersedes this clause) there SHALL be no
+decorative art and no centred text.
 
 #### Scenario: Two commands in sequence
 - **WHEN** two checks run one after another on a terminal
