@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased — warm terminal interface
+
+Presentation-only restyle, following the Claude Code terminal design language.
+**Commands, flags, accepted answers, check ids, verdicts, exit codes, the JSON
+report payload and the findings contract are unchanged.**
+
+### What looks different
+
+- **Semantic colour roles** (`primary`, `tool`, `accent`, `success`, `warning`,
+  `error`, `muted`, `subtle`, `surface`) with TrueColor → 256 → 16 → plain
+  degradation. `NO_COLOR` wins over everything; new `SSL_DOCTOR_COLOR=never|always`
+  exists for demos and captures. Piped output stays plain.
+- **One frame per command**: findings print as rows inside a single box for the
+  command that produced them, with the passed/failed/warnings/not-tested
+  counters as the footer. Evidence, detail and `fix:` text are never truncated;
+  narrow terminals wrap with a hanging indent.
+- **Dashed ASCII input frame** with a `| > ` prompt and a muted status line
+  (`target · 12 findings · 1 fail · timeout 8s · ssh off`) that is suppressed in
+  batch (`-c`) runs and in plain mode.
+- **Questions to the operator** (SSH setup, host-key trust, mode choice) are
+  drawn in a lavender frame with key hints; the accepted answer sets are
+  identical.
+- **Thinking indicator**: `· ✢ ✳ ✶ ✻ ✽` reverse-mirror spinner in terracotta
+  with a per-invocation verb replaces the braille spinner. Plain mode prints a
+  single muted line. Progress is still a counter, never a bar.
+- **HTML report** adopts the same palette (terracotta title rule, hot-pink check
+  ids, semantic status pills). Still one self-contained, printable file with no
+  scripts, fonts or remote assets.
+- ASCII fallbacks (`+ x ! > -`) apply when the terminal encoding cannot render
+  the glyphs; on Windows, ANSI is enabled explicitly and plain mode is used when
+  that fails.
+- `/diagnose` now prints its overall verdict (`PASS`/`FAIL`/`WARNING`) in words
+  next to the title instead of encoding it in the title's colour only.
+
+### Compatibility
+
+- Plain mode output is unchanged apart from the status glyph and the `·` → `-`
+  bullet substitution, so existing captured logs, tests and CI output keep
+  working.
+- `python3 -m unittest discover -s tests` covers the theme resolver, glyph
+  fallback, frame content, prompt defaults, spinner lifecycle and report skin
+  (`tests/test_terminal_ui.py`).
+
+
 ## v0.3.0 — diagnostic correctness
 
 This release fixes how SSL Doctor diagnoses the most common nginx failure: a

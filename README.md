@@ -17,6 +17,62 @@ python3 ssldoctor.py "/tls example.com"                   # one-shot command
 python3 ssldoctor.py -c "/scan example.com --with-server" -c "/report both out"
 ```
 
+## Terminal look
+
+The interface follows the Claude Code terminal design language: warm
+terracotta accents, no ASCII art, and frames that tell you *who* is working.
+
+- **Hot pink frames** wrap work the tool did (`/tls`, `/local`, `/server …`,
+  one block per command, findings as rows, counters in the footer).
+- **Lavender frames** wrap a question that is waiting on you, with the keys to
+  press. Answers behave exactly as before — only the presentation is new.
+- **Dashed ASCII input** (`- - -`, `| > `) is the prompt; it is deliberately
+  not Unicode box drawing.
+- **Thinking indicator**: `· ✢ ✳ ✶ ✻ ✽` reverse-mirror spinner plus a verb
+  (`✳ Chaining…`) while network or SSH work runs. Determinate progress is a
+  counter (`▸ Step 2/4`), never a progress bar.
+- Status is carried by glyph **and** word **and** colour, so it survives a
+  monochrome capture: `✓ PASS`, `⚠ WARNING`, `✗ FAIL`, `? NOT TESTED`.
+
+```
+  ┌─ /scan shop.example:443 ───────────────────────────────────────────┐
+  │ ✓ PASS       tls.verify           certificate validation (system
+                                      trust)
+  │   • TLS 1.3 · TLS_AES_256_GCM_SHA384 · chains to a trusted root
+  │ ✗ FAIL       tls.chain            server presents a complete, linked
+                                      chain
+  │   • the server sends only the leaf certificate (1 certificate)
+  │   fix: append the intermediate to ssl_certificate on the nginx
+  │   server
+  │ ⚠ WARNING    tls.hostname         certificate covers the requested
+                                      name
+  │   • subjectAltName covers www.shop.example only
+  │ ? NOT TESTED tls.verify.rootonly  roots-only validation
+  │   • skipped in this example; see the check table above
+  └─ 1 passed · 1 failed · 1 warnings · 1 not tested ──────────────────┘
+  ┌─ Run authorized server-side checks (SSH)? ─────────────────────────┐
+  │  [Y]es  [N]o   default: no
+  └────────────────────────────────────────────────────────────────────┘
+```
+
+Colour is a semantic role, resolved once per run, so the same code path serves
+every terminal:
+
+| Condition | Result |
+|---|---|
+| `NO_COLOR` set | plain — no escape sequences at all |
+| `SSL_DOCTOR_COLOR=never` / `always` | force plain / force colour on a terminal |
+| stdout is not a terminal | plain (pipes, files, CI logs) |
+| `COLORTERM=truecolor` or `24bit` | TrueColor |
+| `TERM` contains `256color` | 256-colour |
+| otherwise, on a terminal | 16-colour |
+| `TERM=dumb`, Windows console without ANSI, or an encoding that cannot render `✓ │` | plain / dashed ASCII frames |
+
+Plain mode is byte-compatible with earlier releases (plus the `+ x !` glyphs),
+so `-c` batches, captured logs, JSON reports and the findings contract are
+unchanged. `SSL_DOCTOR_COLOR=always` is useful for demo captures and does not
+override redirection to a file.
+
 ## The scan modes
 
 `/scan` identifies the domain, examines the client side, and — when you have
@@ -126,7 +182,7 @@ Via a read-only SSH session (`/server connect` or `/scan --server-only` /
 ```
 ssldoctor.py            entry point
 ssl_doctor/
-  cli.py                REPL, prompts, colors, spinner, scan orchestration
+  cli.py                REPL, theme/frames/spinner, prompts, scan orchestration
   findings.py           PASS/FAIL/WARNING/NOT TESTED model + session store
   certs.py              offline certificate parsing + key matching (digest-only)
   netchecks.py          target parsing, domain profile, DNS/TCP/TLS/HTTPS checks

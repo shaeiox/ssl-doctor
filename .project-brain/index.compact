@@ -14,3 +14,5 @@ P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
   chain-diagnosis ✓v 2026-10-24 v1
   server-ssh-nginx ✓v 2026-10-24 v1
   commands-reference ✓v 2026-10-24 v1
+  ui-design-system ✓v 2026-10-24 v1
+  _decisions ✓v 2026-10-24 v1

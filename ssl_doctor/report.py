@@ -48,33 +48,49 @@ def write_json(path: str, findings: List[F.Finding],
 
 
 _CSS = """
-:root{--pass:#1a7f37;--fail:#cf222e;--warn:#9a6700;--nt:#57606a;--bg:#f6f8fa}
+/* Claude Code-inspired skin: warm terracotta accent, hot-pink identifiers and
+   status colours from the same roles the terminal uses. Light, printable and
+   fully inline — a report must render with no network access. */
+:root{
+  --ink:#1f2328;--muted:#57534e;--rule:#e7e0d8;--bg:#faf7f4;--card:#fff;
+  --accent:#d77757;--tool:#fd5db1;
+  --pass:#4eba65;--warn:#ffc107;--fail:#ff6b80;--nt:#888888;
+  --pill-ink:#1a1a1a;
+}
 *{box-sizing:border-box}
 body{font-family:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
-margin:0;color:#1f2328;background:var(--bg)}
+margin:0;color:var(--ink);background:var(--bg);font-size:14px;line-height:1.5}
 .wrap{max-width:1000px;margin:0 auto;padding:24px}
-h1{font-size:22px;margin:0 0 4px}.sub{color:#57606a;font-size:13px;margin-bottom:16px}
-.card{background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:16px;
-margin-bottom:16px}
-.summary{display:flex;gap:12px;flex-wrap:wrap}
-.pill{border-radius:999px;padding:6px 14px;font-weight:600;font-size:13px;color:#fff}
+h1{font-size:23px;margin:0 0 10px;font-weight:700;letter-spacing:-.01em;
+color:var(--ink);border-bottom:2px solid var(--accent);padding-bottom:10px}
+.sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+.card{background:var(--card);border:1px solid var(--rule);border-radius:10px;
+padding:18px;margin-bottom:16px;box-shadow:0 1px 2px rgba(31,35,40,.04)}
+.summary{display:flex;gap:10px;flex-wrap:wrap}
+.pill{border-radius:999px;padding:6px 14px;font-weight:600;font-size:13px;
+color:var(--pill-ink)}
 .p-PASS{background:var(--pass)}.p-FAIL{background:var(--fail)}
 .p-WARNING{background:var(--warn)}.p-NT{background:var(--nt)}
 .badge{display:inline-block;min-width:86px;text-align:center;border-radius:6px;
-padding:2px 8px;font-size:11.5px;font-weight:700;color:#fff}
+padding:3px 8px;font-size:11.5px;font-weight:700;
+color:var(--pill-ink);letter-spacing:.02em}
 .b-PASS{background:var(--pass)}.b-FAIL{background:var(--fail)}
 .b-WARNING{background:var(--warn)}.b-NT{background:var(--nt)}
-.scopes td,.scopes th{border-bottom:1px solid #eaecef;padding:6px 10px;font-size:13px;
-text-align:left;vertical-align:top}
+.scopes td,.scopes th{border-bottom:1px dashed var(--rule);padding:8px 10px;
+font-size:13px;text-align:left;vertical-align:top}
+.scopes tr:last-child td{border-bottom:none}
 table{border-collapse:collapse;width:100%}
 ul{margin:6px 0 6px 18px;padding:0}li{margin:3px 0;font-size:13.5px}
-.cause{border-left:4px solid var(--fail);padding:6px 12px;margin:10px 0;background:#fbfbfc}
-.cause.warn{border-color:var(--warn)}
-.meta{font-size:12.5px;color:#57606a}
-code{background:#eaeef2;border-radius:4px;padding:1px 5px;font-size:12.5px}
-h2{font-size:16px;margin:0 0 10px}
-.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;
-white-space:pre-wrap;word-break:break-word}
+.cause{border-left:4px solid var(--fail);padding:8px 14px;margin:12px 0;
+background:#fff8f6;border-radius:0 8px 8px 0}
+.cause.warn{border-color:var(--warn);background:#fffbf0}
+.meta{font-size:12.5px;color:var(--muted)}
+code,code.check{background:#f3ece5;border-radius:4px;padding:1px 5px;
+font-size:12.5px}
+code.check{background:none;padding:0;color:var(--tool);font-weight:600}
+h2{font-size:16px;margin:0 0 12px;font-weight:700}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+font-size:12.5px;white-space:pre-wrap;word-break:break-word}
 """
 
 
@@ -156,7 +172,7 @@ def html_from_payload(payload: Dict[str, Any]) -> str:
             parts.append(
                 f"<tr><td>{_badge(f.status)}</td>"
                 f"<td><b>{esc(f.title)}</b>"
-                + (f"<div class=meta>target: {esc(f.target)} · check: {esc(f.check)}</div>" if f.target else f"<div class=meta>check: {esc(f.check)}</div>")
+                + (f'<div class=meta>target: {esc(f.target)} · check: <code class="check">{esc(f.check)}</code></div>' if f.target else f'<div class=meta>check: <code class="check">{esc(f.check)}</code></div>')
                 + (f"<ul>{ev}</ul>" if ev else "")
                 + (f"<div><i>{esc(f.detail)}</i></div>" if f.detail else "")
                 + (f"<div><b>Recommendation:</b> {esc(f.recommendation)}</div>" if f.recommendation else "")
