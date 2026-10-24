@@ -246,7 +246,26 @@ def _plain_output() -> bool:
 
 def paint(text: str, role: str = "", bold: bool = False, dim: bool = False) -> str:
     """Colour one string by semantic role; no-op in plain mode."""
-    if _plain_output() or not text:
+    if _plain_output():
+        return text
+    return _sgr(text, role, bold, dim)
+
+
+def paint_screen(text: str, role: str = "", bold: bool = False) -> str:
+    """The full-screen renderer's painter: follows the terminal only.
+
+    `paint()` also goes plain while a command's output is being captured, so
+    the transcript stays colourless; the renderer draws during that time too
+    (the spinner and streamed findings redraw from another thread), and the
+    banner and composer must keep their colours while it does.
+    """
+    if _MODE == ColorMode.PLAIN:
+        return text
+    return _sgr(text, role, bold, False)
+
+
+def _sgr(text: str, role: str, bold: bool, dim: bool) -> str:
+    if not text:
         return text
     codes = []
     if role:
@@ -1678,7 +1697,7 @@ class SSLDoctorCLI:
         return tuimod.build_frame(
             columns=columns, rows=rows, header=header, body=body,
             status=[(self.status_text(), "muted", False)],
-            prompt_text=session.display_text(), painter=paint, glyphs=_GLYPHS,
+            prompt_text=session.display_text(), painter=paint_screen, glyphs=_GLYPHS,
             cursor=session.cursor, menu=menu, label=label, state=state,
             placeholder=self._composer_placeholder(session, state),
             hints=self._tui_hints(session, state, inner),
