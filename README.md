@@ -19,56 +19,76 @@ python3 ssldoctor.py -c "/scan example.com --with-server" -c "/report both out"
 
 ## Terminal look
 
-The interface follows the Claude Code terminal design language: warm
-terracotta accents, a two-stroke wordmark, and frames that tell you *who* is
-working. On startup:
+SSL Doctor opens as a **full-screen application**, not a scrolling log: one
+centred column with a header, a scrollable output panel, a status line and a
+command bar. Output from every command is captured into the panel, wrap-safe and
+scrollable, so a long `/scan` never pushes the screen away.
 
 ```
-════════════════════════════════════════════════════════════════════
-  ██████ ██████ ██       █████  ██████ ██████ ██████ ██████ ██████
-  ██     ██     ██       ██  ██ ██  ██ ██       ██   ██  ██ ██  ██
-  ██████ ██████ ██       ██  ██ ██  ██ ██       ██   ██  ██ ██████
-      ██     ██ ██       ██  ██ ██  ██ ██       ██   ██  ██ ██  ██
-  ██████ ██████ ██████   █████  ██████ ██████   ██   ██████ ██  ██
+                ██████ ██████ ██       █████  ██████ ██████ ██████ ██████ ██████
+                ██     ██     ██       ██  ██ ██  ██ ██       ██   ██  ██ ██  ██
+                ██████ ██████ ██       ██  ██ ██  ██ ██       ██   ██  ██ ██████
+                    ██     ██ ██       ██  ██ ██  ██ ██       ██   ██  ██ ██  ██
+                ██████ ██████ ██████   █████  ██████ ██████   ██   ██████ ██  ██
+                 offline ssl/tls diagnostics · client · server · chain · nginx
+                              creator: eleven  ·  read-only checks
 
-  offline ssl/tls diagnostics · client · server · chain · nginx
-  creator: eleven  ·  v0.3.0
-  all checks are read-only; credentials are never logged
-════════════════════════════════════════════════════════════════════
+ ┌─ output ──────────────────────────────────────────────────────────────────────────────────┐
+ │                                                                                            │
+ │                                                                                            │
+ │                                                                                            │
+ │                                                                                            │
+ │                                                                                            │
+ │                                                                                            │
+ │ Welcome. SSL Doctor is read-only; credentials are never logged.                            │
+ │                                                                                            │
+ │ ssl-doctor> /version                                                                       │
+ │ SSL Doctor v0.3.0                                                                          │
+ └────────────────────────────────────────────────────────────────────────────────────────────┘
+ timeout 8s · ssh off
+ ┌─ command ─────────────────────────────────────────────────────────────────────────────────┐
+ │ >                                                                                          │
+ └────────────────────────────────────────────────────────────────────────────────────────────┘
+            up/down history  ·  PgUp/PgDn scroll  ·  /help commands  ·  Ctrl-D quit
 ```
 
-- **Hot pink frames** wrap work the tool did (`/tls`, `/local`, `/server …`,
-  one block per command, findings as rows, counters in the footer).
-- **Lavender frames** wrap a question that is waiting on you, with the keys to
-  press. Answers behave exactly as before — only the presentation is new.
-- **Dashed ASCII input** (`- - -`, `| > `) is the prompt; it is deliberately
-  not Unicode box drawing.
-- **Thinking indicator**: `· ✢ ✳ ✶ ✻ ✽` reverse-mirror spinner plus a verb
-  (`✳ Chaining…`) while network or SSH work runs. Determinate progress is a
-  counter (`▸ Step 2/4`), never a progress bar.
-- Status is carried by glyph **and** word **and** colour, so it survives a
-  monochrome capture: `✓ PASS`, `⚠ WARNING`, `✗ FAIL`, `? NOT TESTED`.
+| Key | Action |
+|---|---|
+| `Enter` | run the command in the bar |
+| `↑` / `↓` | recall earlier commands |
+| `←` / `→`, `Home` / `End` | move the caret in the command bar |
+| `Backspace`, `Ctrl-U` | edit / clear the command bar |
+| `PgUp` / `PgDn` | scroll the output panel (the newest output is always one key away) |
+| `Ctrl-L` | redraw |
+| `Ctrl-C`, `Ctrl-D` | leave the session (same status code as the line REPL) |
 
-```
-  ┌─ /scan shop.example:443 ───────────────────────────────────────────┐
-  │ ✓ PASS       tls.verify           certificate validation (system
-                                      trust)
-  │   • TLS 1.3 · TLS_AES_256_GCM_SHA384 · chains to a trusted root
-  │ ✗ FAIL       tls.chain            server presents a complete, linked
-                                      chain
-  │   • the server sends only the leaf certificate (1 certificate)
-  │   fix: append the intermediate to ssl_certificate on the nginx
-  │   server
-  │ ⚠ WARNING    tls.hostname         certificate covers the requested
-                                      name
-  │   • subjectAltName covers www.shop.example only
-  │ ? NOT TESTED tls.verify.rootonly  roots-only validation
-  │   • skipped in this example; see the check table above
-  └─ 1 passed · 1 failed · 1 warnings · 1 not tested ──────────────────┘
-  ┌─ Run authorized server-side checks (SSH)? ─────────────────────────┐
-  │  [Y]es  [N]o   default: no
-  └────────────────────────────────────────────────────────────────────┘
-```
+The chrome is laid out from the terminal size: the column is `min(columns - 2,
+96)`, centred, and the header drops from the wordmark to a compact line when
+the window is short. Commands, answers, findings, exit codes and reports are
+identical to the line-oriented mode — the shell only presents them.
+
+**Opting out** — any of these runs the line-oriented REPL instead:
+`--no-tui`, `SSL_DOCTOR_TUI=0`, a non-tty stdin/stdout (pipes, CI, `-c` batch
+runs), `TERM=dumb`, or a platform without a key reader. That mode prints the
+wordmark, then framed finding blocks as the session scrolls — the same content,
+appended to the scrollback instead of composed in place.
+
+### Inside the frame
+
+- **Status colours** come from semantic roles: `✓ PASS` green, `⚠ WARNING`
+  amber, `✗ FAIL` red-pink, `? NOT TESTED` grey. Inside the panel the status
+  marker is coloured; the rest of the row stays plain, so long evidence stays
+  readable.
+- **Progress** never writes into the panel. The spinner (`· ✢ ✳ ✶ ✻ ✽`, 120 ms)
+  and its verb live in the status line, next to the scope summary
+  (`shop.example:443 · 12 findings · 1 fail · timeout 8s · ssh off`).
+- **Questions** (`/server connect`, host-key trust, mode choice) appear in the
+  status line and are answered in the command bar — the accepted answers are
+  unchanged, and passwords are masked and never written to the transcript.
+- **Diagnosis** keeps its ranked causes, certainty labels and `fix:` lines; the
+  panel colours the certainty marker.
+
+### Colour and glyphs
 
 Colour is a semantic role, resolved once per run, so the same code path serves
 every terminal:

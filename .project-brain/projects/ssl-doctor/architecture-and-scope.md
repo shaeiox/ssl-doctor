@@ -11,7 +11,7 @@ version: 1
 **Problem:** Need to understand what SSL Doctor actually does and how it's structured.
 
 **Solution (v1):**
-- Entry point: `ssldoctor.py` → CLI in `ssl_doctor/cli.py` (REPL, prompts, colors, spinner, orchestration). 
+- Entry point: `ssldoctor.py` → CLI in `ssl_doctor/cli.py` (shell dispatch, prompts, theme, orchestration) with the full-screen shell in `ssl_doctor/tui.py` (alternate screen, layout, transcript, keys). 
 - Modules: `findings.py` (PASS/FAIL/WARNING/NOT TESTED + session store), `certs.py` (offline parsing + digest-only key matching), `netchecks.py` (target parsing, domain profile, DNS/TCP/TLS/HTTPS), `local.py` (client + Windows certutil/Schannel), `server.py` (SSH transport, host-key trust, nginx config), `analyze.py` (correlation → ranked causes), `report.py` (JSON + HTML).
 - Scope: Offline-capable TLS/SSL diagnostics for IT support — identifies whether failure is client, server (nginx/Apache), chain, or network. 
 - Security: read-only, no sudo/config edits/service restarts, passwords never on CLI (SSH_ASKPASS), host keys verified/changed keys refused, private keys never printed, Windows checks only on Windows.

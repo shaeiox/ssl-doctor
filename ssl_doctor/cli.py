@@ -191,6 +191,9 @@ def resolve_glyphs(mode: str, stream=None) -> Glyphs:
 
 _MODE = resolve_color_mode()
 _GLYPHS = resolve_glyphs(_MODE)
+# While the full-screen shell captures a command's output, colour must not leak
+# into the transcript: the panel re-applies status colours at render time.
+_CAPTURE = False
 # Compatibility alias: older code and third-party snippets read this.
 _USE_COLOR = _MODE != ColorMode.PLAIN
 
@@ -203,9 +206,14 @@ def set_color_mode(mode: str) -> None:
     _USE_COLOR = mode != ColorMode.PLAIN
 
 
+def _plain_output() -> bool:
+    """True when output must be plain: no colour, no block frames."""
+    return _CAPTURE or _MODE == ColorMode.PLAIN
+
+
 def paint(text: str, role: str = "", bold: bool = False, dim: bool = False) -> str:
     """Colour one string by semantic role; no-op in plain mode."""
-    if _MODE == ColorMode.PLAIN or not text:
+    if _plain_output() or not text:
         return text
     codes = []
     if role:
@@ -291,6 +299,19 @@ SPINNER_VERBS = (
 )
 
 
+_TUI_SESSION = None
+
+
+def _active_tui():
+    """The running full-screen session, if any (used by Spinner)."""
+    return _TUI_SESSION
+
+
+def set_active_tui(session) -> None:
+    global _TUI_SESSION
+    _TUI_SESSION = session
+
+
 class Spinner:
     """Signature thinking indicator; one plain line when output is redirected."""
 
@@ -300,8 +321,16 @@ class Spinner:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._dirty = False
+        self._session = None
 
     def __enter__(self) -> "Spinner":
+        session = _active_tui()
+        if session is not None:
+            # the panel must not gain progress lines: the status line owns them
+            self._session = session
+            session.start_status([(f"{SPINNER_CYCLE[2]} {self.verb}{_GLYPHS.ellipsis} "
+                                   f"{self.text}", "primary", True)])
+            return self
         if _MODE != ColorMode.PLAIN:
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
@@ -336,6 +365,10 @@ class Spinner:
         self._dirty = False
 
     def __exit__(self, *exc) -> None:
+        if self._session is not None:
+            self._session.stop_status()
+            self._session = None
+            return
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=0.5)
@@ -469,7 +502,7 @@ def print_findings(items: List[F.Finding], verbose: bool = True) -> None:
     """Print a command's findings: framed rows on a terminal, plain otherwise."""
     if not items:
         return
-    if _MODE == ColorMode.PLAIN:
+    if _plain_output():
         for f in items:
             print_finding(f, verbose)
         print(paint("\n" + _counts_text(items, " - "), "muted", dim=True))
@@ -585,6 +618,8 @@ class SSLDoctorCLI:
         self.remote_facts: Dict = {}
         self._diagnosis = None
         self._running = True
+        self._tui = None  # set while the full-screen shell is active
+        self.use_tui: Optional[bool] = None  # None = decide from the terminal
 
     # ---------------- helpers ----------------
     def out(self, text: str = "") -> None:
@@ -600,8 +635,8 @@ class SSLDoctorCLI:
     def _rule(self) -> str:
         return paint(dashed_rule(block_width()), "muted")
 
-    def status_line(self) -> str:
-        """One muted line: what is in scope, what was found, what is open."""
+    def status_text(self) -> str:
+        """Plain one-liner: what is in scope, what was found, what is open."""
         target = ""
         if self.remote_facts.get("host"):
             target = f"{self.remote_facts['host']}:{self.remote_facts.get('port', 443)}"
@@ -617,7 +652,11 @@ class SSLDoctorCLI:
                 parts.append(f"{counts[F.FAIL]} fail")
         parts.append(f"timeout {self.net_timeout:g}s")
         parts.append("ssh " + ("on" if (self.server and self.server.connected) else "off"))
-        return paint(" · ".join(parts), "muted", dim=True)
+        separator = f" {_GLYPHS['sep']} " if _GLYPHS.unicode else " - "
+        return separator.join(parts)
+
+    def status_line(self) -> str:
+        return paint(self.status_text(), "muted", dim=True)
 
     def _question_frame(self, label: str, hints: str, default: str) -> str:
         """Lavender frame for a question that is waiting on the operator."""
@@ -632,6 +671,8 @@ class SSLDoctorCLI:
         return f"{INDENT}{paint(bar, 'accent')}  {paint(_GLYPHS['run'], 'accent', bold=True)} "
 
     def prompt(self, label: str, default: str = "") -> str:
+        if self._tui is not None:
+            return self._tui.ask(label, default)
         if _MODE == ColorMode.PLAIN:
             suffix = f" [{default}]" if default else ""
             try:
@@ -1013,7 +1054,10 @@ class SSLDoctorCLI:
         if auth == "1":
             method = "password"
             try:
-                password = getpass.getpass("SSH password (hidden): ")
+                if self._tui is not None:
+                    password = self._tui.read_secret("SSH password (hidden)")
+                else:
+                    password = getpass.getpass("SSH password (hidden): ")
             except EOFError:
                 self.error("cannot read password in this terminal")
                 return
@@ -1146,6 +1190,106 @@ class SSLDoctorCLI:
         for p in written:
             self.out(f"report written: {paint(os.path.abspath(p), 'accent')}")
 
+    # ---------------- full-screen shell ----------------
+    def _tui_header(self, width: int, rows: int) -> List[List]:
+        """Header block: the wordmark when there is room, compact text otherwise."""
+        art = wordmark(BANNER_NAME, _GLYPHS.block)
+        art_width = max(len(row) for row in art)
+        tall = rows >= 22 and width >= art_width + 2
+        header: List[List] = []
+        if tall:
+            header.extend([[(row, "primary", True)] for row in art])
+        else:
+            header.append([(f"{BANNER_NAME}  {_GLYPHS['sep']}  v{__version__}",
+                            "primary", True)])
+        header.append([(banner_tagline(), "muted", False)])
+        header.append([(f"{BANNER_CREDIT}  {_GLYPHS['sep']}  read-only checks",
+                        "accent", True)])
+        header.append([])
+        return header
+
+    def _tui_hints(self, rows: int) -> List:
+        if rows < 14:
+            return []
+        sep = _GLYPHS["sep"] if _GLYPHS.unicode else "-"
+        text = (f"up/down history  {sep}  PgUp/PgDn scroll  {sep}  "
+                f"/help commands  {sep}  Ctrl-D quit")
+        return [(text, "muted", False)]
+
+    def _tui_frame(self, session):
+        """Compose the frame; called by the shell on every redraw."""
+        from . import tui as tuimod
+        columns, rows = session.size()
+        width = tuimod.block_width(columns)
+        header = self._tui_header(width, rows)
+        hints = self._tui_hints(rows)
+        inner = max(4, width - 4)
+        panel_rows = tuimod.panel_height(rows - tuimod.top_margin(rows),
+                                         len(header), bool(hints))
+        body = session.transcript.tail(inner, panel_rows, session.scroll)
+        if session.scroll and body:
+            marker = f"  .. {session.scroll} lines back (PgDn to return)"
+            body[0] = marker
+        status = session.status or [(self.status_text(), "muted", False)]
+        return tuimod.build_frame(
+            columns=columns, rows=rows, header=header, body=body, status=status,
+            prompt_text=session.display_text(), hints=hints, painter=paint,
+            glyphs=_GLYPHS, cursor=session.cursor)
+
+    def _tui_run(self, session, line: str) -> None:
+        """Execute one command with its output captured into the panel."""
+        global _CAPTURE
+        session.transcript.append(f"ssl-doctor> {line}")
+        captured = session.capture()
+        saved = sys.stdout
+        _CAPTURE = True
+        try:
+            sys.stdout = captured
+            self.execute(line)
+        finally:
+            sys.stdout = saved
+            _CAPTURE = False
+        session.transcript.flush_partial()
+        session.render()
+
+    def _repl_tui(self) -> int:
+        from . import tui as tuimod
+        session = tuimod.TuiSession(renderer=self._tui_frame)
+        self._tui = session
+        set_active_tui(session)
+        try:
+            with session:
+                session.transcript.append(
+                    paint(f"Welcome. {APP_NAME} is read-only; credentials are "
+                          f"never logged.", "muted"))
+                session.transcript.append("")
+                while self._running:
+                    try:
+                        line = session.read_line()
+                    except KeyboardInterrupt:
+                        # Ctrl-C at the command bar ends the session, exactly as in
+                        # the line-oriented REPL; the shell restores the terminal.
+                        break
+                    if line is None:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if line.lower() in ("/exit", "/quit", "exit", "quit"):
+                        self.cmd_exit([])
+                        break
+                    session.scroll = 0
+                    self._tui_run(session, line)
+                    if not self._running:
+                        break
+        finally:
+            set_active_tui(None)
+            self._tui = None
+            if self.server:
+                self.server.disconnect()
+        self.note("bye")
+        return 0
+
     # ---------------- REPL ----------------
     def banner(self) -> None:
         for line in banner_lines():
@@ -1154,6 +1298,15 @@ class SSLDoctorCLI:
         self.out("")
 
     def repl(self) -> int:
+        from . import tui as tuimod
+        if self.use_tui is None:
+            self.use_tui = tuimod.enabled()
+        if self.use_tui:
+            try:
+                return self._repl_tui()
+            except Exception as exc:  # never strand the terminal
+                self.note(f"full-screen mode unavailable: {type(exc).__name__}: {exc}")
+                self.use_tui = False
         self.banner()
         framed = _MODE != ColorMode.PLAIN
         while self._running:
@@ -1209,6 +1362,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             except ValueError:
                 pass
             i += 2
+        elif argv[i] in ("--no-tui", "--plain"):
+            cli.use_tui = False
+            i += 1
         elif argv[i] in ("-h", "--help"):
             cli.banner()
             cli.cmd_help([])

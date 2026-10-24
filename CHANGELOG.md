@@ -8,6 +8,15 @@ report payload and the findings contract are unchanged.**
 
 ### What looks different
 
+- **Full-screen application mode**: the interactive session now opens in the
+  alternate screen as a centred column — header, scrollable output panel,
+  status line, command bar and key hints. Output is captured into the panel
+  (wrapped, never truncated), PageUp/PageDown scroll the transcript, and the
+  command bar has editing and history. Questions and the spinner live in the
+  status line, so the panel only ever shows results.
+  Opt out with `--no-tui` or `SSL_DOCTOR_TUI=0`; batch runs, pipes and
+  `TERM=dumb` keep the line-oriented REPL unchanged.
+
 - **Startup banner**: a modern two-stroke wordmark spelling `SSL DOCTOR` between
   double rules, with the description, version, read-only note and
   `creator: eleven`. The full wordmark needs 64 columns; narrower terminals get
