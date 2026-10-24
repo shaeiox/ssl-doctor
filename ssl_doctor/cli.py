@@ -364,16 +364,19 @@ class SSLDoctorCLI:
             self.error("usage: /timeout <net_s> [cmd_s]")
 
     def cmd_typewriter(self, args: List[str]) -> None:
+        global _TW_ENABLED, _TW_CPS, _TW_BATCH
         sub = args[0].lower() if args else "status"
         if sub in ("on", "off", "status"):
             if sub == "on":
-                if not self._typewriter_active and not (sys.stdout.isatty() if hasattr(sys.stdout, "isatty") else False):
+                if not (sys.stdout.isatty() if hasattr(sys.stdout, "isatty") else False):
                     self.error("typewriter mode requires an interactive terminal")
                     return
-                self._typewriter_enabled = (sub == "on")
+                self._typewriter_enabled = True
             elif sub == "off":
                 self._typewriter_enabled = False
-            # status
+            _TW_ENABLED = self._typewriter_enabled
+            _TW_CPS = self._typewriter_cps
+            _TW_BATCH = self._BATCH_MODE
             self.out(f"typewriter: {'on' if self._typewriter_enabled else 'off'} "
                      f"· speed {self._typewriter_cps:g} cps "
                      f"· active {self._typewriter_active}")
@@ -391,6 +394,9 @@ class SSLDoctorCLI:
                 self.error("speed must be >= 1")
                 return
             self._typewriter_cps = cps
+            _TW_ENABLED = self._typewriter_enabled
+            _TW_CPS = cps
+            _TW_BATCH = self._BATCH_MODE
             self.out(f"typewriter speed set to {cps:g} cps")
             return
         self.error("usage: /typewriter [on|off|speed <cps>]")
@@ -894,10 +900,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             i += 2
         elif argv[i] == "--typewriter":
             cli._typewriter_enabled = True
+            global _TW_ENABLED
+            _TW_ENABLED = True
             i += 1
         elif argv[i] == "--typewriter-speed" and i + 1 < len(argv):
             try:
                 cli._typewriter_cps = float(argv[i + 1])
+                global _TW_CPS
+                _TW_CPS = cli._typewriter_cps
             except ValueError:
                 pass
             i += 2
