@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased — copy to clipboard
+## v0.8.0 — AI-ready reports, copy to clipboard, full-screen shell
+
+`/report agent` exports a scan for any AI model; text can be copied out of a
+session (mouse selection, `/copy`, `Ctrl-Y`) on Windows and Linux without extra
+software; and the interactive session is now a full-screen application with
+result frames, a centred banner and a chat-style composer. The findings
+contract stays at 1.5.
+
+### Copy to clipboard
 
 - **`/copy`** copies the previous command's response to the clipboard as plain
   text, exactly as shown (frame borders included, no colour codes); **`/copy
@@ -21,7 +29,7 @@
 - Mouse reporting moves from `?1000h` to button-event tracking (`?1002h`, SGR
   `?1006h`), still enabled only while the composer reads.
 
-### Fixed
+#### Fixed
 
 - **Copy did nothing on Linux desktops without a clipboard tool** (seen with
   xfce4-terminal 1.1.3 / VTE 0.76 on Linux Mint 22.3): VTE ignores OSC 52 and
@@ -35,7 +43,7 @@
   and an escape sequence would have been typed into the composer. VT input is
   now on while one key is read (restored after), and sequences are read whole.
 
-## Unreleased — `/report agent`
+### `/report agent`
 
 - **`/report agent [dir]`** exports the latest completed scan for analysis by any
   AI model (ChatGPT, Claude, Gemini or a local model), without re-running
@@ -57,7 +65,7 @@
   output). No schema version change: the agent keys live in `meta`, which every
   published schema leaves open (documented in `docs/findings-contract.md`).
 
-## Unreleased — full-screen shell, streamed result frames, chat composer
+### Full-screen shell, streamed result frames, chat composer
 
 Presentation only: commands, flags, accepted answers, check ids, verdicts, exit
 codes, the JSON report payload and the findings contract are unchanged.
@@ -99,7 +107,7 @@ codes, the JSON report payload and the findings contract are unchanged.
   Inside the shell the spinner runs in the composer, so the screen keeps
   redrawing while a long check streams.
 
-### Fixed
+#### Fixed
 
 - The shell's capture stream reports itself as a terminal, so after the merge
   with streaming every finding would have been printed as a bare row and the

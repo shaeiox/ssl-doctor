@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-24 · done: /report agent + copy-to-clipboard implemented, OpenSpec changes archived (main specs agent-report, terminal-interface) on feat/copy-and-agent-report (uncommitted) · next: review, commit, test copy on Windows Terminal · blocker: none
+> resume 2026-10-24 · done: v0.8.0 released (/report agent, copy to clipboard, full-screen shell), merged to master, tagged & pushed · next: verify copy in Windows Terminal · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md
