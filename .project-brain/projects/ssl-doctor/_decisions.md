@@ -31,3 +31,7 @@ One line per settled choice: `YYYY-MM: chosen > rejected — why`.
 2026-10: centre each command's output as its own block > centring every line (breaks evidence/table alignment) or the whole transcript (earlier commands shift when a longer one arrives).
 2026-10: no output frame around results > the boxed panel — the frame competed with the banner and implied a fixed viewport; only the dashed input keeps a frame-like affordance.
 2026-10: remote command timeout stored as `command_timeout` > `cmd_timeout` — the attribute shadowed the `/timeout` handler, so the command either crashed (before) or would have to be renamed.
+2026-10: left-aligned, full-width column over a centred one — centring spent width on both sides of every evidence line and moved the prompt as output width changed; a terminal reads from one left edge.
+2026-10: mouse reporting only inside read_line() > leaving SGR mouse mode on all session — the wheel bytes produced during a five-second TLS handshake would queue in the tty and be typed into the next command.
+2026-10: a three-row completion menu with a ▸ cursor > inline ghost text — the design language has framed lists, not inline hints, and three rows never cover the transcript.
+2026-10: result frames drawn by the text printer, re-coloured by the renderer > drawing them inside the TUI only — the line REPL, the shell and the tests then share one box, and the transcript stays a colourless text model.

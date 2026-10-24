@@ -141,6 +141,102 @@ class GlyphFallback(unittest.TestCase):
             out.encode("cp1252")  # must survive a cp1252 console
 
 
+
+class ResultFrame(unittest.TestCase):
+    """3 — one attractive frame per result, drawn to the column's width."""
+
+    def setUp(self):
+        self.original = cli._MODE
+        self.addCleanup(cli.set_color_mode, self.original)
+        self.addCleanup(cli.set_block_label, "")
+        self.addCleanup(cli.set_capture_width, 0)
+        self.items = [
+            F.Finding("tls.version", "negotiates a modern protocol", F.PASS,
+                      F.SCOPE_REMOTE_NET, ["TLSv1.3 negotiated"]),
+            F.Finding("tls.chain", "server presents a complete, linked chain",
+                      F.FAIL, F.SCOPE_REMOTE_NET, ["only the leaf is sent"],
+                      detail="the intermediate is missing",
+                      recommendation="append the intermediate certificate"),
+        ]
+
+    def rows(self, columns, capture=0, glyphs=None):
+        cli.set_color_mode(cli.ColorMode.TRUECOLOR)
+        cli.set_block_label("/tls shop.example")
+        cli.set_capture_width(capture)
+        env = {"COLUMNS": str(columns)}
+        buf = io.StringIO()
+        patches = [mock.patch.dict(os.environ, env), contextlib.redirect_stdout(buf)]
+        if glyphs is not None:
+            patches.append(mock.patch.object(cli, "_GLYPHS", glyphs))
+        for patch in patches:
+            patch.__enter__()
+        try:
+            cli.print_findings(self.items)
+        finally:
+            for patch in reversed(patches):
+                patch.__exit__(None, None, None)
+        return stripped(buf.getvalue()).rstrip("\n").splitlines()
+
+    def test_every_row_is_the_same_width(self):
+        for columns in (100, 80, 40):
+            with self.subTest(columns=columns):
+                rows = self.rows(columns)
+                widths = {len(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", row)) for row in rows}
+                self.assertEqual(len(widths), 1, rows)
+                self.assertLessEqual(widths.pop(), max(40, min(columns - 2, 72)))
+
+    def test_the_frame_names_the_command_and_the_counters(self):
+        rows = self.rows(100)
+        self.assertIn("/tls shop.example", rows[0])
+        self.assertIn("1 passed", rows[-1])
+        self.assertIn("1 failed", rows[-1])
+        self.assertTrue(rows[0].strip().startswith("╭"))
+        self.assertTrue(rows[-1].strip().startswith("╰"))
+
+    def test_the_border_draws_on_both_sides_of_every_row(self):
+        for row in self.rows(100)[1:-1]:
+            self.assertTrue(row.strip().startswith("│"), row)
+            self.assertTrue(row.strip().endswith("│"), row)
+
+    def test_status_colours_are_applied(self):
+        cli.set_color_mode(cli.ColorMode.TRUECOLOR)
+        env = {"COLUMNS": "100"}
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(buf):
+            cli.set_block_label("/tls shop.example")
+            cli.print_findings(self.items)
+        out = buf.getvalue()
+        self.assertIn("38;2;78;186;101", out)    # success green on the PASS
+        self.assertIn("38;2;255;107;128", out)   # error red on the FAIL
+        self.assertIn("38;2;253;93;177", out)    # tool pink on the border
+
+    def test_ascii_fallback_uses_plain_corners(self):
+        rows = self.rows(80, glyphs=cli.Glyphs(False, False))
+        self.assertTrue(rows[0].startswith("  +-"))
+        self.assertTrue(rows[-1].startswith("  +-"))
+        self.assertTrue(all(row.startswith("  |") for row in rows[1:-1]))
+        for row in rows:
+            row.encode("cp1252")  # a cp1252 console can draw it
+
+    def test_the_transcript_gets_a_frame_of_the_shell_width(self):
+        """In the shell the frame is sized to the transcript, not the terminal."""
+        rows = self.rows(100, capture=116)   # 120-column column minus the gutters
+        widest = max(len(row) for row in rows)
+        self.assertLessEqual(widest, 116)
+        self.assertTrue(rows[0].strip().startswith("╭"))
+
+    def test_piped_output_stays_plain(self):
+        cli.set_color_mode(cli.ColorMode.PLAIN)
+        cli.set_capture_width(0)
+        cli.set_block_label("/tls shop.example")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli.print_findings(self.items)
+        out = buf.getvalue()
+        self.assertNotIn("╭", out)
+        self.assertNotIn("│", out)
+        self.assertIn("[   + PASS]", out)
+
 class WindowsTerminal(unittest.TestCase):
     """1.5 — degrade to plain when the console cannot do ANSI."""
 
@@ -182,14 +278,15 @@ class CommandBlock(unittest.TestCase):
 
     def test_block_keeps_all_content(self):
         out = self.rendered([self.finding])
+        flowed = " ".join(re.sub(r"[│|]", " ", out).split())
         for line in self.finding.evidence:
-            self.assertIn(line, out)
-        self.assertIn(self.finding.detail, out)
-        self.assertIn("append the intermediate to ssl_certificate", out)
+            self.assertIn(" ".join(line.split()), flowed)
+        self.assertIn(" ".join(self.finding.detail.split()), flowed)
+        self.assertIn("append the intermediate to ssl_certificate", flowed)
         self.assertIn("/scan shop.example:443", out)  # header names the command
         self.assertIn("1 failed", out)  # footer keeps the counters
-        self.assertIn("┌", out)
-        self.assertIn("└", out)
+        self.assertIn("╭", out)
+        self.assertIn("╰", out)
 
     def test_rows_keep_the_finding_order(self):
         second = F.Finding("tls.hostname", "name coverage", F.PASS, F.SCOPE_REMOTE_NET,

@@ -19,72 +19,94 @@ python3 ssldoctor.py -c "/scan example.com --with-server" -c "/report both out"
 
 ## Terminal look
 
-SSL Doctor opens as a **full-screen application**: the wordmark sits at the top
-and everything you run appears directly beneath it, centred as blocks — no
-output box, no scrolling log. Long output wraps in the centred column and stays
-scrollable, so a `/scan` never pushes the screen away.
+SSL Doctor opens as a **full-screen application** built like a terminal: the
+wordmark at the top, then every command's output appended underneath it on one
+left margin, scrolling like a log. Nothing is centred, so an evidence line gets
+the full width of the window.
 
 ```
-                ██████ ██████ ██       █████  ██████ ██████ ██████ ██████ ██████
-                ██     ██     ██       ██  ██ ██  ██ ██       ██   ██  ██ ██  ██
-                ██████ ██████ ██       ██  ██ ██  ██ ██       ██   ██  ██ ██████
-                    ██     ██ ██       ██  ██ ██  ██ ██       ██   ██  ██ ██  ██
-                ██████ ██████ ██████   █████  ██████ ██████   ██   ██████ ██  ██
-                 offline ssl/tls diagnostics · client · server · chain · nginx
-                              creator: eleven  ·  read-only checks
+  ██████ ██████ ██       █████  ██████ ██████ ██████ ██████ ██████
+  ██     ██     ██       ██  ██ ██  ██ ██       ██   ██  ██ ██  ██
+  ██████ ██████ ██       ██  ██ ██  ██ ██       ██   ██  ██ ██████
+      ██     ██ ██       ██  ██ ██  ██ ██       ██   ██  ██ ██  ██
+  ██████ ██████ ██████   █████  ██████ ██████   ██   ██████ ██  ██
+  offline ssl/tls diagnostics · client · server · chain · nginx
+  creator: eleven  ·  read-only checks
 
-                Welcome. SSL Doctor is read-only; credentials are never logged.
+  Welcome. SSL Doctor is read-only; credentials are never logged.
 
-                                      ssl-doctor> /version
-                                      SSL Doctor v0.3.0
+  ssl-doctor> /local
+    ╭─ /local ─────────────────────────────────────────────────────────────────────────────╮
+    │ ✓ PASS       local.os         Operating system and clock                             │
+    │   • OS: Linux-6.1.158+-x86_64-with-glibc2.36                                         │
+    │   • Python: 3.11.2 / OpenSSL 3.0.20 7 Apr 2026                                       │
+    │   • system time (UTC): 2026-10-24 17:39:18                                           │
+    │   • local timezone: UTC                                                              │
+    │ ✓ PASS       local.proxy      Proxy configuration                                    │
+    │   • no proxy environment variables set; direct connections                           │
+    │ ? NOT TESTED local.certstore  Windows certificate stores                             │
+    │   • not running on Windows; Windows trust stores cannot be examined here             │
+    │ ? NOT TESTED local.events     Schannel event log (Windows)                           │
+    │   • only available on Windows                                                        │
+    ╰─ 2 passed · 0 failed · 0 warnings · 2 not tested ────────────────────────────────────╯
 
-                                       ssl-doctor> /clear
-                                       findings cleared
-
-                                      timeout 8s · ssh off
- ──────────────────────────────────────────────────────────────────────────────────────────────
-   >
- ──────────────────────────────────────────────────────────────────────────────────────────────
-            up/down history  ·  PgUp/PgDn scroll  ·  /help commands  ·  Ctrl-D quit
+  4 findings · timeout 8s · ssh off
+  ▸ /scan    full workflow: domain, then client and server checks
+    /server  SSH setup, nginx config, logs and comparison
+    /tls     remote TLS/HTTPS diagnostics for a host
+────────────────────────────────────────────────────────────────────────────────────────────────
+  > /s
+────────────────────────────────────────────────────────────────────────────────────────────────
+  Tab complete · up/down history · wheel scroll · /help · Ctrl-D quit
 ```
+
+Each command that produces findings draws **one framed block**: the command is
+the frame's title, every check gets a row with its status glyph, word and id,
+evidence/detail/`fix:` lines sit indented inside the border, and the counters are
+written into the closing border. Text wraps inside the frame — nothing is elided.
+
+**Completion.** Typing `/` opens up to three matching commands with their
+descriptions; `Tab` completes the highlighted one, `↑`/`↓` move the highlight,
+and a space or `Esc` dismisses the list.
 
 | Key | Action |
 |---|---|
 | `Enter` | run the command in the bar |
-| `↑` / `↓` | recall earlier commands |
+| `Tab` | complete the highlighted command |
+| `↑` / `↓` | move the completion highlight, or recall earlier commands |
 | `←` / `→`, `Home` / `End` | move the caret in the command bar |
 | `Backspace`, `Ctrl-U` | edit / clear the command bar |
+| mouse wheel | scroll the transcript |
 | `PgUp` / `PgDn` | scroll the transcript (the newest output is always one key away) |
 | `Ctrl-L` | redraw |
 | `Ctrl-C`, `Ctrl-D` | leave the session (same status code as the line REPL) |
 
-Each command's output is its own block: blocks are separated by one blank line
-and centred on their own width, so evidence stays aligned under its finding. The
-column is `min(columns - 2, 96)` and centred; the header drops from the wordmark
-to a compact line when the window is short. Commands, answers, findings, exit
+The column is the terminal width, capped at 120 columns and left-aligned; the
+header drops from the wordmark to a compact line when the window is short.
+Mouse reporting is switched on only while the command bar is reading, so wheel
+bytes can never end up inside a running check. Commands, answers, findings, exit
 codes and reports are identical to the line-oriented mode — the shell only
 presents them.
 
 **Opting out** — any of these runs the line-oriented REPL instead:
 `--no-tui`, `SSL_DOCTOR_TUI=0`, a non-tty stdin/stdout (pipes, CI, `-c` batch
 runs), `TERM=dumb`, or a platform without a key reader. That mode prints the
-wordmark, then framed finding blocks as the session scrolls — the same content,
-appended to the scrollback instead of composed in place.
+wordmark, then the same framed blocks as the session scrolls; piped and
+`NO_COLOR` output stays plain `[   + PASS]` rows, byte for byte.
 
 ### Inside the frame
 
 - **Status colours** come from semantic roles: `✓ PASS` green, `⚠ WARNING`
-  amber, `✗ FAIL` red-pink, `? NOT TESTED` grey. Inside the panel the status
-  marker is coloured; the rest of the row stays plain, so long evidence stays
-  readable.
-- **Progress** never writes into the panel. The spinner (`· ✢ ✳ ✶ ✻ ✽`, 120 ms)
-  and its verb live in the status line, next to the scope summary
+  amber, `✗ FAIL` red-pink, `? NOT TESTED` grey. The frame border is the design
+  system's tool pink, the title terracotta, and the footer counts are coloured
+  one counter at a time — so a colourless terminal still loses no information.
+- **Progress** never writes into the transcript. The spinner (`· ✢ ✳ ✶ ✻ ✽`,
+  120 ms) and its verb live in the status line, next to the scope summary
   (`shop.example:443 · 12 findings · 1 fail · timeout 8s · ssh off`).
 - **Questions** (`/server connect`, host-key trust, mode choice) appear in the
   status line and are answered in the command bar — the accepted answers are
   unchanged, and passwords are masked and never written to the transcript.
-- **Diagnosis** keeps its ranked causes, certainty labels and `fix:` lines; the
-  panel colours the certainty marker.
+- **Diagnosis** keeps its ranked causes, certainty labels and `fix:` lines.
 
 ### Colour and glyphs
 

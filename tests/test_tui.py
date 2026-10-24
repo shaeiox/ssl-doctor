@@ -1,8 +1,9 @@
 """Full-screen application shell: layout, transcript, keys and the command bar.
 
 The layout is a pure function, so the whole visual contract is asserted without
-a terminal: exact widths, centring, panel contents and cursor cell. Keyboard and
-editing tests drive the session with a scripted key source.
+a terminal: exact widths, the shared left gutter, region order and cursor cell.
+Keyboard, editing, completion and wheel tests drive the session with a scripted
+key source.
 """
 
 from __future__ import annotations
@@ -69,14 +70,14 @@ def frame(**overrides):
         body=["[   + PASS] a finding  - network", "plain line"],
         status=[("status text", "muted", False)],
         prompt_text="/scan shop.test", hints=[("hints here", "muted", False)],
-        painter=paint, glyphs=StubGlyphs(), cursor=5,
+        painter=paint, glyphs=StubGlyphs(), cursor=5, menu=(),
     )
     kwargs.update(overrides)
     return tui.build_frame(**kwargs)
 
 
 class FrameLayout(unittest.TestCase):
-    """The composition: exact widths, centring, regions and cursor."""
+    """The composition: exact widths, the left gutter, regions and cursor."""
 
     def test_every_line_is_exactly_the_terminal_width(self):
         for columns, rows in ((160, 40), (100, 30), (80, 24), (50, 16), (40, 12)):
@@ -86,17 +87,40 @@ class FrameLayout(unittest.TestCase):
                 self.assertEqual({len(ANSI.sub("", line)) for line in lines},
                                  {columns})
 
-    def test_column_is_centred_and_clamped(self):
-        wide, _ = frame(columns=160)
-        wide = plain(wide)
-        margins = {len(line) - len(line.lstrip(" ")) for line in wide if line.strip()}
-        self.assertIn(32, margins)  # (160 - 96) // 2
+    def test_the_column_starts_at_the_left_edge(self):
+        """Nothing is centred: the gutter is the same on every terminal."""
+        for columns in (160, 100, 50):
+            with self.subTest(columns=columns):
+                lines = plain(frame(columns=columns,
+                                    header=[[("HEADER", "primary", True)]])[0])
+                body = next(line for line in lines if "a finding" in line)
+                header = next(line for line in lines if "HEADER" in line)
+                status = next(line for line in lines if "status text" in line)
+                bar = next(line for line in lines if "/scan shop.test" in line)
+                hints = next(line for line in lines if "hints here" in line)
+                for row in (body, header, status, bar, hints):
+                    self.assertTrue(row.startswith("  "), row)
+                    self.assertFalse(row.startswith("   "), row)
 
-        narrow, _ = frame(columns=50)
-        narrow = plain(narrow)
-        self.assertTrue(all(len(line) == 50 for line in narrow))
-        self.assertTrue(all(line.startswith(" ") for line in narrow))
-        self.assertNotIn("┌", "\n".join(narrow))  # no output box any more
+    def test_short_and_long_rows_start_at_the_same_column(self):
+        lines = plain(frame(body=["tiny", "y" * 90],
+                            header=[[("HEADER", "primary", True)]])[0])
+        starts = {len(line) - len(line.lstrip()) for line in lines
+                  if line.strip() and set(line.strip()) != {"─"}}
+        self.assertEqual(starts, {2})
+
+    def test_the_column_is_capped_but_never_wider_than_the_terminal(self):
+        self.assertEqual(tui.block_width(200), 120)
+        self.assertEqual(tui.block_width(80), 80)
+        self.assertEqual(tui.block_width(20), 20)
+
+        wide = plain(frame(columns=200)[0])
+        rule = next(line for line in wide if set(line.strip()) == {"─"})
+        self.assertEqual(len(rule.strip()), 120)  # the column, not the terminal
+
+        narrow = plain(frame(columns=50)[0])
+        rule = next(line for line in narrow if set(line.strip()) == {"─"})
+        self.assertEqual(len(rule.strip()), 50)
 
     def test_regions_appear_in_order(self):
         text = "\n".join(plain(frame()[0]))
@@ -105,7 +129,7 @@ class FrameLayout(unittest.TestCase):
         positions = [text.index(token) for token in order]
         self.assertEqual(positions, sorted(positions))
 
-    def test_there_is_no_output_box(self):
+    def test_the_layout_draws_no_frame_of_its_own(self):
         text = "\n".join(plain(frame()[0]))
         for marker in ("┌", "┐", "└", "┘", "│", "|", "output"):
             with self.subTest(marker=marker):
@@ -118,44 +142,36 @@ class FrameLayout(unittest.TestCase):
         self.assertLessEqual(finding_row - header_row, 3)  # directly beneath
 
     def test_chrome_follows_a_short_transcript(self):
-        """A short session reads as one centred block, not a pinned footer."""
+        """The input bar follows the output instead of being pinned to the last row."""
         lines = plain(frame(body=["only line"])[0])
         body_row = next(i for i, line in enumerate(lines) if "only line" in line)
         status_row = next(i for i, line in enumerate(lines) if "status text" in line)
         self.assertLessEqual(status_row - body_row, 2)
         self.assertGreater(len(lines) - 1 - status_row, 4)  # room left below
 
-    def test_body_keeps_its_text_inside_the_column(self):
-        lines = plain(frame(body=["[   + PASS] a finding  - network"])[0])
-        row = next(line for line in lines if "a finding" in line)
-        self.assertIn("[   + PASS] a finding  - network", row)
-        # the block is centred inside the column: equal space on both sides
-        inside = row[2:-2]
-        self.assertEqual(len(inside) - len(inside.rstrip()),
-                         len(inside) - len(inside.lstrip()))
+    def test_content_height_accounts_for_the_menu(self):
+        self.assertGreaterEqual(tui.content_height(6, 4, True), 1)
+        self.assertEqual(tui.content_height(30, 7, True), 16)
+        self.assertEqual(tui.content_height(30, 7, True, 3), 13)
 
-    def test_blocks_are_centred_but_keep_their_internal_alignment(self):
-        shifted = tui.center_blocks(["[ PASS] a", "        - evidence"], 40)
-        self.assertEqual(len(shifted), 2)
-        lead = len(shifted[0]) - len(shifted[0].lstrip(" "))
-        self.assertGreater(lead, 0)
-        # the continuation stays aligned under its parent line
-        self.assertEqual(len(shifted[1]) - len(shifted[1].lstrip(" ")),
-                         lead + 8)
-
-    def test_blank_lines_split_the_centring_blocks(self):
-        shifted = tui.center_blocks(["short", "", "a much longer line here"], 40)
-        self.assertEqual(shifted[1], "")
-        # each block is centred on its own width, so the shorter one sits deeper
-        self.assertLess(len(shifted[2]) - len(shifted[2].lstrip()),
-                        len(shifted[0]) - len(shifted[0].lstrip()))
+    def test_the_menu_sits_between_the_status_line_and_the_command_bar(self):
+        menu = [[("▸ /scan   full workflow", "primary", True)],
+                [("  /tls    remote checks", "", False)]]
+        lines = plain(frame(menu=menu)[0])
+        status_row = next(i for i, line in enumerate(lines) if "status text" in line)
+        menu_row = next(i for i, line in enumerate(lines) if "/scan   full" in line)
+        bar_row = next(i for i, line in enumerate(lines) if "/scan shop.test" in line)
+        self.assertLess(status_row, menu_row)
+        self.assertLess(menu_row, bar_row)
+        self.assertTrue(lines[menu_row].startswith("  ▸ /scan"))
+        self.assertEqual(len(lines), 30)  # the frame still fills the screen
 
     def test_cursor_sits_after_the_typed_text(self):
         lines, (row, column) = frame(prompt_text="/scan", cursor=5)
         bar_row = plain(lines)[row - 1]
         self.assertIn("/scan", bar_row)
-        # column 1 + margin(2) + "│ "(2) + "> "(2) + 5 typed characters
-        self.assertEqual(column, 2 + 2 + 2 + 5 + 1)
+        # column 1 + gutter(2) + "> "(2) + 5 typed characters
+        self.assertEqual(column, 1 + 2 + 2 + 5)
 
     def test_header_collapses_when_rows_are_short(self):
         compact = [[(" SSL DOCTOR · v0.3.0 ", "primary", True)], []]
@@ -169,10 +185,6 @@ class FrameLayout(unittest.TestCase):
         text = "\n".join(plain(lines))
         self.assertNotIn("hints here", text)
         self.assertIn("/scan shop.test", text)  # the input survives
-
-    def test_content_height_floor(self):
-        self.assertGreaterEqual(tui.content_height(6, 4, True), 1)
-        self.assertEqual(tui.content_height(30, 7, True), 16)
 
 
 class TranscriptBehaviour(unittest.TestCase):
@@ -300,9 +312,10 @@ class ScriptedKeys:
         return self.keys.pop(0) if self.keys else "ctrl-d"
 
 
-def session_with(keys, renderer=None):
+def session_with(keys, renderer=None, completer=None):
     session = tui.TuiSession(renderer=renderer or (lambda s: ([], (1, 1))),
-                             stream=io.StringIO(), keys=ScriptedKeys(keys))
+                             stream=io.StringIO(), keys=ScriptedKeys(keys),
+                             completer=completer)
     session.screen.active = False  # no alternate screen in tests
     return session
 
@@ -484,6 +497,155 @@ class ShellIntegration(unittest.TestCase):
         self.assertIn("FAIL", joined)
         self.assertNotIn("\x1b", joined)
         self.assertNotIn("┌", joined)  # the panel is the frame, not the output
+
+
+class Completion(unittest.TestCase):
+    """Typing `/` opens the menu; Tab accepts the highlighted command."""
+
+    def session(self, keys):
+        return session_with(keys, completer=cli.command_completions)
+
+    def test_slash_lists_three_commands_with_descriptions(self):
+        session = self.session([])
+        session.input = "/"
+        session.refresh_menu()
+        self.assertEqual(len(session.menu), 3)
+        for name, description in session.menu:
+            self.assertTrue(name.startswith("/"))
+            self.assertTrue(description)
+
+    def test_the_list_narrows_as_the_name_is_typed(self):
+        session = self.session([])
+        session.input = "/sc"
+        session.refresh_menu()
+        self.assertEqual([name for name, _ in session.menu], ["/scan"])
+
+    def test_tab_completes_the_highlighted_command(self):
+        session = self.session(list("/sc") + ["tab", "enter"])
+        self.assertEqual(session.read_line(), "/scan ")
+
+    def test_down_moves_the_highlight_and_tab_accepts_it(self):
+        session = self.session(list("/") + ["down", "tab", "enter"])
+        expected = cli.command_completions("/")[1][0] + " "
+        self.assertEqual(session.read_line(), expected)
+
+    def test_the_highlight_stops_at_the_ends(self):
+        session = self.session(list("/") + ["up", "up", "tab", "enter"])
+        self.assertEqual(session.read_line(), cli.command_completions("/")[0][0] + " ")
+
+    def test_a_space_dismisses_the_list(self):
+        session = self.session(list("/sc") + [" "] + ["enter"])
+        self.assertEqual(session.read_line(), "/sc ")
+
+    def test_escape_dismisses_the_list(self):
+        session = self.session(list("/") + ["escape", "enter"])
+        self.assertEqual(session.read_line(), "/")
+
+    def test_no_list_without_a_leading_slash(self):
+        session = self.session(list("scan") + ["enter"])
+        self.assertEqual(session.read_line(), "scan")
+
+    def test_there_are_never_more_than_three_rows(self):
+        self.assertLessEqual(len(cli.command_completions("/")), 3)
+        self.assertLessEqual(len(cli.command_completions("/s")), 3)
+
+    def test_every_help_command_can_be_completed(self):
+        for name, _ in cli.COMMANDS:
+            with self.subTest(command=name):
+                self.assertIn(name, [row[0] for row in
+                                     cli.command_completions(name)])
+
+
+class MouseWheel(unittest.TestCase):
+    """The wheel scrolls the transcript and never leaks into a command."""
+
+    def reader(self):
+        reader = tui.KeyReader(stream=io.StringIO())
+        reader._windows = False
+        return reader
+
+    def test_sgr_wheel_reports_are_decoded(self):
+        reader = self.reader()
+        self.assertEqual(reader._decode_escape(b"[<64;10;5M"), "wheelup")
+        self.assertEqual(reader._decode_escape(b"[<65;10;5M"), "wheeldown")
+        self.assertEqual(reader._decode_escape(b"[<0;10;5M"), "unknown")  # a click
+        self.assertEqual(reader._decode_escape(b"[A"), "up")  # arrows still work
+
+    def test_wheel_scrolls_three_rows_per_notch(self):
+        session = session_with(["wheelup", "wheelup", "wheeldown", "enter"])
+        session.read_line()
+        self.assertEqual(session.scroll, 3)
+
+    def test_wheel_never_goes_past_the_oldest_line(self):
+        session = session_with(["wheeldown", "wheeldown", "enter"])
+        session.read_line()
+        self.assertEqual(session.scroll, 0)
+
+    def test_mouse_reporting_is_enabled_only_while_reading(self):
+        writes = []
+        session = session_with(["enter"])
+        session.screen.active = True
+        session.screen.draw = lambda lines, cursor: None
+        session.screen._write = writes.append
+        session.read_line()
+        self.assertEqual(writes, [tui.MOUSE_ON, tui.MOUSE_OFF])
+
+    def test_leaving_the_shell_turns_mouse_reporting_off(self):
+        stream = io.StringIO()
+        screen = tui.Screen(stream)
+        screen.enter()
+        screen.leave()
+        out = stream.getvalue()
+        self.assertIn(tui.MOUSE_OFF, out)
+        self.assertLess(out.index(tui.MOUSE_OFF), out.index(tui.ALT_SCREEN_OFF))
+
+
+class ResultFrameColouring(unittest.TestCase):
+    """The transcript is colourless text; the renderer re-colours the frame."""
+
+    rows = [
+        "  ╭─ /tls shop.example ──────╮",
+        "  │ ✓ PASS   tls.version  ok │",
+        "  │ ✗ FAIL   tls.chain    no │",
+        "  │   • only the leaf        │",
+        "  │     fix: add the chain   │",
+        "  ╰─ 1 passed · 1 failed ────╯",
+    ]
+
+    def test_the_text_is_never_changed(self):
+        for row in self.rows:
+            spans = tui.colorize(row)
+            self.assertEqual("".join(text for text, _, _ in spans), row)
+
+    def test_borders_are_tool_coloured(self):
+        role = tui.colorize(self.rows[0])[1]
+        self.assertEqual(role[0], "╭")
+        self.assertEqual(role[1], "tool")
+
+    def test_the_title_is_primary_and_bold(self):
+        spans = tui.colorize(self.rows[0])
+        title = [span for span in spans if "/tls shop.example" in span[0]]
+        self.assertEqual(title[0][1], "primary")
+        self.assertTrue(title[0][2])
+
+    def test_status_words_keep_their_role(self):
+        for row, role in ((self.rows[1], "success"), (self.rows[2], "error")):
+            spans = tui.colorize(row)
+            self.assertTrue(any(colour == role and bold and status_word in text
+                                for text, colour, bold in spans
+                                for status_word in ("PASS", "FAIL")))
+
+    def test_bullets_and_fixes_keep_their_role(self):
+        self.assertTrue(any(colour == "muted" and "•" in text
+                            for text, colour, _ in tui.colorize(self.rows[3])))
+        self.assertTrue(any(colour == "accent" and "fix:" in text
+                            for text, colour, _ in tui.colorize(self.rows[4])))
+
+    def test_the_footer_counts_are_coloured_per_counter(self):
+        colours = [colour for _, colour, _ in tui.colorize(self.rows[5])]
+        self.assertIn("success", colours)
+        self.assertIn("error", colours)
+
 
 
 if __name__ == "__main__":

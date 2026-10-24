@@ -192,10 +192,19 @@ def resolve_glyphs(mode: str, stream=None) -> Glyphs:
 _MODE = resolve_color_mode()
 _GLYPHS = resolve_glyphs(_MODE)
 # While the full-screen shell captures a command's output, colour must not leak
-# into the transcript: the panel re-applies status colours at render time.
+# into the transcript: the renderer re-applies status colours when it draws.
 _CAPTURE = False
+# Width of the transcript while the shell is open. Non-zero means "we are being
+# drawn by the shell", so result frames are sized to the column.
+_CAPTURE_WIDTH = 0
 # Compatibility alias: older code and third-party snippets read this.
 _USE_COLOR = _MODE != ColorMode.PLAIN
+
+
+def set_capture_width(width: int) -> None:
+    """Tell the printers how wide the shell's transcript is (0 = not in one)."""
+    global _CAPTURE_WIDTH
+    _CAPTURE_WIDTH = max(0, int(width))
 
 
 def set_color_mode(mode: str) -> None:
@@ -271,6 +280,36 @@ def block_width(label: str = "") -> int:
     return width
 
 
+# One table for the shell's completion menu; /help keeps the full usage text.
+COMMANDS: List[tuple] = [
+    ("/scan", "full workflow: domain, then client and server checks"),
+    ("/tls", "remote TLS/HTTPS diagnostics for a host"),
+    ("/cert", "inspect a certificate file or match a private key"),
+    ("/server", "SSH setup, nginx config, logs and comparison"),
+    ("/local", "diagnostics for this machine"),
+    ("/diagnose", "correlate findings into root causes"),
+    ("/findings", "list everything recorded this session"),
+    ("/report", "write an HTML or JSON report"),
+    ("/timeout", "show or set the network timeout"),
+    ("/clear", "discard recorded findings"),
+    ("/version", "show the version"),
+    ("/exit", "leave ssl-doctor"),
+]
+
+
+def command_completions(prefix: str, limit: int = 3) -> List[tuple]:
+    """Commands matching `prefix`, best match first, for the completion menu."""
+    word = (prefix or "").strip().lower()
+    if not word.startswith("/"):
+        return []
+    word = word.split(" ", 1)[0]
+    exact = [row for row in COMMANDS if row[0] == word]
+    starts = [row for row in COMMANDS if row[0].startswith(word) and row[0] != word]
+    inside = [row for row in COMMANDS if word.lstrip("/") and word.strip("/") in row[0]
+              and row not in starts and row not in exact]
+    return (exact + starts + inside)[:max(0, limit)]
+
+
 def _wrap(text: str, width: int) -> List[str]:
     """Wrap without dropping characters; long tokens are broken, not elided."""
     if width <= 0:
@@ -326,7 +365,7 @@ class Spinner:
     def __enter__(self) -> "Spinner":
         session = _active_tui()
         if session is not None:
-            # the panel must not gain progress lines: the status line owns them
+            # the transcript must not gain progress lines: the status line owns them
             self._session = session
             session.start_status([(f"{SPINNER_CYCLE[2]} {self.verb}{_GLYPHS.ellipsis} "
                                    f"{self.text}", "primary", True)])
@@ -456,65 +495,137 @@ def _frame_bottom(line_text: str, width: int, role: str = "tool",
             + paint(" " + _GLYPHS.h * dashes + corner, role))
 
 
-def _print_row(f: F.Finding, verbose: bool, width: int, check_width: int) -> None:
-    role = _STATUS_ROLE.get(f.status, "")
-    bar = paint(_GLYPHS.vert, "tool")
-    glyph = paint(_status_glyph(f.status), role, bold=True)
-    status = paint(f"{f.status:<10}", role, bold=True)
-    check = paint(f"{f.check:<{check_width}}", "muted")
-    prefix = f"{_status_glyph(f.status)} {f.status:<10} {f.check:<{check_width}}"
-    head = f"{INDENT}{bar} {glyph} {status} {check}"
-    available = width - len(INDENT) - 2 - len(prefix)
-    if available >= 20:
-        title_lines = _wrap(f.title, available)
-        print(head + title_lines[0])
-        pad = " " * (len(INDENT) + 2 + len(prefix))
-        for extra in title_lines[1:]:
-            print(pad + extra)
-    else:
-        # narrow terminal: the title drops below the status row instead of
-        # wrapping one word per line next to it
-        print(f"{INDENT}{bar} {glyph} {status} {paint(f.check, 'muted')}")
-        title_indent = f"{INDENT}{bar}   "
-        for chunk in _wrap(f.title, width - len(INDENT) - 5):
-            print(title_indent + chunk)
-    if not verbose:
-        return
+def _spans_text(spans) -> str:
+    return "".join(text for text, _, _ in spans)
 
-    sub = f"{INDENT}{bar}   "
-    body_width = width - len(INDENT) - 4
-    for line in f.evidence:
-        chunks = _wrap(line, body_width - 2)
-        print(f"{sub}{paint(_GLYPHS['bullet'], 'muted')} {chunks[0]}")
-        for chunk in chunks[1:]:
-            print(f"{sub}  {chunk}")
-    if f.detail:
-        for chunk in _wrap(f.detail, body_width):
-            print(sub + paint(chunk, dim=True))
-    if f.recommendation:
-        chunks = _wrap(f"fix: {f.recommendation}", body_width)
-        print(sub + paint(chunks[0], "accent"))
-        for chunk in chunks[1:]:
-            print(f"{sub}{paint(chunk, 'accent')}")
+
+def _span_len(spans) -> int:
+    return sum(len(text) for text, _, _ in spans)
+
+
+def _paint_line(spans) -> str:
+    return "".join(paint(text, role, bold) for text, role, bold in spans)
+
+
+def _box_row(content, inner: int) -> List:
+    """One interior row: gutter, left border, padded content, right border."""
+    room = max(0, inner - _span_len(content))
+    return [(INDENT, "", False), (_GLYPHS.vert, "tool", False), (" ", "", False),
+            *content, (" " * room, "", False), (" ", "", False),
+            (_GLYPHS.vert, "tool", False)]
+
+
+def _box_title(label: str, inner: int) -> str:
+    title = (label or "results").strip()
+    room = inner - len(INDENT) - 6
+    if room >= 6 and len(title) > room:
+        title = title[:max(4, room - len(_GLYPHS.ellipsis))] + _GLYPHS.ellipsis
+    return title
+
+
+def _box_counts(items: List[F.Finding], room: int) -> List:
+    """Counters for the closing border, shortened until they fit `room`."""
+    sep = f" {_GLYPHS['sep']} " if _GLYPHS.unicode else " - "
+    segments = _counts_segments(items)
+    text = sep.join(part for part, _ in segments)
+    if len(text) > room:
+        kept = [seg for seg in segments if not seg[0].startswith("0 ")]
+        segments = kept or segments
+        text = sep.join(part for part, _ in segments)
+    if len(text) > room:
+        return [(text[:max(0, room)], "muted", False)]
+    spans: List = []
+    for index, (part, role) in enumerate(segments):
+        if index:
+            spans.append((sep, "muted", False))
+        spans.append((part, role, False))
+    return spans
+
+
+def _box_lines(items: List[F.Finding], width: int, label: str = "",
+               verbose: bool = True) -> List[List]:
+    """Draw one result frame: title, one row per check, counters in the base.
+
+    Returns rows as spans so the line REPL can paint them and the full-screen
+    shell can capture them as plain text. Every row is exactly `width` columns,
+    and text wraps rather than being elided.
+    """
+    glyphs = _GLYPHS
+    bar, h = glyphs.vert, glyphs.h
+    tl = glyphs.corner("╭", "+")
+    tr = glyphs.corner("╮", "+")
+    bl = glyphs.corner("╰", "+")
+    br = glyphs.corner("╯", "+")
+    width = max(30, width)
+    inner = max(16, width - len(INDENT) - 4)
+
+    rows: List[List] = []
+    title = _box_title(label, inner)
+    head = f"{h} {title} "
+    fill = max(1, width - len(INDENT) - len(head) - 2)
+    rows.append([(INDENT, "", False), (tl + h + " ", "tool", False),
+                 (title, "primary", True),
+                 (" " + h * fill + tr, "tool", False)])
+
+    check_width = min(max(len(f.check) for f in items) + 2, 20)
+    for f in items:
+        role = _STATUS_ROLE.get(f.status, "")
+        glyph = _status_glyph(f.status)
+        prefix = f"{glyph} {f.status:<10} {f.check:<{check_width}}"
+        room = inner - len(prefix) - 2
+        if room >= 20:
+            chunks = _wrap(f.title, room)
+            rows.append(_box_row([(f"{glyph} ", role, True),
+                                  (f"{f.status:<10} ", role, True),
+                                  (f"{f.check:<{check_width}}", "muted", False),
+                                  (chunks[0], "", False)], inner))
+            for chunk in chunks[1:]:
+                rows.append(_box_row([(" " * len(prefix), "", False),
+                                      (chunk, "", False)], inner))
+        else:
+            rows.append(_box_row([(f"{glyph} ", role, True),
+                                  (f.status, role, True)], inner))
+            body_room = inner - 2
+            for chunk in _wrap(f"{f.check}  {f.title}", body_room):
+                rows.append(_box_row([(chunk, "", False)], inner))
+        if not verbose:
+            continue
+        for line in f.evidence:
+            chunks = _wrap(line, inner - 7)
+            rows.append(_box_row([("  " + glyphs["bullet"] + " ", "muted", False),
+                                  (chunks[0], "", False)], inner))
+            for chunk in chunks[1:]:
+                rows.append(_box_row([("    ", "", False), (chunk, "", False)], inner))
+        if f.detail:
+            for chunk in _wrap(f.detail, inner - 7):
+                rows.append(_box_row([("    ", "", False), (chunk, "muted", False)], inner))
+        if f.recommendation:
+            chunks = _wrap(f"fix: {f.recommendation}", inner - 7)
+            rows.append(_box_row([("    ", "", False), (chunks[0], "accent", False)], inner))
+            for chunk in chunks[1:]:
+                rows.append(_box_row([("    ", "", False), (chunk, "accent", False)], inner))
+
+    footer = _box_counts(items, inner - 6)
+    used = sum(len(text) for text, _, _ in footer)
+    tail_fill = max(1, width - len(INDENT) - used - 5)
+    rows.append([(INDENT, "", False), (bl + h + " ", "tool", False), *footer,
+                 (" " + h * tail_fill + br, "tool", False)])
+    return rows
 
 
 def print_findings(items: List[F.Finding], verbose: bool = True) -> None:
-    """Print a command's findings: framed rows on a terminal, plain otherwise."""
+    """Print a command's results: one framed block, or plain rows when piped."""
     if not items:
         return
-    if _plain_output():
+    if _plain_output() and not _CAPTURE_WIDTH:
         for f in items:
             print_finding(f, verbose)
         print(paint("\n" + _counts_text(items, " - "), "muted", dim=True))
         return
 
-    width = block_width(_BLOCK_LABEL)
-    check_width = min(max(len(f.check) for f in items) + 2, 24)
-    print(_frame_top(_BLOCK_LABEL, width))
-    for f in items:
-        _print_row(f, verbose, width, check_width)
-    print(_frame_bottom(_counts_line(items), width,
-                        visible_len=len(_counts_text(items, " · "))))
+    width = _CAPTURE_WIDTH or block_width(_BLOCK_LABEL)
+    for spans in _box_lines(items, width, _BLOCK_LABEL, verbose):
+        print(_spans_text(spans) if _CAPTURE_WIDTH else _paint_line(spans))
 
 
 def _status_line_status(status: str) -> str:
@@ -1191,6 +1302,16 @@ class SSLDoctorCLI:
             self.out(f"report written: {paint(os.path.abspath(p), 'accent')}")
 
     # ---------------- full-screen shell ----------------
+    def _capture_width(self, session) -> int:
+        """Width of the transcript inside the shell's column (0 if unknown)."""
+        from . import tui as tuimod
+        try:
+            columns, _ = session.size()
+        except Exception:
+            return 0
+        # one column of breathing room on the right of the frame
+        return max(0, tuimod.block_width(columns) - tuimod.GUTTER * 2 - 2)
+
     def _tui_header(self, width: int, rows: int) -> List[List]:
         """Header block: the wordmark when there is room, compact text otherwise."""
         art = wordmark(BANNER_NAME, _GLYPHS.block)
@@ -1207,13 +1328,35 @@ class SSLDoctorCLI:
                         "accent", True)])
         return header  # build_frame adds the breathing room below the banner
 
-    def _tui_hints(self, rows: int) -> List:
+    def _tui_hints(self, width: int, rows: int) -> List:
+        """Key hints, dropping the middle ones rather than clipping the line."""
         if rows < 14:
             return []
-        sep = _GLYPHS["sep"] if _GLYPHS.unicode else "-"
-        text = (f"up/down history  {sep}  PgUp/PgDn scroll  {sep}  "
-                f"/help commands  {sep}  Ctrl-D quit")
-        return [(text, "muted", False)]
+        sep = f" {_GLYPHS['sep']} " if _GLYPHS.unicode else " - "
+        parts = ["Tab complete", "up/down history", "wheel scroll",
+                 "/help", "Ctrl-D quit"]
+        room = max(10, width - 2 * 2)
+        while len(sep.join(parts)) > room and len(parts) > 2:
+            parts.pop(1)
+        return [(sep.join(parts), "muted", False)]
+
+    def _tui_menu(self, session, inner: int) -> List[List]:
+        """The three-row completion list, drawn on top of the command bar."""
+        if not getattr(session, "menu", None):
+            return []
+        name_width = min(max(len(name) for name, _ in session.menu), 12)
+        rows: List[List] = []
+        for index, (name, description) in enumerate(session.menu[:3]):
+            chosen = index == getattr(session, "menu_index", 0)
+            marker = _GLYPHS["run"] if chosen else " "
+            room = max(8, inner - name_width - 4)
+            if len(description) > room:
+                description = description[:max(4, room - len(_GLYPHS.ellipsis))] + _GLYPHS.ellipsis
+            rows.append([(marker + " ", "primary" if chosen else "muted", chosen),
+                         (f"{name:<{name_width}}", "primary", chosen),
+                         ("  ", "", False),
+                         (description, "" if chosen else "muted", False)])
+        return rows
 
     def _tui_frame(self, session):
         """Compose the frame; called by the shell on every redraw."""
@@ -1221,23 +1364,25 @@ class SSLDoctorCLI:
         columns, rows = session.size()
         width = tuimod.block_width(columns)
         header = self._tui_header(width, rows)
-        hints = self._tui_hints(rows)
-        inner = max(4, width - 4)
-        limit = tuimod.content_height(rows, len(header), bool(hints))
-        # no output box any more: return only real lines so the layout can sit
-        # them directly under the banner and grow downward
+        hints = self._tui_hints(width, rows)
+        inner = max(4, width - tuimod.GUTTER * 2)
+        menu = self._tui_menu(session, inner)
+        limit = tuimod.content_height(rows, len(header), bool(hints), len(menu))
+        # left-aligned log: only real lines, so the chrome follows the output
         body = session.transcript.tail(inner, limit, session.scroll, fill=False)
         if session.scroll and body:
-            body[0] = f"  .. {session.scroll} lines back (PgDn to return)"
+            body[0] = f".. {session.scroll} lines back (PgDn or wheel down to return)"
         status = session.status or [(self.status_text(), "muted", False)]
         return tuimod.build_frame(
             columns=columns, rows=rows, header=header, body=body, status=status,
             prompt_text=session.display_text(), hints=hints, painter=paint,
-            glyphs=_GLYPHS, cursor=session.cursor)
+            glyphs=_GLYPHS, cursor=session.cursor, menu=menu)
 
     def _tui_run(self, session, line: str) -> None:
-        """Execute one command with its output captured into the panel."""
+        """Execute one command with its output captured into the transcript."""
         global _CAPTURE
+        # result frames are drawn to the transcript, not to the terminal
+        set_capture_width(self._capture_width(session))
         session.transcript.append(f"ssl-doctor> {line}")
         captured = session.capture()
         saved = sys.stdout
@@ -1249,15 +1394,16 @@ class SSLDoctorCLI:
             sys.stdout = saved
             _CAPTURE = False
         session.transcript.flush_partial()
-        # blank line between commands: each command's output is its own block,
-        # and the layout centres blocks independently
+        # blank line between commands so each command's output reads as a block
         if session.transcript.lines and session.transcript.lines[-1].strip():
             session.transcript.append("")
         session.render()
 
     def _repl_tui(self) -> int:
         from . import tui as tuimod
-        session = tuimod.TuiSession(renderer=self._tui_frame)
+        session = tuimod.TuiSession(renderer=self._tui_frame,
+                                    completer=command_completions)
+        set_capture_width(self._capture_width(session))
         self._tui = session
         set_active_tui(session)
         try:
@@ -1287,6 +1433,7 @@ class SSLDoctorCLI:
                         break
         finally:
             set_active_tui(None)
+            set_capture_width(0)
             self._tui = None
             if self.server:
                 self.server.disconnect()

@@ -1,10 +1,11 @@
 """Full-screen application shell for SSL Doctor.
 
-The interactive session runs inside the terminal's alternate screen: one centred
-column holding a header, a bounded output panel with scrollback, a status line,
-a command bar and a key-hint footer.  Command output is captured into the panel
-instead of being appended to the scrollback, so the composition behaves like an
-application rather than a log.
+The interactive session runs inside the terminal's alternate screen as a
+left-aligned, terminal-like log: a header, the transcript, a status line, the
+dashed command bar (with a three-row completion menu) and a key-hint footer.
+Output is captured into a scrollback the renderer draws, so the wheel and
+PageUp/PageDown can walk it, but it is laid out the way a terminal lays out a
+log -- same left gutter, wrapping at the right edge, never centred.
 
 This module owns presentation only.  It never imports the check code: the CLI
 passes in a renderer, a capture stream and the command handler, which keeps the
@@ -28,17 +29,25 @@ import threading
 from typing import Callable, List, Optional, Sequence, Tuple
 
 MIN_WIDTH = 40
-MAX_WIDTH = 96
+MAX_WIDTH = 120          # beyond this a diagnostic sentence is hard to follow
+GUTTER = 2               # every row starts here
 ALT_SCREEN_ON = "\033[?1049h"
 ALT_SCREEN_OFF = "\033[?1049l"
 CURSOR_HIDE = "\033[?25l"
 CURSOR_SHOW = "\033[?25h"
 CLEAR_SCREEN = "\033[2J"
+# SGR extended mouse reporting: only the wheel is used, and only while reading
+MOUSE_ON = "\033[?1000h\033[?1006h"
+MOUSE_OFF = "\033[?1006l\033[?1000l"
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 # how many wrapped body rows a PageUp/PageDown moves
 PAGE_STEP = 10
+# how many rows one wheel notch moves
+WHEEL_STEP = 3
+# how many completion rows the command bar shows
+MENU_ROWS = 3
 HISTORY_LIMIT = 200
 
 
@@ -203,8 +212,8 @@ def truncate_spans(spans: Sequence[Span], width: int) -> List[Span]:
 
 
 def block_width(columns: int) -> int:
-    """Centred column width: clamped to the terminal and to MAX_WIDTH."""
-    return max(20, min(max(20, columns - 2), MAX_WIDTH))
+    """Application column width: the terminal, capped for readability."""
+    return max(20, min(columns, MAX_WIDTH))
 
 
 def top_margin(rows: int) -> int:
@@ -212,39 +221,10 @@ def top_margin(rows: int) -> int:
     return 1 if rows >= 20 else 0
 
 
-def center_blocks(lines: Sequence[str], width: int) -> List[str]:
-    """Centre each blank-line-separated block as a unit.
-
-    Centring every line on its own would wreck the alignment of evidence
-    continuations and the help table, and centring the whole transcript as one
-    block would make every earlier command shift when a longer one arrives.
-    Per-block centring keeps each command's output internally aligned and its
-    block visually centred under the banner.
-    """
-    out: List[str] = []
-    block: List[str] = []
-
-    def flush() -> None:
-        if not block:
-            return
-        widest = max(len(line) for line in block)
-        shift = max(0, (width - widest) // 2)
-        out.extend(" " * shift + line for line in block)
-        block.clear()
-
-    for line in lines:
-        if line.strip():
-            block.append(line.rstrip())
-        else:
-            flush()
-            out.append("")
-    flush()
-    return out
-
-
-def content_height(rows: int, header_len: int, hints: bool = True) -> int:
+def content_height(rows: int, header_len: int, hints: bool = True,
+                   menu: int = 0) -> int:
     """Rows available to the transcript between the header and the chrome."""
-    chrome = 3 + 1 + (1 if hints else 0)  # status, rule, input, rule, hints
+    chrome = 3 + 1 + (1 if hints else 0) + max(0, menu)  # status, rule, input, rule, hints, menu
     return max(1, rows - top_margin(rows) - header_len - 1 - chrome)
 
 
@@ -252,21 +232,20 @@ def build_frame(*, columns: int, rows: int, header: Sequence[Sequence[Span]],
                 body: Sequence[str], status: Sequence[Span],
                 prompt_text: str = "", hints: Sequence[Span] = (),
                 painter, glyphs, width: Optional[int] = None,
-                cursor: int = 0, prompt_len: int = 2) -> Tuple[List[str], Tuple[int, int]]:
+                cursor: int = 0, prompt_len: int = 2,
+                menu: Sequence[Sequence[Span]] = ()) -> Tuple[List[str], Tuple[int, int]]:
     """Compose one screen.
 
-    There is no output frame: the transcript flows directly under the banner in
-    a centred column, and the status line, dashed input and key hints follow it,
-    so a short session reads as one centred block. When the transcript is longer
-    than the screen the chrome ends up on the last rows anyway.
+    Everything is left-aligned on :data:`GUTTER` -- header, transcript, status,
+    menu, input and hints -- and the dashed rules span the whole column, the way
+    a terminal log reads. The transcript grows downward from the header and the
+    chrome follows it, so a short session has no dead gap under the prompt.
 
     `cursor` is an index into the typed part of the command bar, `prompt_len` the
     width of the `> ` prefix. Returns (lines, (row, column)), both 1-based.
     """
     width = min(block_width(columns) if width is None else width, columns)
-    left = max(0, (columns - width) // 2)
-    right = max(0, columns - left - width)
-    gutter = 2
+    gutter = min(GUTTER, max(0, width - 4))
     inner = max(4, width - gutter * 2)
 
     def pad(spans: Sequence[Span], fill: str = " ", align: str = "left") -> str:
@@ -276,56 +255,81 @@ def build_frame(*, columns: int, rows: int, header: Sequence[Sequence[Span]],
         lead = room // 2 if align == "center" else 0
         trail = room - lead
         body_text = fill * lead + _paint_spans(spans, painter) + fill * trail
-        return " " * left + body_text + " " * right
+        return body_text + " " * max(0, columns - width)
+
+    def row(spans: Sequence[Span]) -> str:
+        """A gutter-indented row, truncated to the column."""
+        return pad([(" " * gutter, "", False), *truncate_spans(spans, inner)])
 
     margin = top_margin(rows)
-    limit = content_height(rows, len(header), bool(hints))
+    limit = content_height(rows, len(header), bool(hints), len(menu))
     lines: List[str] = [""] * margin
     for span_line in header:
-        lines.append(pad(span_line, " ", "center"))
+        lines.append(row(span_line))
     lines.append("")  # breathing room under the banner
 
-    # ---- transcript: no frame, centred blocks inside the centred column ----
-    visible = center_blocks([row[:inner] for row in list(body)[:limit]], inner)
+    visible = [line[:inner] for line in list(body)[:limit]]
     for row_text in visible:
-        lines.append(pad([(" " * gutter, "", False), *colorize(row_text)]))
+        lines.append(row(colorize(row_text)))
 
     # ---- status line -------------------------------------------------------
-    lines.append(pad(list(status), " ", "center"))
+    lines.append(row(status))
+
+    # ---- completion menu (a dropdown on top of the command bar) ------------
+    for menu_row in menu:
+        lines.append(row(menu_row))
 
     # ---- dashed input ------------------------------------------------------
     lines.append(pad([(glyphs.h * width, "muted", False)]))
     shown = prompt_text[:max(0, inner - prompt_len)]
-    lines.append(pad([(" " * gutter, "", False), ("> ", "primary", True),
-                      (shown, "", False)]))
+    input_index = len(lines)
+    lines.append(row([("> ", "primary", True), (shown, "", False)]))
     lines.append(pad([(glyphs.h * width, "muted", False)]))
 
     # ---- hints -------------------------------------------------------------
     if hints:
-        lines.append(pad(list(hints), " ", "center"))
+        lines.append(row(hints))
 
-    cursor_row = len(lines) - (2 if hints else 1)
     while len(lines) < rows:
         lines.append(" " * columns)
     # pad on *visible* width: painted spans carry escape sequences
     padded = [line + " " * max(0, columns - visible_len(line)) for line in lines[:rows]]
-    cursor_col = left + gutter + prompt_len + max(0, min(cursor, len(shown)))
-    return padded, (cursor_row, cursor_col + 1)
+    cursor_col = gutter + prompt_len + max(0, min(cursor, len(shown)))
+    return padded, (input_index + 1, cursor_col + 1)
 
 
 _STATUS_ROLE_RE = re.compile(
     r"^(\[\s*(?:\+|x|!|\?)?\s*(PASS|FAIL|WARNING|NOT TESTED)\s*\])")
+_STATUS_ROLES = {"PASS": "success", "FAIL": "error", "WARNING": "warning",
+                 "NOT TESTED": "muted"}
+# a row inside a result frame: " ✓ PASS   tls.version   ..."
+_BOX_STATUS_RE = re.compile(r"^(\s*)([^\s])(\s+)(PASS|FAIL|WARNING|NOT TESTED)(\b)")
+_COUNT_ROLES = ((re.compile(r"\d+ passed"), "success"),
+                (re.compile(r"\d+ failed"), "error"),
+                (re.compile(r"\d+ warnings"), "warning"),
+                (re.compile(r"\d+ not tested"), "muted"))
+_BOX_BARS = ("│", "|")
+_BOX_TOP = ("╭", "┌", "+")
+_BOX_BOTTOM = ("╰", "└", "+")
+_BOX_TOP_RIGHT = ("╮", "┐", "+")
+_BOX_BOTTOM_RIGHT = ("╯", "┘", "+")
 
 
 def colorize(text: str) -> List[Span]:
     """Give a captured output line the right colours without changing its text."""
-    role_of = {"PASS": "success", "FAIL": "error", "WARNING": "warning",
-               "NOT TESTED": "muted"}
+    boxed = _box_spans(text)
+    if boxed is not None:
+        return boxed
+    return _colorize_text(text)
+
+
+def _colorize_text(text: str, base: str = "") -> List[Span]:
     match = _STATUS_ROLE_RE.match(text)
     if match:
         head, status = match.group(1), match.group(2)
-        return [(head, role_of[status], True), (text[len(head):], "", False)]
+        return [(head, _STATUS_ROLES[status], True), (text[len(head):], base, False)]
     stripped = text.strip()
+    lead = text[:len(text) - len(text.lstrip(" "))]
     if stripped.startswith("error:"):
         return [(text, "error", False)]
     if stripped.startswith("fix:") or stripped.startswith("report written:"):
@@ -334,7 +338,73 @@ def colorize(text: str) -> List[Span]:
         return [(text, "primary", True)]
     if stripped.startswith("next:") or stripped.startswith("interrupted"):
         return [(text, "muted", False)]
-    return [(text, "", False)]
+    if stripped.startswith(("•", "▸")):
+        bullet = stripped[0]
+        return [(lead + bullet, "muted", False), (text[len(lead) + 1:], base, False)]
+    return [(text, base, False)]
+
+
+def _colorize_interior(text: str) -> List[Span]:
+    """Colour the inside of a frame row: status chip, bullets, fix text."""
+    match = _BOX_STATUS_RE.match(text)
+    if match:
+        lead, glyph, gap, status = match.group(1, 2, 3, 4)
+        head = lead + glyph + gap + status
+        return [(head, _STATUS_ROLES[status], True),
+                *(_colorize_text(text[len(head):]))]
+    return _colorize_text(text)
+
+
+def _colorize_counts(text: str) -> List[Span]:
+    spans: List[Span] = []
+    cursor = 0
+    for match in re.finditer(r"\d+ (?:passed|failed|warnings|not tested)", text):
+        if match.start() > cursor:
+            spans.append((text[cursor:match.start()], "muted", False))
+        role = next(role for pattern, role in _COUNT_ROLES
+                    if pattern.fullmatch(match.group(0)))
+        spans.append((match.group(0), role, False))
+        cursor = match.end()
+    if cursor < len(text):
+        spans.append((text[cursor:], "muted", False))
+    return spans
+
+
+def _box_spans(text: str) -> Optional[List[Span]]:
+    """Re-colour a row produced by the result frame, or None if it is not one."""
+    core = text.strip()
+    if len(core) < 2:
+        return None
+    first, last = core[0], core[-1]
+    top = first in _BOX_TOP and last in _BOX_TOP_RIGHT and first != last
+    bottom = first in _BOX_BOTTOM and last in _BOX_BOTTOM_RIGHT and first != last
+    body = first in _BOX_BARS and last in _BOX_BARS
+    if not (top or bottom or body):
+        return None
+    lead = text[:len(text) - len(text.lstrip(" "))]
+    trail = text[len(text.rstrip(" ")):]
+    inside = core[1:-1]
+    spans: List[Span] = [(lead, "", False), (first, "tool", False)]
+    if body:
+        spans.extend(_colorize_interior(inside))
+    else:
+        # "─ title ─────" between the corners: the label is the first segment
+        label_start = 2 if inside[:1] in ("─", "-") else 0
+        marker = (" ─" if inside[:1] == "─" else " -") if inside[:1] in ("─", "-") else ""
+        cut = inside.find(marker, label_start) if marker else -1
+        if cut < 0:
+            label, filler = inside, ""
+        else:
+            label, filler = inside[:cut], inside[cut:]
+        border_prefix, label_text = inside[:label_start], label[label_start:]
+        spans.append((border_prefix, "tool", False))
+        if top:
+            spans.append((label_text, "primary", True))
+        else:
+            spans.extend(_colorize_counts(label_text))
+        spans.append((filler, "tool", False))
+    spans.extend([(last, "tool", False), (trail, "", False)])
+    return spans
 
 
 class Screen:
@@ -362,7 +432,18 @@ class Screen:
         if not self.active:
             return
         self.active = False
-        self._write(CURSOR_SHOW + ALT_SCREEN_OFF)
+        self._write(MOUSE_OFF + CURSOR_SHOW + ALT_SCREEN_OFF)
+
+    def mouse(self, on: bool) -> None:
+        """Report wheel events; only while the command bar owns the keyboard.
+
+        Left on, the bytes a wheel produces during a network check would queue
+        up in the tty and be typed into the next command, so the shell turns
+        reporting off the moment it hands the terminal back.
+        """
+        if not self.active:
+            return
+        self._write(MOUSE_ON if on else MOUSE_OFF)
 
     def draw(self, lines: Sequence[str], cursor: Tuple[int, int]) -> None:
         with self._lock:
@@ -459,6 +540,10 @@ class KeyReader:
         return self._decode_bytes(data)
 
     def _decode_escape(self, sequence: bytes) -> str:
+        if sequence.startswith(b"[<"):
+            # SGR mouse report: ESC [ < b ; x ; y M (press) / m (release)
+            button = sequence[2:-1].split(b";")[0]
+            return {b"64": "wheelup", b"65": "wheeldown"}.get(button, "unknown")
         mapping = {
             b"[A": "up", b"[B": "down", b"[C": "right", b"[D": "left",
             b"[H": "home", b"[F": "end", b"[1~": "home", b"[4~": "end",
@@ -518,11 +603,15 @@ class TuiSession:
     """Alternate-screen session: transcript, status, command bar, renderer."""
 
     def __init__(self, renderer: Callable[["TuiSession"], Tuple[List[str], Tuple[int, int]]],
-                 stream=None, keys: Optional[KeyReader] = None) -> None:
+                 stream=None, keys: Optional[KeyReader] = None,
+                 completer: Optional[Callable[[str], Sequence[Tuple[str, str]]]] = None) -> None:
         self.screen = Screen(stream)
         self.transcript = Transcript()
         self.renderer = renderer
         self.keys = keys or KeyReader()
+        self.completer = completer
+        self.menu: List[Tuple[str, str]] = []
+        self.menu_index = 0
         self.status: List[Span] = []
         self.question = ""
         self.default = ""
@@ -637,64 +726,121 @@ class TuiSession:
         self.input = ""
         self.cursor = 0
         self.masked = secret
+        self.menu = []
+        self.menu_index = 0
         history_index = len(self.history)
         draft = ""
-        while True:
-            self.render()
-            key = self.keys.read_key()
-            if key in ("enter", "eof", "ctrl-d") or key == "ctrl-c":
-                if key in ("eof", "ctrl-d"):
-                    return None
-                if key == "ctrl-c":
-                    return None
-                line = self.input
-                self.input = ""
-                self.cursor = 0
-                self.masked = False
-                if line.strip() and not secret:
-                    self.history.append(line)
-                    del self.history[:-HISTORY_LIMIT]
-                return line
-            if key == "backspace":
-                if self.cursor > 0:
-                    self.input = self.input[:self.cursor - 1] + self.input[self.cursor:]
-                    self.cursor -= 1
-            elif key == "ctrl-u":
-                self.input = ""
-                self.cursor = 0
-            elif key == "left":
-                self.cursor = max(0, self.cursor - 1)
-            elif key == "right":
-                self.cursor = min(len(self.input), self.cursor + 1)
-            elif key == "home":
-                self.cursor = 0
-            elif key == "end":
-                self.cursor = len(self.input)
-            elif key == "up":
-                if history_index > 0:
-                    if history_index == len(self.history):
-                        draft = self.input
-                    history_index -= 1
-                    self.input = self.history[history_index]
+        self.screen.mouse(True)
+        try:
+            while True:
+                self.render()
+                key = self.keys.read_key()
+                if key in ("enter", "eof", "ctrl-d") or key == "ctrl-c":
+                    if key in ("eof", "ctrl-d"):
+                        return None
+                    if key == "ctrl-c":
+                        return None
+                    line = self.input
+                    self.input = ""
+                    self.cursor = 0
+                    self.masked = False
+                    if line.strip() and not secret:
+                        self.history.append(line)
+                        del self.history[:-HISTORY_LIMIT]
+                    return line
+                if key == "backspace":
+                    if self.cursor > 0:
+                        self.input = self.input[:self.cursor - 1] + self.input[self.cursor:]
+                        self.cursor -= 1
+                elif key == "ctrl-u":
+                    self.input = ""
+                    self.cursor = 0
+                elif key == "left":
+                    self.cursor = max(0, self.cursor - 1)
+                elif key == "right":
+                    self.cursor = min(len(self.input), self.cursor + 1)
+                elif key == "home":
+                    self.cursor = 0
+                elif key == "end":
                     self.cursor = len(self.input)
-            elif key == "down":
-                if history_index < len(self.history) - 1:
-                    history_index += 1
-                    self.input = self.history[history_index]
-                elif history_index == len(self.history) - 1:
-                    history_index = len(self.history)
-                    self.input = draft
-                self.cursor = len(self.input)
-            elif key in ("pageup", "pagedown", "escape"):
-                self.scroll_rows(PAGE_STEP if key == "pageup" else -PAGE_STEP)
-            elif key == "ctrl-l":
-                self.scroll = 0
-                self.screen.enter()
-            elif key == "tab":
-                continue
-            elif len(key) == 1 and key.isprintable():
-                self.input = self.input[:self.cursor] + key + self.input[self.cursor:]
-                self.cursor += 1
+                elif key == "up":
+                    if self.menu:
+                        self.menu_index = max(0, self.menu_index - 1)
+                    elif history_index > 0:
+                        if history_index == len(self.history):
+                            draft = self.input
+                        history_index -= 1
+                        self.input = self.history[history_index]
+                        self.cursor = len(self.input)
+                elif key == "down":
+                    if self.menu:
+                        self.menu_index = min(len(self.menu) - 1, self.menu_index + 1)
+                    else:
+                        if history_index < len(self.history) - 1:
+                            history_index += 1
+                            self.input = self.history[history_index]
+                        elif history_index == len(self.history) - 1:
+                            history_index = len(self.history)
+                            self.input = draft
+                        self.cursor = len(self.input)
+                elif key in ("wheelup", "wheeldown"):
+                    self.scroll_rows(WHEEL_STEP if key == "wheelup" else -WHEEL_STEP)
+                elif key in ("pageup", "pagedown"):
+                    self.scroll_rows(PAGE_STEP if key == "pageup" else -PAGE_STEP)
+                elif key == "escape":
+                    if self.menu:
+                        self.menu = []
+                        self.menu_index = 0
+                    else:
+                        self.scroll_rows(-PAGE_STEP)
+                elif key == "ctrl-l":
+                    self.scroll = 0
+                    self.screen.enter()
+                elif key == "tab":
+                    if self.menu:
+                        self.accept_completion()
+                elif key in ("backtab", "unknown", "pending"):
+                    continue
+                elif len(key) == 1 and key.isprintable():
+                    self.input = self.input[:self.cursor] + key + self.input[self.cursor:]
+                    self.cursor += 1
+                self.refresh_menu()
+        finally:
+            self.menu = []
+            self.menu_index = 0
+            self.masked = self.masked and secret
+            self.screen.mouse(False)
+
+    # -- completion ------------------------------------------------------
+    def refresh_menu(self) -> None:
+        """Ask the completer for suggestions for the current command word."""
+        if self.masked or self.completer is None:
+            self.menu = []
+            self.menu_index = 0
+            return
+        text = self.input
+        if not text.startswith("/") or " " in text:
+            self.menu = []
+            self.menu_index = 0
+            return
+        try:
+            items = [tuple(item) for item in self.completer(text)][:MENU_ROWS]
+        except Exception:
+            items = []
+        if [name for name, _ in items] != [name for name, _ in self.menu]:
+            self.menu_index = 0
+        self.menu = items  # type: ignore[assignment]
+        self.menu_index = min(self.menu_index, max(0, len(self.menu) - 1))
+
+    def accept_completion(self) -> None:
+        """Tab: put the highlighted command in the bar with its trailing space."""
+        if not self.menu:
+            return
+        name = self.menu[self.menu_index][0]
+        self.input = name + " "
+        self.cursor = len(self.input)
+        self.menu = []
+        self.menu_index = 0
 
     def scroll_rows(self, delta: int) -> None:
         """Positive delta scrolls back into the transcript."""

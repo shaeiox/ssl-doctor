@@ -8,15 +8,27 @@ report payload and the findings contract are unchanged.**
 
 ### What looks different
 
-- **Full-screen application mode**: the interactive session now opens in the
-  alternate screen as a centred column — header, transcript directly beneath it,
-  status line, dashed input and key hints. There is no output box: each
-  command's output is a centred block and the transcript is scrollable. Output is
-  captured (wrapped, never truncated), PageUp/PageDown scroll it, and the command
-  bar has editing and history. Questions and the spinner live in the status line,
-  so the transcript only ever shows results.
-  Opt out with `--no-tui` or `SSL_DOCTOR_TUI=0`; batch runs, pipes and
+- **Full-screen application mode**: the interactive session opens in the
+  alternate screen as a terminal-like log — wordmark, then everything you run
+  appended underneath it on one left margin. Nothing is centred: the column is
+  the window width (capped at 120) and every row starts at the same gutter.
+  Output is captured wrapped, never truncated, and stays scrollable; the command
+  bar has editing and history, and the spinner and questions live in the status
+  line. Opt out with `--no-tui` or `SSL_DOCTOR_TUI=0`; batch runs, pipes and
   `TERM=dumb` keep the line-oriented REPL unchanged.
+- **Mouse-wheel scrolling**: the transcript scrolls with the wheel, three rows a
+  notch. Reporting is enabled only while the command bar (or a question) is
+  reading, so wheel bytes can never reach a running check; `PgUp`/`PgDn` still
+  work.
+- **`/` completion**: typing a partial command name shows up to three matches
+  with their descriptions. `Tab` completes the highlighted one, `↑`/`↓` move the
+  highlight, `Esc` or a space dismisses the list. The list is built from the same
+  command table `/help` renders.
+- **A framed block per result**: each command's findings are drawn in one
+  rounded frame whose title is the command, with a row per check (glyph, status,
+  check id, title), the evidence/detail/`fix:` lines inside the border, and the
+  counters in the closing border. Frames are shared with the line-oriented REPL
+  and fall back to `+ - |` corners where box drawing is unavailable.
 
 - **Startup banner**: a modern two-stroke wordmark spelling `SSL DOCTOR` between
   double rules, with the description, version, read-only note and
@@ -26,10 +38,11 @@ report payload and the findings contract are unchanged.**
   `error`, `muted`, `subtle`, `surface`) with TrueColor → 256 → 16 → plain
   degradation. `NO_COLOR` wins over everything; new `SSL_DOCTOR_COLOR=never|always`
   exists for demos and captures. Piped output stays plain.
-- **One frame per command**: findings print as rows inside a single box for the
-  command that produced them, with the passed/failed/warnings/not-tested
-  counters as the footer. Evidence, detail and `fix:` text are never truncated;
-  narrow terminals wrap with a hanging indent.
+- **One frame per command**: findings print as rows inside a single rounded box
+  for the command that produced them, with the passed/failed/warnings/not-tested
+  counters in the closing border. Evidence, detail and `fix:` text are never
+  truncated; narrow terminals wrap inside the border and shorten the counter text
+  instead.
 - **Dashed ASCII input frame** with a `| > ` prompt and a muted status line
   (`target · 12 findings · 1 fail · timeout 8s · ssh off`) that is suppressed in
   batch (`-c`) runs and in plain mode.
