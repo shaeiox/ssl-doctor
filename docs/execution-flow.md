@@ -155,7 +155,24 @@ automatically produce a non-zero exit code; the diagnosis does.
 
 ## 5. REPL mode — the command loop
 
-`ssl_doctor/cli.py :: SSLDoctorCLI.repl()`:
+On an interactive terminal `repl()` first starts the **full-screen shell**
+(`SSLDoctorCLI._repl_tui()`, presentation in `ssl_doctor/tui.py`) unless
+`--no-tui`, `SSL_DOCTOR_TUI=0`, `TERM=dumb` or a missing key reader rules it
+out; any error there falls back to the line loop below.
+
+- The shell enters the alternate screen and redraws one frame per event:
+  centred banner, the transcript (each command's captured, colourless output),
+  then the rounded composer (label and session summary in its top border, key
+  hints in its bottom border). `_tui_run()` executes a line with `sys.stdout`
+  captured into the transcript; the spinner and questions live in the composer.
+- Mouse reporting (`?1002h ?1006h`) is on only while the composer reads:
+  the wheel scrolls, a drag selects transcript text and the release copies it;
+  `Ctrl-Y` copies the previous response.
+- Copies go through `ssl_doctor/clipboard.py`: the native OS clipboard (Win32,
+  or an X11 helper process), a clipboard tool as fallback, and the OSC 52
+  terminal escape.
+
+The line-oriented loop (`--no-tui`, pipes, batch fallback):
 
 ```text
 banner()
@@ -245,6 +262,8 @@ pattern: run a library function under a `Spinner`, add findings to
 | `/server disconnect` | `cmd_server` | Closes SSH and drops the session object. | `ssl_doctor/server.py` |
 | `/diagnose` | `cmd_diagnose` | Correlates all findings into ranked root causes. | `ssl_doctor/analyze.py` |
 | `/report [html\|json\|both] [path]` | `cmd_report` | Writes a report. | `ssl_doctor/report.py`, `ssl_doctor/contract.py` |
+| `/report agent [dir]` | `cmd_report` → `_report_agent` | Writes `agent-report.md` + `agent-report.json` (both or neither) from the redacted findings document. | `ssl_doctor/report.py` (`agent_meta`, `agent_markdown`, `write_agent_report`) |
+| `/copy [all]` | `cmd_copy` | Copies the previous recorded response, or the whole session, to the clipboard. | `ssl_doctor/clipboard.py` |
 | `/exit`, `/quit` | `cmd_exit` / `cmd_quit` | Disconnects SSH, sets `_running = False`. | `ssl_doctor/cli.py` |
 
 ### 7.1 `/tls` — remote diagnostics

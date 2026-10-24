@@ -38,6 +38,101 @@ def build_payload(findings: List[F.Finding], diagnosis: Optional[Diagnosis],
     }, secrets)
 
 
+# The analysis prompt an agent report ends with. It is part of the feature's
+# specification and is reproduced verbatim: report-specific detail belongs in
+# the sections before it, never in edits to this text.
+AGENT_ANALYSIS_PROMPT = """\
+You are a senior TLS/PKI engineer and network troubleshooting specialist. Analyze the SSL Doctor report as evidence, not as unquestionable truth.
+
+Your objective is to identify the most likely root cause of the reported problem, determine what is actually established by the available evidence, and recommend the safest next diagnostic steps.
+
+Follow these rules:
+
+1. Separate confirmed facts, probable explanations, unresolved hypotheses, and observations. Never present an unverified hypothesis as a confirmed root cause.
+
+2. For every proposed root cause, provide:
+   - A concise explanation.
+   - Supporting evidence from the report.
+   - Contradicting evidence or missing evidence.
+   - Confidence level and justification.
+   - The next test that would best confirm or reject it.
+
+3. Interpret TLS protocol probes carefully. A successful handshake under a relaxed OpenSSL security policy does not, by itself, establish compatibility with ordinary clients. A `NO_PROTOCOLS_AVAILABLE` error can indicate a client-side limitation rather than a server rejection. Distinguish client limitations, server rejections, timeouts, and unreachable endpoints.
+
+4. Evaluate certificate subject and SAN coverage, hostname matching, validity dates, trust-chain validation, intermediate certificates, SNI behavior, and differences between endpoints. Do not treat a different certificate without SNI as a defect by itself.
+
+5. Interpret endpoint comparisons according to actual coverage. Do not generalize results from a subset of DNS addresses to all endpoints. Do not infer certificate mismatch when an endpoint never completed a comparable TLS handshake.
+
+6. Distinguish TLS negotiation failures from HTTP redirects, application-layer errors, DNS problems, TCP connectivity failures, and local trust-store limitations.
+
+7. Consider the local environment, including the operating system, OpenSSL version, proxy configuration, system clock, and client security policy. Explain how these factors may affect the observations.
+
+8. Prioritize hypotheses by evidence strength and practical impact. Do not manufacture a root cause simply because the report contains a warning.
+
+9. Recommend a minimal, ordered troubleshooting plan. Start with safe, read-only checks and tests that distinguish competing hypotheses. Explain what each test would prove and how to interpret its outcomes.
+
+10. Recommend configuration changes only when evidence supports them. Identify the relevant component (for example, the TLS terminator, reverse proxy, load balancer, web server, certificate chain, or client trust store). Clearly distinguish verification steps from remediation steps.
+
+11. Explicitly list the additional information required if the current report is insufficient. Never fabricate command output, server configuration, certificate properties, network conditions, or test results.
+
+12. End with:
+   - Most likely root cause, or state that the evidence is insufficient.
+   - Confidence level.
+   - Strongest supporting evidence.
+   - Most important uncertainty.
+   - Three prioritized next actions.
+   - A clear statement of whether a server-side configuration change is justified by the current evidence.
+
+Use precise technical language. Be concise but thorough. Reference exact report fields and observed values whenever possible.
+"""
+
+
+# Scan facts an agent report carries in `meta`; the contract's `facts` block
+# keeps only the monitoring subset (see netchecks.export_facts).
+_AGENT_SCAN_KEYS = ("host", "port", "sni", "ips", "handshake_ip", "protocol",
+                    "cipher", "final_url")
+
+
+def _iso(epoch: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def agent_environment() -> Dict[str, Any]:
+    """The reporting process's own runtime (the CLI ran the scan in it)."""
+    import platform
+    import ssl
+    return {"tool": f"{APP_NAME} {__version__}",
+            "python": platform.python_version(),
+            "openssl": ssl.OPENSSL_VERSION,
+            "platform": platform.platform()}
+
+
+def agent_meta(meta: Dict[str, Any], scan_facts: Dict[str, Any],
+               findings: List[F.Finding],
+               environment: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """`meta` for an agent report: the run context plus what the scan observed.
+
+    Values the scan did not record are `None`, never inferred. `local.os`
+    evidence, when present, is the scan-time record of the client machine.
+    """
+    local_os = next((f for f in reversed(findings) if f.check == "local.os"), None)
+    env = dict(environment if environment is not None else agent_environment())
+    env["local_os_evidence"] = list(local_os.evidence) if local_os else None
+    stamps = [f.ts for f in findings]
+    scan = {key: scan_facts.get(key) for key in _AGENT_SCAN_KEYS}
+    scan.update({
+        "first_finding_utc": _iso(min(stamps)) if stamps else None,
+        "last_finding_utc": _iso(max(stamps)) if stamps else None,
+        "targets": list(dict.fromkeys(f.target for f in findings if f.target)),
+    })
+    return {**meta, "report_kind": "agent", "agent_report": {
+        "scan": scan,
+        "environment": env,
+        "configuration": {key: meta.get(key) for key in
+                          ("network_timeout", "command_timeout", "ssh_connected")},
+    }}
+
+
 def write_json(path: str, findings: List[F.Finding],
                diagnosis: Optional[Diagnosis], meta: Dict[str, Any],
                secrets: Iterable[str] = (),
@@ -45,6 +140,366 @@ def write_json(path: str, findings: List[F.Finding],
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(build_payload(findings, diagnosis, meta, secrets, facts), fh, indent=2,
                   default=str)
+
+
+# ------------------------------------------------------------- agent report
+#
+# The Markdown is rendered only from the redacted contract document that is
+# also written as agent-report.json, so both files describe the same scan and
+# the renderer cannot reach anything the JSON lacks. Every sentence that is not
+# a value from that document is fixed framing; nothing here interprets results.
+
+# Evidence areas, in report order: (heading, check-id prefixes, empty text)
+_AGENT_AREAS = (
+    ("DNS and TCP connectivity", ("net.dns", "net.tcp"),
+     "no DNS/TCP finding in this session"),
+    ("TLS handshake", ("tls.handshake",), "no TLS handshake finding in this session"),
+    ("Certificate and trust", ("tls.certvalid", "tls.hostname", "tls.chain",
+                               "tls.verify", "cert."),
+     "no certificate or trust finding in this session"),
+    ("SNI behaviour", ("tls.sni",), "SNI behaviour was not collected in this session"),
+    ("Protocol-version probes", ("tls.protocols",),
+     "protocol-version probes were not run in this session"),
+    ("Cipher acceptance", ("tls.weakcipher",),
+     "cipher acceptance was not tested in this session"),
+    ("Endpoint comparison", ("tls.multiip",),
+     "endpoint comparison was not run in this session"),
+    ("HTTPS response and redirects", ("https.",),
+     "the HTTPS layer was not checked in this session"),
+    ("Local machine checks", ("local.",), "no local machine checks were run (/local)"),
+    ("Server-side checks (authorized, read-only)", ("ssh.", "srv.", "nginx."),
+     "no server-side checks were run (no authorized SSH session)"),
+)
+
+_SUPPORT_LABELS = {
+    "default": "accepted with this client's default settings",
+    "relaxed-only": "accepted only under the relaxed policy; a default-configured "
+                    "probe was refused by the server",
+    "relaxed-only-unverified": "accepted only under the relaxed policy; the "
+                               "default-settings probe produced no server answer, so "
+                               "ordinary-client compatibility is NOT established",
+    "rejected": "refused by the server",
+    "inconclusive": "no definite result - no conclusion about server support",
+}
+
+_DEFAULT_PROBE_LABELS = {
+    "accepted": "accepted with this client's default settings",
+    "refused": "refused - the server answered with an error",
+    "client-limited": "not sent - this client could not offer the version under its "
+                      "default settings; a limitation of this client, not a server "
+                      "rejection",
+    "inconclusive": "no definite answer (timeout or local error) - no conclusion",
+    "unsupported": "this Python/OpenSSL build cannot pin the version",
+}
+
+_UNREACHED_ENDPOINT_STATES = ("tcp-unreachable", "timed-out")
+
+
+def _fence(lines: Iterable[str], indent: str = "  ") -> List[str]:
+    """Verbatim text in a fenced block, so values are never read as Markdown."""
+    lines = [str(line) for line in lines]
+    fence = "````" if any("```" in line for line in lines) else "```"
+    return [f"{indent}{fence}text", *(f"{indent}{line}" for line in lines),
+            f"{indent}{fence}"]
+
+
+def _value(value: Any) -> str:
+    """A recorded value; `None` is "not recorded", an empty list is "none"."""
+    if value is None or value == "":
+        return "not recorded"
+    if isinstance(value, list):
+        if not value:
+            return "none"
+        return ", ".join(f"`{v}`" for v in value)
+    return f"`{value}`"
+
+
+def _agent_finding(f: Dict[str, Any]) -> List[str]:
+    target = f" · target `{f['target']}`" if f.get("target") else ""
+    out = [f"- **{f['status']}** · `{f['check']}` · {f['title']} "
+           f"(scope: {f['scope']}{target})"]
+    if f.get("evidence"):
+        out += ["  - evidence:", *_fence(f["evidence"], "    ")]
+    if f.get("failure_kind"):
+        meaning = contract.FAILURE_KINDS.get(f["failure_kind"], "")
+        out.append(f"  - failure kind: `{f['failure_kind']}` - {meaning}")
+    if f.get("observation"):
+        meaning = contract.OBSERVATIONS.get(f["observation"], "")
+        out.append(f"  - observation: `{f['observation']}` - {meaning}")
+    for line in f.get("uncertainty") or []:
+        out.append(f"  - uncertainty: {line}")
+    if f.get("detail"):
+        out += ["  - detail:", *_fence([f["detail"]], "    ")]
+    if f.get("recommendation"):
+        out.append(f"  - recorded remediation: {f['recommendation']}")
+    return out
+
+
+def _probe_policy_lines(policy: Optional[Dict[str, Any]]) -> List[str]:
+    from .netchecks import _RELAXED_CIPHER_POLICY
+    if not policy:
+        return []
+    out = ["", f"Probe policy: versions in `relaxed_versions` "
+               f"({_value(policy.get('relaxed_versions'))}) are probed first with "
+               f"SSL Doctor's relaxed cipher policy `{_RELAXED_CIPHER_POLICY}`; a "
+               f"version that answers is probed again with this client's default "
+               f"settings. Negotiated by the primary handshake: "
+               f"{_value(policy.get('negotiated'))}.", "",
+           "| Version | Support class | Default-settings probe |", "|---|---|---|"]
+    defaults = policy.get("default_probe") or {}
+    for version, cls in (policy.get("support") or {}).items():
+        state = defaults.get(version)
+        probe = (f"`{state}` - {_DEFAULT_PROBE_LABELS.get(state, '')}" if state
+                 else "not run (only versions that answered are re-probed)")
+        out.append(f"| {version} | `{cls}` - {_SUPPORT_LABELS.get(cls, '')} | {probe} |")
+    out += ["", f"Deprecated versions confirmed for ordinary clients: "
+                f"{_value(policy.get('confirmed_legacy'))}. Deprecated versions "
+                f"accepted only under the relaxed policy and unverified for ordinary "
+                f"clients: {_value(policy.get('unverified_legacy'))}."]
+    return out
+
+
+def _endpoint_lines(facts: Dict[str, Any]) -> List[str]:
+    cmp_ = facts.get("endpoint_comparison")
+    if not cmp_:
+        return []
+    endpoints = facts.get("endpoints") or []
+    reachable = sum(1 for e in endpoints if e.get("state") not in _UNREACHED_ENDPOINT_STATES)
+    addresses = cmp_.get("addresses")
+    out = ["", f"Coverage: {addresses if addresses is not None else 'not recorded'} "
+               f"address(es) resolved, {cmp_.get('probed', 0)} probed, {reachable} "
+               f"reachable, {cmp_.get('comparable', 0)} comparable "
+               f"(completed a handshake for the same server name). Results apply to "
+               f"the comparable endpoints only.", ""]
+    if cmp_.get("difference"):
+        out.append(f"Measured difference in: {cmp_.get('attribute') or 'not recorded'}.")
+    for e in endpoints:
+        detail = f" - {e['detail']}" if e.get("detail") else ""
+        out.append(f"- `{e.get('ip')}`: `{e.get('state') or 'unknown'}`{detail}")
+    return out
+
+
+def _cause_lines(c: Dict[str, Any]) -> List[str]:
+    out = [f"- **{c['certainty'].upper()}** (rank {c['rank']}, origin: {c['origin']}): "
+           f"{c['summary']}"]
+    if c.get("evidence"):
+        out += ["  - supporting evidence:", *_fence(c["evidence"], "    ")]
+    out.append("  - contradicting evidence: SSL Doctor did not record contradicting "
+               "evidence for this cause.")
+    for lim in c.get("limitations") or []:
+        out.append(f"  - limitation: {lim}")
+    if c.get("recommendation"):
+        out.append(f"  - recorded remediation: {c['recommendation']}")
+    return out
+
+
+def agent_markdown(payload: Dict[str, Any]) -> str:
+    """Render agent-report.md from the (redacted) contract document."""
+    meta = payload.get("meta") or {}
+    agent = meta.get("agent_report") or {}
+    scan, env = agent.get("scan") or {}, agent.get("environment") or {}
+    conf = agent.get("configuration") or {}
+    findings = payload.get("findings") or []
+    facts = payload.get("facts") or {}
+    diag = payload.get("diagnosis") or {"overall": "not computed", "causes": [],
+                                        "notes": [], "unresolved": []}
+    causes, unresolved = diag.get("causes") or [], diag.get("unresolved") or []
+    counts = payload.get("summary") or {}
+    target = (f"{scan.get('host')}:{scan.get('port')}" if scan.get("host")
+              else meta.get("target") or "not recorded")
+    by_certainty = {k: [c for c in causes if c.get("certainty") == k]
+                    for k in ("confirmed", "probable", "possible")}
+    lines: List[str] = [f"# SSL Doctor agent report - {target}", ""]
+
+    lines += ["## 1. Report metadata", "",
+              f"- SSL Doctor version: {payload.get('tool', 'not recorded')}",
+              f"- Report schema version: findings/{payload.get('schema_version')}",
+              f"- Report generated (UTC): {payload.get('generated_utc')}",
+              f"- Scan findings recorded (UTC): {scan.get('first_finding_utc') or 'not recorded'}"
+              f" to {scan.get('last_finding_utc') or 'not recorded'}",
+              f"- Target: `{target}` (SNI: {_value(scan.get('sni'))})",
+              f"- Targets of all findings in this session: {_value(scan.get('targets'))}",
+              f"- Scan configuration: network timeout {_value(conf.get('network_timeout'))} s, "
+              f"remote command timeout {_value(conf.get('command_timeout'))} s, "
+              f"SSH session connected: {_value(conf.get('ssh_connected'))}",
+              f"- Execution environment: Python {_value(env.get('python'))}, "
+              f"{_value(env.get('openssl'))}, platform {_value(env.get('platform'))}",
+              "- Source: every value below comes from the companion "
+              "`agent-report.json` (same scan, same redaction). SSL Doctor's checks are "
+              "read-only; nothing was re-measured to produce this report.", ""]
+
+    lines += ["## 2. Executive summary", "",
+              f"- Overall status (from SSL Doctor's diagnosis): **{diag.get('overall')}** "
+              f"(derived from causes only; a warning without a justified cause is listed "
+              f"as an unresolved finding, not folded into this status)",
+              f"- Checks: {counts.get(F.PASS, 0)} PASS · {counts.get(F.FAIL, 0)} FAIL · "
+              f"{counts.get(F.WARNING, 0)} WARNING · {counts.get(F.NOT_TESTED, 0)} NOT TESTED",
+              f"- Confirmed causes: {len(by_certainty['confirmed'])} · probable causes: "
+              f"{len(by_certainty['probable'])} · possible causes (hypotheses): "
+              f"{len(by_certainty['possible'])} · unresolved findings: {len(unresolved)}"]
+    for c in causes:
+        lines.append(f"  - {c['certainty']}: {c['summary']}")
+    for u in unresolved:
+        lines.append(f"  - unresolved (`{u['check']}`, {u['status']}): {u['observed']}")
+    lines.append("")
+
+    lines += ["## 3. Target and environment", "",
+              f"- Hostname: {_value(scan.get('host'))} · port: {_value(scan.get('port'))} "
+              f"· SNI sent: {_value(scan.get('sni'))}",
+              f"- Resolved addresses: {_value(scan.get('ips'))}",
+              f"- Address the TLS probes connected to: {_value(scan.get('handshake_ip'))}",
+              f"- Negotiated protocol / cipher: {_value(scan.get('protocol'))} / "
+              f"{_value(scan.get('cipher'))}",
+              f"- Final URL after redirects: {_value(scan.get('final_url'))}",
+              f"- Reporting process: {_value(env.get('tool'))}, Python "
+              f"{_value(env.get('python'))}, {_value(env.get('openssl'))}, "
+              f"{_value(env.get('platform'))}"]
+    if env.get("local_os_evidence"):
+        lines += ["- Client machine at scan time (`local.os`):",
+                  *_fence(env["local_os_evidence"])]
+    else:
+        lines.append("- Client machine at scan time: not collected (`/local` did not run)")
+    lines.append("")
+
+    lines += ["## 4. Detailed evidence", ""]
+    placed = set()
+    for heading, prefixes, empty in _AGENT_AREAS:
+        group = [f for f in findings
+                 if any(f["check"] == p or (p.endswith(".") and f["check"].startswith(p))
+                        for p in prefixes)]
+        placed.update(id(f) for f in group)
+        lines += [f"### {heading}", ""]
+        if not group:
+            lines += [f"- {empty}.", ""]
+        for f in group:
+            lines += _agent_finding(f)
+        if heading == "Protocol-version probes":
+            lines += _probe_policy_lines(facts.get("probe_policy"))
+        if heading == "Endpoint comparison":
+            lines += _endpoint_lines(facts)
+        if group:
+            lines.append("")
+    rest = [f for f in findings if id(f) not in placed]
+    if rest:
+        lines += ["### Other findings", ""]
+        for f in rest:
+            lines += _agent_finding(f)
+        lines.append("")
+
+    lines += ["## 5. Findings and diagnosis", "",
+              "Observations are what the checks recorded. Possible causes are "
+              "hypotheses; probable and confirmed causes carry SSL Doctor's stated "
+              "certainty. Unresolved findings are warnings for which no cause is "
+              "justified by the evidence.", "",
+              "### 5.1 Observations (status of every check)", ""]
+    for f in findings:
+        lines.append(f"- {f['status']} · `{f['check']}` · {f['title']}")
+    for title, key in (("5.2 Confirmed causes", "confirmed"),
+                       ("5.3 Probable causes", "probable"),
+                       ("5.4 Possible causes (hypotheses)", "possible")):
+        lines += ["", f"### {title}", ""]
+        group = by_certainty[key]
+        if not group:
+            lines.append("- none recorded")
+        for c in group:
+            lines += _cause_lines(c)
+    lines += ["", "### 5.5 Unresolved findings", ""]
+    if not unresolved:
+        lines.append("- none recorded")
+    for u in unresolved:
+        lines.append(f"- `{u['check']}` ({u['status']}"
+                     + (f", observation `{u['observation']}`" if u.get("observation") else "")
+                     + ")")
+        lines.append(f"  - observed: {u['observed']}")
+        lines.append(f"  - supported conclusion: {u['conclusion']}")
+        for unc in u.get("uncertainty") or []:
+            lines.append(f"  - uncertainty: {unc}")
+        if u.get("recommendation"):
+            lines.append(f"  - recorded next step: {u['recommendation']}")
+    failed = [f for f in findings if f["status"] in (F.FAIL, F.NOT_TESTED)
+              or f.get("failure_kind")]
+    lines += ["", "### 5.6 Failed or inconclusive probes", ""]
+    if not failed:
+        lines.append("- none recorded")
+    for f in failed:
+        kind = f" · failure kind `{f['failure_kind']}`" if f.get("failure_kind") else ""
+        lines.append(f"- {f['status']} · `{f['check']}` · {f['title']}{kind}")
+    lines += ["", "### 5.7 Diagnosis notes", ""]
+    lines += [f"- {n}" for n in diag.get("notes") or []] or ["- none recorded"]
+    lines.append("")
+
+    lines += ["## 6. Recommended next steps", "",
+              "SSL Doctor's recorded guidance, in this order: causes, unresolved "
+              "findings, then individual findings. Prefer the read-only verification "
+              "steps first; a configuration change is supported only where a recorded "
+              "cause calls for it.", ""]
+    steps = list(dict.fromkeys(
+        [c["recommendation"] for c in causes if c.get("recommendation")]
+        + [u["recommendation"] for u in unresolved if u.get("recommendation")]
+        + [f["recommendation"] for f in findings if f.get("recommendation")]))
+    lines += [f"{i}. {step}" for i, step in enumerate(steps, 1)] or ["- none recorded"]
+    lines += ["", "### Missing evidence", ""]
+    missing = list(dict.fromkeys(
+        [f"`{u['check']}`: {unc}" for u in unresolved for unc in u.get("uncertainty") or []]
+        + [f"`{f['check']}`: {unc}" for f in findings for unc in f.get("uncertainty") or []]
+        + [f"`{f['check']}` was NOT TESTED"
+           + (f": {f['evidence'][0]}" if f.get("evidence") else "")
+           for f in findings if f["status"] == F.NOT_TESTED]))
+    lines += [f"- {m}" for m in missing] or ["- none recorded"]
+    lines.append("")
+
+    lines += ["## 7. AI analysis instructions", "",
+              "Give this whole file to the AI model. The prompt below is reproduced "
+              "verbatim; the sections above are the report it refers to.", "",
+              AGENT_ANALYSIS_PROMPT]
+    return "\n".join(lines)
+
+
+AGENT_REPORT_FILES = ("agent-report.md", "agent-report.json")
+
+
+def write_agent_report(directory: str, markdown: str, json_text: str) -> List[str]:
+    """Write both agent-report files into `directory`, or neither.
+
+    Existing report files are never overwritten. Both are written to temporary
+    files first and moved into place; on any error everything this call created
+    (temporary files, moved files, a directory it made) is removed and the
+    error is re-raised. Returns the two paths (Markdown, JSON).
+    """
+    import errno
+    import os
+    import tempfile
+    paths = [os.path.join(directory, name) for name in AGENT_REPORT_FILES]
+    for path in paths:
+        if os.path.exists(path):
+            raise FileExistsError(errno.EEXIST, "a report already exists", path)
+    made_dir = not os.path.isdir(directory)
+    os.makedirs(directory, exist_ok=True)
+    created: List[str] = []
+    try:
+        temps = []
+        for text in (markdown, json_text):
+            fd, tmp = tempfile.mkstemp(prefix=".agent-report-", dir=directory)
+            created.append(tmp)
+            temps.append(tmp)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        for tmp, path in zip(temps, paths):
+            os.replace(tmp, path)
+            created[created.index(tmp)] = path
+    except BaseException:
+        for path in created:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        if made_dir:
+            try:
+                os.rmdir(directory)
+            except OSError:
+                pass
+        raise
+    return paths
 
 
 _CSS = """

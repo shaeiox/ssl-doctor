@@ -111,6 +111,8 @@ and a space or `Esc` dismisses the list.
 | `←` / `→`, `Home` / `End` | move the caret in the composer |
 | `Backspace`, `Ctrl-U` | edit / clear the composer |
 | mouse wheel | scroll the transcript |
+| drag with the left button | select transcript text; releasing copies it (`copied 3 lines · 212 chars · …`) |
+| `Ctrl-Y` | copy the previous command's response, keeping what you typed |
 | `PgUp` / `PgDn` | scroll the transcript (the newest output is always one key away) |
 | `Ctrl-L` | redraw |
 | `Ctrl-C`, `Ctrl-D` | leave the session (same status code as the line REPL) |
@@ -118,8 +120,17 @@ and a space or `Esc` dismisses the list.
 The column is the terminal width, capped at 120 columns and left-aligned; the
 banner is centred in it and drops from the wordmark to a compact form when the
 window is shorter than 24 rows or narrower than the wordmark.
-Mouse reporting is switched on only while the composer is reading, so wheel
-bytes can never end up inside a running check. Commands, answers, findings, exit
+Mouse reporting (wheel, press, drag, release) is switched on only while the
+composer is reading, so mouse bytes can never end up inside a running check;
+during a check, and with Shift+drag at any time, the terminal's own selection
+works as usual. Copies need no extra software: on Windows they use the Win32
+clipboard, on Linux/X11 (including XWayland) SSL Doctor owns the X clipboard
+through a small detached helper that serves it until something else is copied,
+the way `xclip` does. Wayland-only sessions use `wl-copy` and macOS `pbcopy`.
+The terminal clipboard escape (OSC 52) is sent as well, for SSH sessions — many
+terminals ignore it (VTE-based ones such as GNOME Terminal and xfce4-terminal
+do), so a copy carried only by it is reported as *not confirmed*, with
+Shift+drag (the terminal's own selection) as the way out. Commands, answers, findings, exit
 codes and reports are identical to the line-oriented mode — the shell only
 presents them.
 
@@ -285,6 +296,8 @@ Via a read-only SSH session (`/server connect` or `/scan --server-only` /
 | `/server overview · nginx · cert · config · logs · compare` | The read-only server-side checks listed above |
 | `/diagnose` | Correlate everything into ranked causes (confirmed / probable / possible) with evidence + remediation |
 | `/report [html\|json\|both] [path]` | Self-contained HTML and/or machine-readable JSON |
+| `/report agent [dir]` | AI-ready export of the latest completed scan: `agent-report.md` (paste into any AI model; ends with a built-in analysis prompt) and `agent-report.json` (findings contract), in `./ssl-doctor-agent-report-<timestamp>/` or `dir`. Nothing is sent anywhere |
+| `/copy [all]` | Copy the previous command's response (or the whole session) to the clipboard as plain text |
 | `/typewriter [on\|off\|speed <n>]` | Gradual output on an interactive terminal |
 | `/timeout`, `/findings`, `/clear`, `/help`, `/version`, `/exit` | Session utilities |
 

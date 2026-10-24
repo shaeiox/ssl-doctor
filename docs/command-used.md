@@ -27,6 +27,7 @@ Useful session utilities:
 /version                  show version
 /timeout [net_s] [cmd_s]  show/set network timeout (default 8s) and remote command timeout
 /findings [scope]         list PASS/FAIL/WARNING/NOT TESTED findings recorded this session
+/copy [all]               copy the previous response (all: the whole session) to the clipboard
 /clear                    discard recorded findings and the cached diagnosis
 /exit                     leave ssl-doctor (also closes any SSH session)
 ```
@@ -74,10 +75,12 @@ redirects.
 /report html               write a self-contained HTML report (default)
 /report json report.json   machine-readable findings JSON
 /report both out           write both out.html and out.json
+/report agent              AI-ready agent-report.md + agent-report.json of the latest scan
 ```
 
-The existing `ssl-doctor-report-20261024-124452.html` is an example run against
-`google.com` (checks `net.dns`, `net.tcp`, `tls.handshake`, `tls.protocols`).
+`/report agent` writes into `./ssl-doctor-agent-report-<YYYYmmdd-HHMMSS>/` (or a
+directory you name). Give `agent-report.md` to any AI model: it carries the
+evidence, the diagnosis with its uncertainty, and an analysis prompt.
 
 ---
 

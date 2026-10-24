@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-24 · done: full-screen UI merged into master (centred classic banner, chat composer, streamed result frames) + colours-while-running fix; pushed master, no new tag · next: none · blocker: none
+> resume 2026-10-24 · done: /report agent + copy-to-clipboard implemented, OpenSpec changes archived (main specs agent-report, terminal-interface) on feat/copy-and-agent-report (uncommitted) · next: review, commit, test copy on Windows Terminal · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md
@@ -16,5 +16,7 @@
 - protocol-policy-evidence → Relaxed vs default cipher policy, per-version support classes, client-limited probes, contract 1.4   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/protocol-policy-evidence.md
 - legacy-tls-diagnosis-semantics → default_probe states, Finding.uncertainty, diagnosis.unresolved, verify-first remediation, endpoint coverage, contract 1.5   [✓ done 2026-10-24 · v1] → projects/ssl-doctor/legacy-tls-diagnosis-semantics.md
 - tls-handshake-attribution → failure_kind classification, stall retry, probe address pinning, network-vs-server attribution   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/tls-handshake-attribution.md
+- agent-report → /report agent: AI-ready md+json from the redacted contract doc, verbatim prompt, atomic write   [✓ done 2026-10-24 · v1] → projects/ssl-doctor/agent-report.md
+- copy-to-clipboard → drag-to-copy, /copy, Ctrl-Y; native Win32/X11 clipboard, tools, OSC 52; Windows VT mouse   [✓ done 2026-10-24 · v2] → projects/ssl-doctor/copy-to-clipboard.md
 - ui-design-system → Theme, full-screen shell, result frames, streaming into frames, centred banner, chat composer   [✓ done 2026-10-24 · v6] → projects/ssl-doctor/ui-design-system.md
 - _decisions → One-line decision log: colours, frames, static input, report pills   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/_decisions.md

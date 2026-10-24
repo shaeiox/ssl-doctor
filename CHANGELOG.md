@@ -1,5 +1,62 @@
 # Changelog
 
+## Unreleased — copy to clipboard
+
+- **`/copy`** copies the previous command's response to the clipboard as plain
+  text, exactly as shown (frame borders included, no colour codes); **`/copy
+  all`** copies the whole session. Repeating `/copy` copies the same response.
+  Works in the full-screen shell and the line REPL.
+- Clipboard delivery uses the terminal clipboard escape (OSC 52, also over SSH;
+  tmux passthrough supported) and, when installed and its display is present,
+  `wl-copy`, `xclip`, `xsel`, `pbcopy` or `clip.exe` — run without a shell, with
+  a timeout. The confirmation names the routes and never claims a copy that only
+  the terminal escape carried; the copied text is never echoed.
+- Passwords read through the masked prompt or `getpass` never enter the recorded
+  responses or the copied session.
+- **Select-to-copy** in the full-screen shell: drag with the left button over the
+  transcript to highlight text (reverse video); releasing copies it and the
+  composer confirms. A click without a drag copies nothing; the banner and the
+  composer are not selectable. **`Ctrl-Y`** copies the previous response without
+  touching what is typed.
+- Mouse reporting moves from `?1000h` to button-event tracking (`?1002h`, SGR
+  `?1006h`), still enabled only while the composer reads.
+
+### Fixed
+
+- **Copy did nothing on Linux desktops without a clipboard tool** (seen with
+  xfce4-terminal 1.1.3 / VTE 0.76 on Linux Mint 22.3): VTE ignores OSC 52 and
+  `xclip`/`xsel`/`wl-copy` were not installed, so neither route reached the
+  clipboard. Copies now use the OS clipboard natively — the X11 CLIPBOARD
+  selection (served by a detached helper, a fork so frozen builds work) and the
+  Win32 clipboard API — before falling back to tools; the escape-only case says
+  "copy not confirmed" and points to Shift+drag.
+- **Mouse selection and wheel could not work on Windows**: the key reader never
+  enabled console VT input, so Windows Terminal's mouse reports never arrived,
+  and an escape sequence would have been typed into the composer. VT input is
+  now on while one key is read (restored after), and sequences are read whole.
+
+## Unreleased — `/report agent`
+
+- **`/report agent [dir]`** exports the latest completed scan for analysis by any
+  AI model (ChatGPT, Claude, Gemini or a local model), without re-running
+  anything. It writes `agent-report.md` — metadata, executive summary, target and
+  environment, evidence by area, diagnosis with observations, hypotheses,
+  probable/confirmed causes and unresolved findings kept apart, recorded next
+  steps and missing evidence, then a built-in analysis prompt reproduced
+  verbatim — and `agent-report.json`, the same findings-contract document
+  `/report json` writes plus scan/environment context in `meta`. Default
+  location: `./ssl-doctor-agent-report-<YYYYmmdd-HHMMSS>/`.
+- The Markdown is rendered only from the redacted JSON document, so both files
+  describe the same scan and carry the same redaction; statuses are never
+  upgraded, `NOT TESTED` stays `NOT TESTED`, and missing data reads "not
+  recorded" or "not collected in this session".
+- Without a completed `/scan` or `/tls` the command explains how to make one and
+  writes nothing; an existing report is never overwritten, and a failed write
+  leaves neither file behind.
+- `/report html|json|both` are unchanged (shared preparation, byte-identical
+  output). No schema version change: the agent keys live in `meta`, which every
+  published schema leaves open (documented in `docs/findings-contract.md`).
+
 ## Unreleased — full-screen shell, streamed result frames, chat composer
 
 Presentation only: commands, flags, accepted answers, check ids, verdicts, exit

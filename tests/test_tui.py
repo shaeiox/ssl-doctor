@@ -629,8 +629,23 @@ class MouseWheel(unittest.TestCase):
         reader = self.reader()
         self.assertEqual(reader._decode_escape(b"[<64;10;5M"), "wheelup")
         self.assertEqual(reader._decode_escape(b"[<65;10;5M"), "wheeldown")
-        self.assertEqual(reader._decode_escape(b"[<0;10;5M"), "unknown")  # a click
+        self.assertEqual(reader._decode_escape(b"[<64;10;5m"), "unknown")  # wheel release
         self.assertEqual(reader._decode_escape(b"[A"), "up")  # arrows still work
+
+    def test_sgr_button_reports_are_decoded(self):
+        reader = self.reader()
+        self.assertEqual(reader._decode_escape(b"[<0;10;5M"), tui.MouseEvent("press", 10, 5))
+        self.assertEqual(reader._decode_escape(b"[<32;12;5M"), tui.MouseEvent("drag", 12, 5))
+        self.assertEqual(reader._decode_escape(b"[<0;12;5m"), tui.MouseEvent("release", 12, 5))
+        self.assertEqual(reader._decode_escape(b"[<2;12;5M"), "unknown")    # right button
+        self.assertEqual(reader._decode_escape(b"[<1;12;5M"), "unknown")    # middle button
+        self.assertEqual(reader._decode_escape(b"[<0;x;5M"), "unknown")     # malformed
+
+    def test_button_event_tracking_is_used(self):
+        self.assertIn("?1002h", tui.MOUSE_ON)
+        self.assertIn("?1006h", tui.MOUSE_ON)
+        self.assertNotIn("?1003", tui.MOUSE_ON)     # no hover flood
+        self.assertIn("?1002l", tui.MOUSE_OFF)
 
     def test_wheel_scrolls_three_rows_per_notch(self):
         session = session_with(["wheelup", "wheelup", "wheeldown", "enter"])

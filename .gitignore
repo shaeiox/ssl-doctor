@@ -145,6 +145,7 @@ cython_debug/
 *.csr
 ssl-doctor-report-*.html
 ssl-doctor-report-*.json
+ssl-doctor-agent-report-*/
 # Ignore bundled PostgreSQL from build if copied elsewhere
 *_internal/
 pginstall/
