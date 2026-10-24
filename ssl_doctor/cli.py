@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import getpass
+import json
 import os
 import random
 import shlex
@@ -332,7 +333,8 @@ COMMANDS: List[tuple] = [
     ("/local", "diagnostics for this machine"),
     ("/diagnose", "correlate findings into root causes"),
     ("/findings", "list everything recorded this session"),
-    ("/report", "write an HTML or JSON report"),
+    ("/copy", "copy the previous response (or 'all') to the clipboard"),
+    ("/report", "write an HTML, JSON or AI-ready (agent) report"),
     ("/timeout", "show or set the network timeout"),
     ("/clear", "discard recorded findings"),
     ("/version", "show the version"),
@@ -886,6 +888,35 @@ class _Phase:
             print_findings(self.items)
 
 
+class _ResponseRecorder:
+    """Tees a command's stdout into a colourless record of its response.
+
+    Uses the shell's transcript parser, so escapes are dropped and spinner
+    carriage returns overwrite instead of piling up -- the record is the text
+    the operator saw. Input read through getpass never passes stdout, so a
+    password cannot end up in it.
+    """
+
+    def __init__(self, inner) -> None:
+        from . import tui as tuimod
+        self.inner = inner
+        self._record = tuimod.Transcript()
+
+    def write(self, text: str) -> int:
+        self._record.feed(text)
+        return self.inner.write(text)
+
+    def flush(self) -> None:
+        self.inner.flush()
+
+    def text(self) -> str:
+        self._record.flush_partial()
+        return "\n".join(line.rstrip() for line in self._record.lines).strip("\n")
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
 # ------------------------------------------------------------------- CLI
 
 
@@ -899,6 +930,10 @@ class SSLDoctorCLI:
         self._diagnosis = None
         self._running = True
         self._tui = None  # set while the full-screen shell is active
+        # what the previous command printed (None until one ran), and every
+        # command with its output, for /copy and /copy all
+        self._last_response: Optional[str] = None
+        self._session_log: List[str] = []
         self.use_tui: Optional[bool] = None  # None = decide from the terminal
         self._BATCH_MODE = False
         # typewriter state
@@ -1047,12 +1082,23 @@ class SSLDoctorCLI:
         if handler is None:
             self.error(f"unknown command /{cmd}. Try /help")
             return True
+        # /copy is not a response of its own: repeating it copies the same text
+        recorder = None if cmd == "copy" else _ResponseRecorder(sys.stdout)
+        if recorder is not None:
+            sys.stdout = recorder
         try:
             handler(rest)
         except KeyboardInterrupt:
             self.note("\ninterrupted")
         except Exception as exc:  # never crash the session on a check bug
             self.error(f"{type(exc).__name__}: {exc}")
+        finally:
+            if recorder is not None:
+                sys.stdout = recorder.inner
+                self._last_response = recorder.text()
+                self._session_log.append(f"ssl-doctor> {line}")
+                if self._last_response:
+                    self._session_log.append(self._last_response)
         return self._running
 
     # ---------------- individual commands ----------------
@@ -1077,7 +1123,9 @@ class SSLDoctorCLI:
             ("/server disconnect", "close the SSH session"),
             ("/diagnose", "correlate all findings into prioritized root causes"),
             ("/findings", "list everything recorded this session"),
+            ("/copy [all]", "copy the previous command's response (all: the whole session)"),
             ("/report [html|json|both] [path]", "write a report (default: html)"),
+            ("/report agent [dir]", "AI-ready agent-report.md + agent-report.json of the latest scan"),
             ("/timeout [seconds]", "show/set network timeout (default 8s)"),
             ("/clear", "discard recorded findings"),
             ("/version", "show version"),
@@ -1154,6 +1202,31 @@ class SSLDoctorCLI:
             self.out(f"typewriter speed set to {cps:g} cps")
             return
         self.error("usage: /typewriter [on|off|speed <cps>]")
+
+    def cmd_copy(self, args: List[str]) -> None:
+        """`/copy`: the previous response; `/copy all`: the whole session."""
+        if args and args[0].lower() != "all":
+            self.error("usage: /copy [all]")
+            return
+        if args:
+            what = "session transcript"
+            text = ("\n".join(self._tui.transcript.lines).strip("\n")
+                    if self._tui is not None else "\n".join(self._session_log))
+        else:
+            what = "previous response"
+            text = self._last_response
+            if text is None:
+                self.note("nothing to copy yet - run a command first, then /copy")
+                return
+        if not text:
+            self.note(f"nothing to copy - the {what} is empty")
+            return
+        self.note(self.copy_text(text))
+
+    def copy_text(self, text: str) -> str:
+        """Put `text` on the clipboard; returns the confirmation line."""
+        from . import clipboard
+        return clipboard.describe(clipboard.copy(text))
 
     def cmd_findings(self, args: List[str]) -> None:
         scope = args[0] if args else ""
@@ -1560,18 +1633,8 @@ class SSLDoctorCLI:
         self.note("\ngenerate a report with /report html")
 
     # ---------------- /report ----------------
-    def cmd_report(self, args: List[str]) -> None:
-        fmt = "html"
-        path = ""
-        for a in args:
-            if a in ("html", "json", "both"):
-                fmt = a
-            else:
-                path = a
-        items = self.store.all()
-        if not items:
-            self.note("no findings yet - run some checks first")
-            return
+    def _report_inputs(self, items: List[F.Finding]):
+        """(diagnosis, meta, secrets, facts) shared by every report format."""
         diag = self._diagnosis
         if diag is None:
             diag = diagnose(items, {"cert": self.remote_facts.get("cert")})
@@ -1582,6 +1645,71 @@ class SSLDoctorCLI:
         # the handshake address and failure classification that explain why.
         facts = netchecks.export_facts(self.remote_facts) \
             if self.remote_facts.get("host") else None
+        return diag, meta, secrets, facts
+
+    def _agent_payload(self, items: List[F.Finding]) -> Dict:
+        """The redacted findings document an agent report is made from.
+
+        Built exactly like `/report json` (same diagnosis, facts, secrets and
+        redaction); only `meta` gains the scan and environment context.
+        """
+        diag, meta, secrets, facts = self._report_inputs(items)
+        meta = reportmod.agent_meta(meta, self.remote_facts, items)
+        return reportmod.build_payload(items, diag, meta, secrets, facts)
+
+    def _report_agent(self, directory: str) -> None:
+        """`/report agent [dir]`: export the latest completed scan for an AI model.
+
+        A completed `/tls` or `/scan` leaves `remote_facts` behind; `/clear`
+        empties the store. Both documents are built in memory before anything
+        is written, and the writer leaves either both files or neither.
+        """
+        items = self.store.all()
+        if not (items and self.remote_facts.get("host")):
+            self.error("no completed scan in this session - run /scan <target> or "
+                       "/tls <target> first, then /report agent")
+            return
+        try:
+            payload = self._agent_payload(items)
+            markdown = reportmod.agent_markdown(payload)
+            json_text = json.dumps(payload, ensure_ascii=False, indent=2,
+                                   default=str) + "\n"
+        except (TypeError, ValueError, KeyError) as exc:
+            self.error(f"could not serialise the agent report: {type(exc).__name__}: {exc}")
+            return
+        directory = directory or f"ssl-doctor-agent-report-{time.strftime('%Y%m%d-%H%M%S')}"
+        try:
+            paths = reportmod.write_agent_report(directory, markdown, json_text)
+        except OSError as exc:
+            where = exc.filename or directory
+            self.error(f"could not write the agent report: {where}: {exc.strerror or exc}")
+            return
+        counts = payload["summary"]
+        overall = (payload.get("diagnosis") or {}).get("overall", "?")
+        self.out(f"agent report written: {paint(os.path.abspath(paths[0]), 'accent')}")
+        self.out(f"                      {paint(os.path.abspath(paths[1]), 'accent')}")
+        self.note(f"{self.remote_facts['host']}:{self.remote_facts.get('port', 443)} "
+                  f"{_GLYPHS['sep']} overall {overall} {_GLYPHS['sep']} "
+                  f"{counts[F.PASS]} pass, {counts[F.FAIL]} fail, "
+                  f"{counts[F.WARNING]} warning, {counts[F.NOT_TESTED]} not tested "
+                  f"{_GLYPHS['sep']} give agent-report.md to the AI model of your choice")
+
+    def cmd_report(self, args: List[str]) -> None:
+        fmt = "html"
+        path = ""
+        for a in args:
+            if a in ("html", "json", "both", "agent"):
+                fmt = a
+            else:
+                path = a
+        if fmt == "agent":
+            self._report_agent(path)
+            return
+        items = self.store.all()
+        if not items:
+            self.note("no findings yet - run some checks first")
+            return
+        diag, meta, secrets, facts = self._report_inputs(items)
         ts = time.strftime("%Y%m%d-%H%M%S")
         written = []
         if fmt in ("json", "both"):
@@ -1634,8 +1762,8 @@ class SSLDoctorCLI:
         elif getattr(session, "menu", None):
             parts = ["Tab complete", f"{arrows} select", "Esc close"]
         else:
-            parts = ["Tab complete", f"{arrows} history", "PgUp scroll",
-                     "/help", "Ctrl-D quit"]
+            parts = ["Tab complete", f"{arrows} history", "drag or Ctrl-Y copies",
+                     "PgUp scroll", "/help", "Ctrl-D quit"]
         sep = f" {_GLYPHS['sep']} " if _GLYPHS.unicode else " - "
         room = max(10, inner - 4 - len(self._send_hint()) - 4)
         while len(sep.join(parts)) > room and len(parts) > 1:
@@ -1687,13 +1815,30 @@ class SSLDoctorCLI:
         state = self._composer_state(session)
         limit = tuimod.content_height(rows, len(header), len(menu))
         # left-aligned log: only real lines, so the composer follows the output
-        body = session.transcript.tail(inner, limit, session.scroll, fill=False)
+        window = getattr(session.transcript, "window", None)
+        if window is not None:
+            start, body = window(inner, limit, session.scroll)
+        else:   # a stand-in transcript without a window (tests)
+            start, body = 0, session.transcript.tail(inner, limit, session.scroll, fill=False)
+        body = list(body)
         if session.scroll and body:
             body[0] = f".. {session.scroll} lines back (PgDn or wheel down to return)"
         # the label says what the composer is for; a question or a running
-        # check replaces it, and the session summary sits on the right
-        label = session.status if state != "ready" else [(APP_NAME.lower().replace(" ", "-"),
-                                                           "primary", True)]
+        # check replaces it, a copy confirmation shows once, and the session
+        # summary sits on the right
+        notice = getattr(session, "notice", None)
+        if state != "ready":
+            label = session.status
+        elif notice:
+            label = notice
+        else:
+            label = [(APP_NAME.lower().replace(" ", "-"), "primary", True)]
+        layout = getattr(session, "layout", None)
+        if layout is not None:
+            layout.clear()
+            layout["start"] = start
+        highlight = (session.highlight(start, len(body), inner)
+                     if hasattr(session, "highlight") else None)
         return tuimod.build_frame(
             columns=columns, rows=rows, header=header, body=body,
             status=[(self.status_text(), "muted", False)],
@@ -1701,7 +1846,8 @@ class SSLDoctorCLI:
             cursor=session.cursor, menu=menu, label=label, state=state,
             placeholder=self._composer_placeholder(session, state),
             hints=self._tui_hints(session, state, inner),
-            send=[] if state == "busy" else [(self._send_hint(), "muted", False)])
+            send=[] if state == "busy" else [(self._send_hint(), "muted", False)],
+            layout=layout, highlight=highlight)
 
     def _tui_run(self, session, line: str) -> None:
         """Execute one command with its output captured into the transcript."""
@@ -1727,7 +1873,9 @@ class SSLDoctorCLI:
     def _repl_tui(self) -> int:
         from . import tui as tuimod
         session = tuimod.TuiSession(renderer=self._tui_frame,
-                                    completer=command_completions)
+                                    completer=command_completions,
+                                    on_copy=self.copy_text,
+                                    last_response=lambda: self._last_response)
         set_capture_width(self._capture_width(session))
         self._tui = session
         set_active_tui(session)

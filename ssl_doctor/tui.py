@@ -27,7 +27,8 @@ import shutil
 import sys
 import textwrap
 import threading
-from typing import Callable, List, Optional, Sequence, Tuple
+import time
+from typing import Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 MIN_WIDTH = 40
 MAX_WIDTH = 120          # beyond this a diagnostic sentence is hard to follow
@@ -37,9 +38,11 @@ ALT_SCREEN_OFF = "\033[?1049l"
 CURSOR_HIDE = "\033[?25l"
 CURSOR_SHOW = "\033[?25h"
 CLEAR_SCREEN = "\033[2J"
-# SGR extended mouse reporting: only the wheel is used, and only while reading
-MOUSE_ON = "\033[?1000h\033[?1006h"
-MOUSE_OFF = "\033[?1006l\033[?1000l"
+# SGR extended mouse reporting with button-event tracking (press, drag with a
+# button held, release, wheel) -- only while the composer is reading. Any-motion
+# tracking (?1003) is not used: hover events would redraw for nothing.
+MOUSE_ON = "\033[?1002h\033[?1006h"
+MOUSE_OFF = "\033[?1006l\033[?1002l"
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -55,6 +58,13 @@ COMPOSER_ROWS = 3
 # waiting for an answer, or running one (input is not accepted)
 COMPOSER_ROLES = {"ready": "primary", "ask": "accent", "busy": "muted"}
 HISTORY_LIMIT = 200
+
+
+class MouseEvent(NamedTuple):
+    """A left-button event at a 1-based terminal cell: press, drag or release."""
+    kind: str
+    x: int
+    y: int
 
 
 # --------------------------------------------------------------- capabilities
@@ -168,6 +178,16 @@ class Transcript:
             out.extend(wrap_line(line, width))
         return out
 
+    def window(self, width: int, height: int, scroll: int = 0) -> Tuple[int, List[str]]:
+        """(index of the first visible wrapped row, the visible rows)."""
+        rows = self.wrapped(width)
+        if height <= 0:
+            return len(rows), []
+        offset = max(0, min(scroll, max(0, len(rows) - height)))
+        end = len(rows) - offset
+        start = max(0, end - height)
+        return start, rows[start:end]
+
     def tail(self, width: int, height: int, scroll: int = 0,
              fill: bool = True) -> List[str]:
         """Return up to `height` rows ending `scroll` rows above the newest line.
@@ -175,13 +195,9 @@ class Transcript:
         With `fill=False` only the real lines are returned, so a caller can
         top-align them (the layout grows downward from the banner).
         """
-        rows = self.wrapped(width)
         if height <= 0:
             return []
-        offset = max(0, min(scroll, max(0, len(rows) - height)))
-        end = len(rows) - offset
-        start = max(0, end - height)
-        visible = rows[start:end]
+        _, visible = self.window(width, height, scroll)
         if fill:
             while len(visible) < height:
                 visible.insert(0, "")
@@ -198,8 +214,18 @@ def spans_plain(spans: Sequence[Span]) -> str:
 
 
 def _paint_spans(spans: Sequence[Span], painter) -> str:
-    return "".join(painter(text, role, bold) if (role or bold) else text
-                   for text, role, bold in spans)
+    out = []
+    for text, role, bold in spans:
+        if role.startswith(f"{REVERSE}:"):
+            # SGR 7 survives every colour mode, so a selection is always visible
+            inner_role = role.split(":", 1)[1]
+            body = painter(text, inner_role, bold) if (inner_role or bold) else text
+            out.append(f"\033[7m{body}\033[27m")
+        elif role or bold:
+            out.append(painter(text, role, bold))
+        else:
+            out.append(text)
+    return "".join(out)
 
 
 def truncate_spans(spans: Sequence[Span], width: int) -> List[Span]:
@@ -214,6 +240,24 @@ def truncate_spans(spans: Sequence[Span], width: int) -> List[Span]:
             break
         out.append((text, role, bold))
         room -= len(text)
+    return out
+
+
+REVERSE = "reverse"    # a pseudo-role: the painter is bypassed for these cells
+
+
+def _reverse(spans: Sequence[Span], start: int, end: int) -> List[Span]:
+    """Mark columns [start, end) of `spans` for reverse video (the selection)."""
+    out: List[Span] = []
+    column = 0
+    for text, role, bold in spans:
+        cut_a = max(0, min(len(text), start - column))
+        cut_b = max(0, min(len(text), end - column))
+        for piece, inside in ((text[:cut_a], False), (text[cut_a:cut_b], True),
+                              (text[cut_b:], False)):
+            if piece:
+                out.append((piece, f"{REVERSE}:{role}" if inside else role, bold))
+        column += len(text)
     return out
 
 
@@ -263,7 +307,10 @@ def build_frame(*, columns: int, rows: int, header: Sequence[Sequence[Span]],
                 cursor: int = 0, menu: Sequence[Sequence[Span]] = (),
                 label: Sequence[Span] = (), placeholder: str = "",
                 state: str = "ready",
-                send: Sequence[Span] = ()) -> Tuple[List[str], Tuple[int, int]]:
+                send: Sequence[Span] = (),
+                layout: Optional[Dict[str, int]] = None,
+                highlight: Optional[Dict[int, Tuple[int, int]]] = None
+                ) -> Tuple[List[str], Tuple[int, int]]:
     """Compose one screen.
 
     The banner is centred in the column; the transcript, completion menu and
@@ -277,6 +324,12 @@ def build_frame(*, columns: int, rows: int, header: Sequence[Sequence[Span]],
     :data:`COMPOSER_ROLES`.  `cursor` is an index into the typed text; the input
     scrolls horizontally to keep it visible.  Returns (lines, (row, column)),
     both 1-based.
+
+    `layout`, when given, receives where the transcript was drawn:
+    `body_top` (1-based screen row of the first body row), `body_rows`,
+    `left` (1-based column of the first text cell) and `width`.
+    `highlight` maps a body row index to the (start, end) columns to draw in
+    reverse video -- the mouse selection.
     """
     width = min(block_width(columns) if width is None else width, columns)
     gutter = min(GUTTER, max(0, width - 4))
@@ -303,8 +356,13 @@ def build_frame(*, columns: int, rows: int, header: Sequence[Sequence[Span]],
     lines.append("")  # breathing room under the banner
 
     visible = [line[:inner] for line in list(body)[:limit]]
-    for row_text in visible:
-        lines.append(row(colorize(row_text)))
+    if layout is not None:
+        layout.update(body_top=len(lines) + 1, body_rows=len(visible),
+                      left=gutter + 1, width=inner)
+    for index, row_text in enumerate(visible):
+        span = (highlight or {}).get(index)
+        lines.append(row(_reverse(colorize(row_text), *span)) if span
+                     else row(colorize(row_text)))
 
     if not visible or visible[-1].strip():
         lines.append("")  # the composer never touches the last output line
@@ -527,6 +585,9 @@ class KeyReader:
         self._pending: List[str] = []
         self._saved = None
         self._windows = False
+        self._console_mode = None        # Windows: input mode to restore after a key
+        self.msvcrt = None               # Windows modules, injectable for tests
+        self.kernel32 = None
         try:
             import termios  # noqa: F401
         except Exception:
@@ -534,7 +595,10 @@ class KeyReader:
 
     # -- raw mode is entered for a single keystroke only
     def _raw(self) -> None:
-        if self._windows or self._fd is None:
+        if self._windows:
+            self._windows_vt_input(True)
+            return
+        if self._fd is None:
             return
         import termios
         import tty
@@ -548,6 +612,9 @@ class KeyReader:
             self._saved = None
 
     def _restore(self) -> None:
+        if self._windows:
+            self._windows_vt_input(False)
+            return
         if self._saved is None or self._fd is None:
             return
         import termios
@@ -586,11 +653,9 @@ class KeyReader:
             return self._decode_escape(more)
         return self._decode_bytes(data)
 
-    def _decode_escape(self, sequence: bytes) -> str:
+    def _decode_escape(self, sequence: bytes):
         if sequence.startswith(b"[<"):
-            # SGR mouse report: ESC [ < b ; x ; y M (press) / m (release)
-            button = sequence[2:-1].split(b";")[0]
-            return {b"64": "wheelup", b"65": "wheeldown"}.get(button, "unknown")
+            return self._decode_mouse(sequence)
         mapping = {
             b"[A": "up", b"[B": "down", b"[C": "right", b"[D": "left",
             b"[H": "home", b"[F": "end", b"[1~": "home", b"[4~": "end",
@@ -607,6 +672,26 @@ class KeyReader:
             return "escape"
         return "unknown"
 
+    @staticmethod
+    def _decode_mouse(sequence: bytes):
+        """SGR report `[<b;x;yM` (press/drag) or `...m` (release).
+
+        Left button only: 0 = press, 32 = drag (motion bit + left), any final
+        `m` with the left button = release; 64/65 are the wheel.
+        """
+        try:
+            button, x, y = (int(part) for part in sequence[2:-1].split(b";"))
+        except ValueError:
+            return "unknown"
+        final = sequence[-1:]
+        if final == b"M" and button in (64, 65):
+            return "wheelup" if button == 64 else "wheeldown"
+        if button & 3 != 0 or button & 64:          # middle/right buttons, wheel release
+            return "unknown"
+        if final == b"m":
+            return MouseEvent("release", x, y)
+        return MouseEvent("drag" if button & 32 else "press", x, y)
+
     def _decode_bytes(self, data: bytes) -> str:
         char = self._decoder.decode(data)
         if not char:
@@ -621,6 +706,8 @@ class KeyReader:
             return "ctrl-d"
         if char == "\x15":
             return "ctrl-u"
+        if char == "\x19":
+            return "ctrl-y"
         if char == "\x0c":
             return "ctrl-l"
         if char == "\x01":
@@ -633,25 +720,84 @@ class KeyReader:
             return char
         return "unknown"
 
-    def _read_key_windows(self) -> str:
-        import msvcrt
+    def _windows_vt_input(self, on: bool) -> None:
+        """Ask the console for VT input while one key is read, then restore it.
+
+        Without ENABLE_VIRTUAL_TERMINAL_INPUT the console delivers mouse use as
+        input records that msvcrt never sees, so Windows Terminal's SGR mouse
+        reports (wheel, press, drag, release) would not reach the shell. The
+        previous mode comes back after every key, like the POSIX raw mode.
+        """
+        try:
+            kernel32 = self.kernel32
+            if kernel32 is None:
+                import ctypes
+                kernel32 = self.kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(-10)           # STD_INPUT_HANDLE
+            if on:
+                import ctypes
+                mode = ctypes.c_uint32()
+                if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                    return
+                self._console_mode = mode.value
+                kernel32.SetConsoleMode(handle, mode.value | 0x0200)  # VT input
+            elif self._console_mode is not None:
+                kernel32.SetConsoleMode(handle, self._console_mode)
+                self._console_mode = None
+        except Exception:
+            self._console_mode = None                     # never strand the console
+
+    def _read_key_windows(self):
+        msvcrt = self.msvcrt
+        if msvcrt is None:
+            import msvcrt
         char = msvcrt.getwch()
         if char in ("\x00", "\xe0"):
             code = msvcrt.getwch()
             return {"H": "up", "P": "down", "M": "right", "K": "left",
                     "G": "home", "O": "end", "I": "pageup", "Q": "pagedown",
                     }.get(code, "unknown")
+        if char == "\x1b":
+            # with VT input, keys and mouse reports arrive as escape sequences;
+            # read the rest of one so it is never typed into the composer
+            sequence = ""
+            deadline = time.monotonic() + 0.05
+            while time.monotonic() < deadline:
+                if not msvcrt.kbhit():
+                    time.sleep(0.002)
+                    continue
+                part = msvcrt.getwch()
+                sequence += part
+                if part == "~" or (part.isalpha() and sequence not in ("[", "O")):
+                    break
+            return self._decode_escape(sequence.encode("utf-8", "replace"))
         return self._decode_bytes(char.encode("utf-8", "replace"))
 
 
 # -------------------------------------------------------------------- session
+
+class Selection(NamedTuple):
+    """A mouse selection in transcript coordinates: (wrapped row, column).
+
+    Stored against the wrapped transcript, not the screen, so a redraw or a
+    scroll keeps it on the same text; `width` is the wrap width it refers to.
+    """
+    anchor: Tuple[int, int]
+    head: Tuple[int, int]
+    width: int
+
+    def ordered(self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+        return (self.anchor, self.head) if self.anchor <= self.head else (self.head, self.anchor)
+
 
 class TuiSession:
     """Alternate-screen session: transcript, status, command bar, renderer."""
 
     def __init__(self, renderer: Callable[["TuiSession"], Tuple[List[str], Tuple[int, int]]],
                  stream=None, keys: Optional[KeyReader] = None,
-                 completer: Optional[Callable[[str], Sequence[Tuple[str, str]]]] = None) -> None:
+                 completer: Optional[Callable[[str], Sequence[Tuple[str, str]]]] = None,
+                 on_copy: Optional[Callable[[str], str]] = None,
+                 last_response: Optional[Callable[[], Optional[str]]] = None) -> None:
         self.screen = Screen(stream)
         self.transcript = Transcript()
         self.renderer = renderer
@@ -668,6 +814,14 @@ class TuiSession:
         self.scroll = 0
         self.history: List[str] = []
         self.hints: List[Span] = []
+        # copying: `on_copy(text)` delivers text and returns the confirmation;
+        # `last_response()` is what Ctrl-Y copies
+        self.on_copy = on_copy
+        self.last_response = last_response
+        self.layout: Dict[str, int] = {}       # where the renderer drew the transcript
+        self.selection: Optional[Selection] = None
+        self.notice: List[Span] = []            # one-shot confirmation in the composer
+        self._dragging = False
         self._ticker: Optional[threading.Thread] = None
         self._ticker_stop = threading.Event()
         self._busy = threading.Event()
@@ -782,6 +936,14 @@ class TuiSession:
             while True:
                 self.render()
                 key = self.keys.read_key()
+                if isinstance(key, MouseEvent):
+                    self.handle_mouse(key)
+                    continue
+                if key not in ("pending", "unknown"):
+                    self.selection, self.notice = None, []
+                if key == "ctrl-y":
+                    self.copy_last_response()
+                    continue
                 if key in ("enter", "eof", "ctrl-d") or key == "ctrl-c":
                     if key in ("eof", "ctrl-d"):
                         return None
@@ -856,6 +1018,7 @@ class TuiSession:
             self.menu = []
             self.menu_index = 0
             self.masked = self.masked and secret
+            self._dragging = False
             self.screen.mouse(False)
 
     # -- completion ------------------------------------------------------
@@ -888,6 +1051,90 @@ class TuiSession:
         self.cursor = len(self.input)
         self.menu = []
         self.menu_index = 0
+
+    # -- selection and copy ---------------------------------------------
+    def cell_at(self, x: int, y: int, clamp: bool = False) -> Optional[Tuple[int, int]]:
+        """The transcript cell under screen cell (x, y), both 1-based.
+
+        Outside the drawn transcript this is None, unless `clamp` (a drag that
+        left the transcript): then it pins to the first or last drawn row.
+        """
+        lay = self.layout
+        rows = lay.get("body_rows", 0)
+        if not rows:
+            return None
+        row, col = y - lay["body_top"], x - lay["left"]
+        width = lay["width"]
+        if not clamp and not (0 <= row < rows and 0 <= col < width):
+            return None
+        if row < 0:
+            row, col = 0, 0
+        elif row >= rows:
+            row, col = rows - 1, width - 1
+        return lay["start"] + row, min(max(col, 0), width - 1)
+
+    def handle_mouse(self, event: MouseEvent) -> None:
+        """Press starts a selection, drag extends it, release copies it."""
+        if event.kind == "press":
+            cell = self.cell_at(event.x, event.y)
+            self.notice = []
+            self.selection = (Selection(cell, cell, self.layout["width"])
+                              if cell is not None else None)
+            self._dragging = cell is not None
+        elif event.kind == "drag" and self._dragging and self.selection:
+            cell = self.cell_at(event.x, event.y, clamp=True)
+            if cell is not None:
+                self.selection = self.selection._replace(head=cell)
+        elif event.kind == "release" and self._dragging:
+            self._dragging = False
+            if self.selection and self.selection.head != self.selection.anchor:
+                self.copy(self.selected_text())
+            else:
+                self.selection = None              # a click copies nothing
+
+    def selected_text(self) -> str:
+        """The selected characters as shown, rows joined, trailing space dropped."""
+        if not self.selection:
+            return ""
+        (r1, c1), (r2, c2) = self.selection.ordered()
+        rows = self.transcript.wrapped(self.selection.width)
+        if r1 >= len(rows):
+            return ""
+        r2 = min(r2, len(rows) - 1)
+        if r1 == r2:
+            parts = [rows[r1][c1:c2 + 1]]
+        else:
+            parts = [rows[r1][c1:], *rows[r1 + 1:r2], rows[r2][:c2 + 1]]
+        return "\n".join(part.rstrip() for part in parts)
+
+    def highlight(self, start: int, count: int, width: int) -> Dict[int, Tuple[int, int]]:
+        """Reverse-video columns per visible body row for the current selection."""
+        if not self.selection or self.selection.width != width:
+            return {}
+        (r1, c1), (r2, c2) = self.selection.ordered()
+        spans = {}
+        for row in range(max(r1, start), min(r2, start + count - 1) + 1):
+            spans[row - start] = (c1 if row == r1 else 0, c2 + 1 if row == r2 else width)
+        return spans
+
+    def copy(self, text: str) -> None:
+        if not text:
+            self.notice = [("nothing to copy - the selection is empty", "muted", False)]
+            return
+        message = self.on_copy(text) if self.on_copy else "copying is not available"
+        self.notice = [(message, "success" if message.startswith("copied") else "accent",
+                        False)]
+
+    def copy_last_response(self) -> None:
+        """Ctrl-Y: copy the previous response; the composer text is untouched."""
+        response = self.last_response() if self.last_response else None
+        if response is None:
+            self.notice = [("nothing to copy yet - run a command first", "muted", False)]
+        elif not response:
+            self.notice = [("nothing to copy - the previous response is empty", "muted",
+                            False)]
+        else:
+            self.copy(response)
 
     def scroll_rows(self, delta: int) -> None:
         """Positive delta scrolls back into the transcript."""
