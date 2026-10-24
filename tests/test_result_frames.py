@@ -244,6 +244,33 @@ class ComposerState(Themed):
         self.assertFalse(any("█" in "".join(t for t, _, _ in row) for row in compact))
 
 
+class ColoursWhileRunning(Themed):
+    """The screen keeps its colours while a command's output is captured."""
+
+    def test_banner_and_composer_stay_coloured_during_a_command(self):
+        app = cli.SSLDoctorCLI()
+        session = tui.TuiSession(renderer=app._tui_frame, stream=io.StringIO())
+        session.size = lambda: (100, 34)
+        idle, _ = app._tui_frame(session)
+        session.status = [("✻ handshaking… shop.test", "primary", True)]
+        with mock.patch.object(cli, "_CAPTURE", True):   # as during _tui_run
+            running, _ = app._tui_frame(session)
+            captured = cli.paint("transcript text", "error")
+        primary = cli._role_sgr("primary", cli.ColorMode.TRUECOLOR)
+        muted = cli._role_sgr("muted", cli.ColorMode.TRUECOLOR)
+        banner = next(line for line in running if "█" in line)
+        composer = next(line for line in running if "╭" in line)
+        self.assertIn(primary, banner)
+        self.assertIn(muted, composer)          # the busy border
+        self.assertGreater(sum(line.count("\x1b[") for line in running), 0)
+        self.assertEqual(captured, "transcript text")  # capture stays plain
+        self.assertTrue(any("\x1b[" in line for line in idle))
+
+    def test_plain_terminals_stay_plain_on_screen(self):
+        with mock.patch.object(cli, "_MODE", cli.ColorMode.PLAIN):
+            self.assertEqual(cli.paint_screen("x", "primary", True), "x")
+
+
 class LineComposer(Themed):
     """The line REPL draws the same rounded composer around its prompt."""
 
