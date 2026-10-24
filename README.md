@@ -20,7 +20,22 @@ python3 ssldoctor.py -c "/scan example.com --with-server" -c "/report both out"
 ## Terminal look
 
 The interface follows the Claude Code terminal design language: warm
-terracotta accents, no ASCII art, and frames that tell you *who* is working.
+terracotta accents, a two-stroke wordmark, and frames that tell you *who* is
+working. On startup:
+
+```
+════════════════════════════════════════════════════════════════════
+  ██████ ██████ ██       █████  ██████ ██████ ██████ ██████ ██████
+  ██     ██     ██       ██  ██ ██  ██ ██       ██   ██  ██ ██  ██
+  ██████ ██████ ██       ██  ██ ██  ██ ██       ██   ██  ██ ██████
+      ██     ██ ██       ██  ██ ██  ██ ██       ██   ██  ██ ██  ██
+  ██████ ██████ ██████   █████  ██████ ██████   ██   ██████ ██  ██
+
+  offline ssl/tls diagnostics · client · server · chain · nginx
+  creator: eleven  ·  v0.3.0
+  all checks are read-only; credentials are never logged
+════════════════════════════════════════════════════════════════════
+```
 
 - **Hot pink frames** wrap work the tool did (`/tls`, `/local`, `/server …`,
   one block per command, findings as rows, counters in the footer).

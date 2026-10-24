@@ -331,8 +331,94 @@ class PlainModeContract(unittest.TestCase):
         self.assertEqual(code, 0)
         out = buf.getvalue()
         self.assertNotIn("\x1b", out)
-        self.assertIn("SSL Doctor v", out)
+        self.assertIn("creator: eleven", out)
         self.assertIn("/server nginx", out)
+
+
+
+
+class StartupBanner(unittest.TestCase):
+    """The wordmark banner: two-stroke art, width honesty, fixed credit."""
+
+    def render(self, columns, mode=cli.ColorMode.PLAIN, glyphs=None):
+        original = cli._MODE
+        self.addCleanup(cli.set_color_mode, original)
+        glyphs = glyphs or cli.Glyphs(mode != cli.ColorMode.PLAIN,
+                                      mode != cli.ColorMode.PLAIN)
+        with mock.patch.object(cli, "_MODE", mode), mock.patch.object(cli, "_GLYPHS", glyphs):
+            return cli.banner_lines(columns)
+
+    def test_wordmark_is_five_rows_of_two_stroke_letters(self):
+        rows = cli.wordmark("SSL DOCTOR", "#")
+        self.assertEqual(len(rows), cli.WORDMARK_ROWS)
+        self.assertEqual(max(len(row) for row in rows), 64)
+        # every glyph is six columns wide and every stem is two characters wide
+        for letter, glyph in cli.WORDMARK.items():
+            with self.subTest(letter=letter):
+                self.assertEqual(len(glyph), cli.WORDMARK_ROWS)
+                self.assertTrue(all(len(row) == 6 for row in glyph))
+        self.assertEqual(cli.WORDMARK["L"][0].rstrip(), "##")
+        self.assertEqual(cli.WORDMARK["T"][1], "  ##  ")
+
+    def test_full_banner_on_a_wide_terminal(self):
+        lines = self.render(80, cli.ColorMode.TRUECOLOR, cli.Glyphs())
+        plain = [stripped(line) for line in lines]
+        art = [line for line in plain if "█" in line]
+        self.assertEqual(len(art), cli.WORDMARK_ROWS)
+        text = "\n".join(plain)
+        self.assertIn("offline ssl/tls diagnostics", text)
+        self.assertIn("client", text)
+        self.assertIn("nginx", text)
+        self.assertIn(cli.BANNER_NOTE, text)
+        self.assertIn("creator: eleven", text)
+        self.assertIn("v0.3.0", text)
+        self.assertEqual(plain[0], "═" * len(plain[0]))
+        self.assertEqual(plain[-1], "═" * len(plain[-1]))
+        self.assertEqual(plain[0], plain[-1])
+
+    def test_compact_banner_when_narrow(self):
+        lines = self.render(40)
+        plain = [stripped(line) for line in lines]
+        text = "\n".join(plain)
+        self.assertNotIn("█", text)
+        self.assertNotIn("#", text)
+        self.assertIn("SSL DOCTOR", text)
+        self.assertIn("offline ssl/tls diagnostics", text)
+        self.assertIn("creator: eleven", text)
+        self.assertIn("v0.3.0", text)
+
+    def test_no_line_is_wider_than_the_terminal(self):
+        for columns in (30, 40, 60, 72, 80, 100, 120):
+            for line in self.render(columns):
+                with self.subTest(columns=columns, line=stripped(line)):
+                    self.assertLessEqual(len(stripped(line)), max(columns, 20))
+
+    def test_credit_is_present_at_every_width(self):
+        for columns in (30, 40, 72, 80, 132):
+            with self.subTest(columns=columns):
+                self.assertIn("creator: eleven",
+                              "\n".join(stripped(line) for line in self.render(columns)))
+
+    def test_plain_banner_is_ascii_and_escape_free(self):
+        lines = self.render(80)
+        for line in lines:
+            self.assertNotIn("\x1b", line)
+            line.encode("ascii")  # must survive a cp1252/ascii console
+        self.assertIn("#", "\n".join(lines))
+        self.assertTrue(all(not line.endswith(" ") for line in lines))
+
+    def test_colour_banner_uses_roles(self):
+        lines = self.render(80, cli.ColorMode.TRUECOLOR, cli.Glyphs())
+        joined = "\n".join(lines)
+        self.assertIn("\x1b[38;2;215;119;87m", joined)  # primary: rules + wordmark
+        self.assertIn("\x1b[38;2;177;185;249", joined)  # accent: creator credit
+
+    def test_banner_is_printed_once_per_run(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli.main(["-c", "/version"])
+        self.assertEqual(buf.getvalue().count("creator: eleven"), 1)
+        self.assertIn("SSL Doctor v", buf.getvalue())  # /version output unchanged
 
 
 class ReportSkin(unittest.TestCase):

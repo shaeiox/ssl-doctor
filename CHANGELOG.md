@@ -8,6 +8,10 @@ report payload and the findings contract are unchanged.**
 
 ### What looks different
 
+- **Startup banner**: a modern two-stroke wordmark spelling `SSL DOCTOR` between
+  double rules, with the description, version, read-only note and
+  `creator: eleven`. The full wordmark needs 64 columns; narrower terminals get
+  a compact text form, and plain mode draws it with `#` and `=`.
 - **Semantic colour roles** (`primary`, `tool`, `accent`, `success`, `warning`,
   `error`, `muted`, `subtle`, `surface`) with TrueColor → 256 → 16 → plain
   degradation. `NO_COLOR` wins over everything; new `SSL_DOCTOR_COLOR=never|always`

@@ -19,3 +19,6 @@ One line per settled choice: `YYYY-MM: chosen > rejected — why`.
 2026-10: glyph choice by stream encoding probe > platform check — cp1252 Windows consoles are the real constraint, not the OS name.
 2026-10: plain mode is ASCII-only and glyph-substituted (`+ x ! > -`) > keeping `·`/`✓` — plain means "safe in any pipe or log", and the diff against v0.3.0 stays limited to glyphs.
 2026-10: report pills use dark text on role-colour backgrounds > white text — white on `#4eba65` is 2.3:1; dark text clears 4.5:1 while keeping the palette.
+2026-10: startup banner uses a hand-drawn five-row wordmark > a figlet/pyfiglet font — stdlib-only install story, exact control of the two-stroke look, and widths that can be measured and tested.
+2026-10: banner has a compact text form below 68 columns > dropping every other column of the art — half-scale letters stop being legible at 40 columns, and the name/description/credit must survive a narrow terminal.
+2026-10: `creator: eleven` is a fixed constant > a flag or env override — the credit is part of the banner requirement and a cosmetic switch is not worth the surface area.

@@ -163,6 +163,16 @@ class Glyphs:
     def ellipsis(self) -> str:
         return "…" if self.unicode else "..."
 
+    @property
+    def double(self) -> str:
+        """Double horizontal rule: two straight lines, or `=` in ASCII."""
+        return "═" if self.box else "="
+
+    @property
+    def block(self) -> str:
+        """Wordmark stroke: a solid block when the encoding can carry it."""
+        return "█" if self.unicode else "#"
+
 
 def resolve_glyphs(mode: str, stream=None) -> Glyphs:
     """Plain mode is ASCII; a terminal gets Unicode only if it can encode it."""
@@ -476,6 +486,91 @@ def print_findings(items: List[F.Finding], verbose: bool = True) -> None:
 
 def _status_line_status(status: str) -> str:
     return paint(f"[{status}]", _STATUS_ROLE.get(status, ""), bold=True)
+
+
+# ------------------------------------------------------------------- banner
+#
+# The wordmark is a five-row table: every stem is two characters wide, so each
+# letter reads as paired straight lines. Seven glyphs and a word space are all
+# the tool needs, which keeps the stdlib-only install story intact.
+
+WORDMARK = {
+    "S": ("######", "##    ", "######", "    ##", "######"),
+    "L": ("##    ", "##    ", "##    ", "##    ", "######"),
+    "D": ("##### ", "##  ##", "##  ##", "##  ##", "##### "),
+    "O": ("######", "##  ##", "##  ##", "##  ##", "######"),
+    "C": ("######", "##    ", "##    ", "##    ", "######"),
+    "T": ("######", "  ##  ", "  ##  ", "  ##  ", "  ##  "),
+    "R": ("######", "##  ##", "######", "##  ##", "##  ##"),
+}
+
+WORDMARK_ROWS = 5
+BANNER_NAME = "SSL DOCTOR"
+BANNER_TAGLINE_PARTS = ("offline ssl/tls diagnostics", "client", "server",
+                        "chain", "nginx")
+BANNER_NOTE = "all checks are read-only; credentials are never logged"
+BANNER_CREATOR = "eleven"
+BANNER_CREDIT = f"creator: {BANNER_CREATOR}"
+
+
+def wordmark(text: str, stroke: str = "#") -> List[str]:
+    """Render `text` as WORDMARK_ROWS rows of two-stroke letters."""
+    rows = [""] * WORDMARK_ROWS
+    for index, char in enumerate(text):
+        if char == " ":
+            for row in range(WORDMARK_ROWS):
+                rows[row] += "   "
+            continue
+        glyph = WORDMARK.get(char)
+        if glyph is None:
+            continue
+        for row in range(WORDMARK_ROWS):
+            rows[row] += glyph[row].replace("#", stroke)
+        if index != len(text) - 1 and text[index + 1] != " ":
+            for row in range(WORDMARK_ROWS):
+                rows[row] += " "
+    return [row.rstrip() for row in rows]
+
+
+def banner_tagline() -> str:
+    """Description line, using the ASCII separator when glyphs are unavailable."""
+    sep = f" {_GLYPHS['sep']} "
+    return sep.join(BANNER_TAGLINE_PARTS)
+
+
+def _banner_credit() -> str:
+    return f"{BANNER_CREDIT}  {_GLYPHS['sep']}  v{__version__}"
+
+
+def banner_lines(columns: Optional[int] = None) -> List[str]:
+    """Return the banner as painted lines, sized for the terminal."""
+    columns = terminal_width() if columns is None else columns
+    limit = max(20, columns - 2)  # never wider than the terminal
+    art = wordmark(BANNER_NAME, _GLYPHS.block)
+    art_width = max(len(row) for row in art)
+    # the full wordmark needs its own width plus margins; below that, compact
+    if limit >= art_width + 4:
+        content = max(art_width, len(banner_tagline()), len(BANNER_NOTE),
+                      len(_banner_credit()))
+        width = min(content + 4, limit)
+        lines = [paint(_GLYPHS.double * width, "primary")]
+        for row in art:
+            lines.append(INDENT + paint(row, "primary", bold=True))
+        lines.append("")
+        lines.append(INDENT + paint(banner_tagline(), "muted"))
+        lines.append(INDENT + paint(_banner_credit(), "accent", bold=True))
+        lines.append(INDENT + paint(BANNER_NOTE, "muted", dim=True))
+        lines.append(paint(_GLYPHS.double * width, "primary"))
+        return lines
+
+    width = max(20, min(limit, MAX_BLOCK_WIDTH))
+    lines = [paint(_GLYPHS.double * width, "primary"),
+             INDENT + paint(BANNER_NAME, "primary", bold=True)
+             + paint(f"  ·  v{__version__}", "muted"),
+             INDENT + paint("offline ssl/tls diagnostics", "muted"),
+             INDENT + paint(BANNER_CREDIT, "accent", bold=True),
+             paint(_GLYPHS.double * width, "primary")]
+    return lines
 
 
 # ------------------------------------------------------------------- CLI
@@ -1053,10 +1148,9 @@ class SSLDoctorCLI:
 
     # ---------------- REPL ----------------
     def banner(self) -> None:
-        self.out(paint(f"{APP_NAME} v{__version__}", "primary", bold=True))
-        self.out("Offline SSL/TLS diagnostic tool. Type /help for commands.")
-        self.out(paint("all checks are read-only; credentials are never logged",
-                       "muted", dim=True))
+        for line in banner_lines():
+            self.out(line)
+        self.out(paint("Type /help for the command list.", "muted", dim=True))
         self.out("")
 
     def repl(self) -> int:
