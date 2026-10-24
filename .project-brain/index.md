@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-24 · done: merged full-screen UI branch into master (centred classic banner, chat composer, streamed result frames); not tagged/pushed by request · next: none · blocker: none
+> resume 2026-10-24 · done: full-screen UI merged into master (centred classic banner, chat composer, streamed result frames) + colours-while-running fix; pushed master, no new tag · next: none · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md

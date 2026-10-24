@@ -30,7 +30,8 @@ version: 6
 - `creator: eleven` appears at every width and in every mode; no flag hides it.
 - `/version`, `/help`, `/timeout`, `/findings`, `/tls`, `/cert inspect` output is unchanged apart from the banner and the earlier glyph substitutions; exit codes identical.
 - JSON payload identical apart from timestamps/fingerprints; no presentation data in the contract.
-- 300 tests pass (6 skipped); `tests/test_result_frames.py` covers streaming frames and the composer.
+- 302 tests pass (6 skipped); `tests/test_result_frames.py` covers streaming frames, the composer and colours while running.
+- The screen renderer paints with `paint_screen()` (terminal colour mode only), never `paint()`: `paint()` goes plain while `_CAPTURE` is set, and the spinner/streaming redraw the screen during every command — using it made the banner and composer colourless while running.
 - `-c` batch output, redirected output and `--no-tui` are untouched; the shell never runs unless both stdin and stdout are terminals.
 
 **Notes:** `_USE_COLOR` remains as a compatibility alias for `_MODE != plain`. Frames are static: no alternate screen, no raw mode, no cursor addressing, no background writes while `input()` is blocked. Banner art is the only decorative element; the design system's "no ASCII art" rule was narrowed to "no art outside the startup banner".

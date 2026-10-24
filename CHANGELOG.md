@@ -54,6 +54,11 @@ codes, the JSON report payload and the findings contract are unchanged.
 - The typewriter effect no longer types into the shell's capture.
 - `failure kind` and `observation` lines are kept inside result frames (they were
   only shown by the unframed printer).
+- The banner, the composer and the re-coloured result frames lost their colours
+  while a command ran or streamed: the flag that keeps captured output colourless
+  also switched off the screen renderer's painter, and the spinner redraws the
+  screen during the command. The renderer now has its own painter
+  (`paint_screen()`) that only follows the terminal's colour mode.
 
 ## v0.7.0 — evidence-grounded TLS diagnosis
 
