@@ -153,10 +153,11 @@ def html_from_payload(payload: Dict[str, Any]) -> str:
         parts.append(f'<div class="card"><h2>{esc(heading)}</h2><table class="scopes">')
         for f in items:
             ev = "".join(f"<li class=mono>{esc(e[:400])}</li>" for e in f.evidence)
+            kind = (f" · failure: {esc(f.failure_kind)}" if f.failure_kind else "")
             parts.append(
                 f"<tr><td>{_badge(f.status)}</td>"
                 f"<td><b>{esc(f.title)}</b>"
-                + (f"<div class=meta>target: {esc(f.target)} · check: {esc(f.check)}</div>" if f.target else f"<div class=meta>check: {esc(f.check)}</div>")
+                + (f"<div class=meta>target: {esc(f.target)} · check: {esc(f.check)}{kind}</div>" if f.target else f"<div class=meta>check: {esc(f.check)}{kind}</div>")
                 + (f"<ul>{ev}</ul>" if ev else "")
                 + (f"<div><i>{esc(f.detail)}</i></div>" if f.detail else "")
                 + (f"<div><b>Recommendation:</b> {esc(f.recommendation)}</div>" if f.recommendation else "")

@@ -48,6 +48,16 @@ wrong endpoint).
 | `tls.verify.rootonly` | Validation against trusted **roots only**, with no cached or bundled intermediates (what a client that has never seen the intermediate sees). PASS on `tls.verify` with FAIL here means the server is missing its intermediate. |
 | `tls.hostname` | Name coverage from **subjectAltName only**. A CN-only certificate fails, because modern clients ignore the CN. |
 
+Handshake failures carry a machine-readable `failure_kind` (`connect-timeout`,
+`negotiation-timeout`, `tls-alert`, `network-error`). A timeout is retried once:
+if the second attempt completes, the finding is `WARNING` and the diagnosis says
+the path is intermittent. A rejection is never retried and is the only evidence
+that can support a protocol/cipher cause. All TLS probes connect to the address
+the TCP check proved reachable, and name it in the evidence. The TLS 1.0–1.3
+matrix classifies each row as accepted, refused, timed out or network error, and
+states when legacy versions were probed with the relaxed cipher policy
+`ALL:@SECLEVEL=0`.
+
 The chain is read via the public Python API (3.13+), the equivalent internal API
 (3.10–3.12), or `openssl s_client -showcerts`. The handshake evidence names the
 method that was used.

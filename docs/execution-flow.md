@@ -438,8 +438,40 @@ pipeline used by `/tls` and `/scan`. It returns `(findings, facts)`.
 ```
 
 The `facts` dictionary carries the parsed certificate, IPs, SNI, chain status,
-anchor, redirect hops, final URL, and server time. It is stored in
-`SSLDoctorCLI.remote_facts` and reused for local clock comparison and reports.
+anchor, redirect hops, final URL, server time, `handshake_ip` and
+`handshake_failure`. It is stored in `SSLDoctorCLI.remote_facts` and reused for
+local clock comparison and reports.
+
+### Handshake failure flow
+
+`check_tls_basic(host, port, sni, timeout, connect_ip=<address net.tcp verified>)`
+splits the probe into two observable phases:
+
+```text
+_connect()    → socket          raises _ConnectTimeout     → failure_kind "connect-timeout"
+_negotiate()  → ssl.SSLSocket   raises _NegotiationTimeout → failure_kind "negotiation-timeout"
+                                ssl.SSLError/OSError       → "tls-alert" or "network-error"
+```
+
+1. A timeout-class failure is retried once on a fresh connection; a rejection or
+   reset is not retried, because retrying cannot change a deterministic answer.
+2. Both attempts fail → `FAIL`. The first attempt completes → `WARNING` with the
+   stall recorded, and every certificate fact still captured, so validity,
+   hostname, chain and validation checks keep running.
+3. `facts["handshake_ip"]` and `facts["handshake_attempts"]` record the address
+   and the number of attempts; `facts["handshake_failure"]` keeps the
+   classification for consumers.
+4. On `FAIL`, the protocol matrix runs and then `_note_handshake_coherence()`
+   appends the accepted versions to the handshake evidence, so the two findings
+   cannot contradict each other silently.
+5. `check_protocol_matrix()` pins the same address, classifies every row
+   (accepted / refused / timed out / network error), and sets `failure_kind` to
+   `no-version-accepted` or `no-version-answered`. A timeout is never a refusal.
+
+`analyze.diagnose()` attributes from `failure_kind`, not from the status:
+timeouts and resets are probable **network** causes whose advice is to repeat the
+measurement and inspect the path; only `tls-alert` can produce a server
+protocol/cipher-mismatch cause; an unclassified failure falls back to network.
 
 ---
 

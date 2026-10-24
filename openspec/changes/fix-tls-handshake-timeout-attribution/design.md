@@ -156,5 +156,11 @@ New tests (`stdlib unittest`, existing fixtures):
 
 ## Open Questions
 
-- Should the retry budget be exposed in `/timeout` (for example `/timeout 8 20 1`), or stay a module constant for the first release? (Default: constant, to keep the CLI surface unchanged.)
-- Should a `WARNING`-level stall also lower the overall verdict for monitoring targets, or only raise a cause? (Default: it raises a cause, so `overall` is at least `WARNING` — monitoring keeps detecting it.)
+Both were settled during implementation:
+
+- **Retry budget:** stays a module constant (`_HANDSHAKE_RETRIES = 1`). `/timeout` keeps its
+  current two-value surface; exposing the retry count can follow if operators ask for it.
+- **Verdict level for a recovered stall:** it raises a probable network cause, so `overall`
+  becomes `WARNING` (the existing rule that `overall` is `FAIL` only with a *confirmed* cause
+  still holds). Monitoring therefore keeps detecting intermittent stalls without the CLI
+  reporting a hard failure.

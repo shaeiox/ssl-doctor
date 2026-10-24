@@ -103,6 +103,8 @@ def print_finding(f: F.Finding, verbose: bool = True) -> None:
         return
     for line in f.evidence:
         print(f"          {paint('·', C.GRAY)} {line}")
+    if f.failure_kind:
+        print(paint(f"          failure kind: {f.failure_kind}", C.DIM))
     if f.detail:
         print(paint(f"          {f.detail}", C.DIM))
     if f.recommendation:
@@ -632,8 +634,10 @@ class SSLDoctorCLI:
             self._diagnosis = diag
         meta = self._meta()
         secrets = self.server.known_secrets() if self.server else []
+        # Also emitted when no certificate was captured: the facts block carries
+        # the handshake address and failure classification that explain why.
         facts = netchecks.export_facts(self.remote_facts) \
-            if self.remote_facts.get("cert") else None
+            if self.remote_facts.get("host") else None
         ts = time.strftime("%Y%m%d-%H%M%S")
         written = []
         if fmt in ("json", "both"):

@@ -94,6 +94,54 @@ class VersionGateTests(unittest.TestCase):
         self.assertIn("MAYBE", str(cm.exception))
 
 
+class FailureKindTests(unittest.TestCase):
+    """1.2 adds an optional, enumerated failure classification."""
+
+    def doc(self, **finding):
+        base = {"check": "tls.handshake", "title": "TLS handshake", "status": "FAIL",
+                "scope": "remote-net", "evidence": ["stalled"]}
+        base.update(finding)
+        return {"schema_version": "1.2", "tool": "x", "generated_utc": "t",
+                "summary": {s: 0 for s in ("PASS", "FAIL", "WARNING", "NOT TESTED")},
+                "findings": [base]}
+
+    def test_document_without_the_field_still_validates(self):
+        self.assertEqual(contract.validate(self.doc()), [])
+        self.assertEqual(contract.load_document(self.doc())["schema_version"], "1.2")
+
+    def test_every_registered_failure_kind_validates(self):
+        for kind in contract.FAILURE_KINDS:
+            with self.subTest(kind=kind):
+                self.assertEqual(contract.validate(self.doc(failure_kind=kind)), [])
+
+    def test_empty_failure_kind_validates(self):
+        self.assertEqual(contract.validate(self.doc(failure_kind="")), [])
+
+    def test_unregistered_failure_kind_is_rejected(self):
+        errs = contract.validate(self.doc(failure_kind="probably-fine"))
+        self.assertTrue(errs)
+        self.assertIn("probably-fine", " ".join(errs))
+
+    def test_facts_carry_address_and_classification(self):
+        doc = self.doc()
+        doc["facts"] = {"leaf": None, "chain_status": "unread",
+                        "handshake_ip": "192.0.2.10",
+                        "handshake_failure": "negotiation-timeout"}
+        self.assertEqual(contract.validate(doc), [])
+        doc["facts"]["handshake_failure"] = "not-a-kind"
+        self.assertTrue(contract.validate(doc))
+
+    def test_earlier_minor_schema_does_not_declare_the_field(self):
+        with open(os.path.join(ROOT, "schemas", "findings-1.1.schema.json")) as fh:
+            old = json.load(fh)
+        self.assertNotIn(
+            "failure_kind", old["properties"]["findings"]["items"]["properties"],
+            "1.1 must stay unchanged; the field is new in 1.2")
+        self.assertIn("failure_kind", contract.SCHEMA["properties"]["findings"]["items"]
+                      ["properties"])
+        self.assertEqual(contract.SCHEMA_VERSION, "1.2")
+
+
 @unittest.skipUnless(openssl_available(), "openssl binary not available")
 class RedactionTests(unittest.TestCase):
 

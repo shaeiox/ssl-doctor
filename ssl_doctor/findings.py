@@ -38,6 +38,7 @@ class Finding:
     recommendation: str = ""      # practical remediation, if any
     target: str = ""              # e.g. "host:port" or a file path
     ts: float = field(default_factory=time.time)
+    failure_kind: str = ""        # classification; see contract.FAILURE_KINDS
 
     def worst_rank(self) -> int:
         return _STATUS_RANK.get(self.status, 99)

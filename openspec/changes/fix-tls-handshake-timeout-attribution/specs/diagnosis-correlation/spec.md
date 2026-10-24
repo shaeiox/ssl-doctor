@@ -14,7 +14,7 @@ The diagnosis MUST NOT raise a cause describing a protocol or cipher mismatch wh
 #### Scenario: Timeout with TLS 1.2 and 1.3 accepted
 - **WHEN** the handshake finding is FAIL with a timeout-class failure and the protocol matrix reports TLS 1.2 and TLS 1.3 accepted
 - **THEN** no cause describes a protocol/cipher mismatch
-- **AND** no server-origin cause is raised from the handshake or protocol findings
+- **AND** no server-origin cause is raised *to explain the failure* from the handshake or protocol findings (the independent protocol-hardening observation may still appear)
 - **AND** the top-ranked cause has origin "network" and names a stall or path interference
 - **AND** the recommendation is to repeat the measurement or inspect the network path, not to change the server's protocol configuration
 

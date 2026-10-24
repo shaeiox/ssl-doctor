@@ -21,8 +21,21 @@ import re
 import urllib.parse
 from typing import Any, Dict, Iterable, List
 
-SCHEMA_VERSION = "1.1"   # 1.1: optional "facts" block
+SCHEMA_VERSION = "1.2"   # 1.1: optional "facts" block; 1.2: failure classification
 SUPPORTED_MAJOR = 1
+
+# Machine-readable classification of a failed probe.  "What went wrong" is
+# separate from the finding status, because a stall and a rejection both end in
+# FAIL while having different owners (network path vs. server configuration).
+# Empty string = no classified failure (including every PASS).
+FAILURE_KINDS: Dict[str, str] = {
+    "connect-timeout": "the TCP connect to the probed address timed out",
+    "negotiation-timeout": "the socket opened but the peer sent no TLS response in time",
+    "tls-alert": "the peer rejected the offer with a TLS alert or no shared cipher",
+    "network-error": "the connection was reset or became unreachable during negotiation",
+    "no-version-accepted": "every per-version probe was refused",
+    "no-version-answered": "every per-version probe stalled or errored without a TLS answer",
+}
 
 CHECK_IDS: Dict[str, str] = {
     # remote network
@@ -78,6 +91,7 @@ CHECK_IDS: Dict[str, str] = {
 _STATUS = ["PASS", "FAIL", "WARNING", "NOT TESTED"]
 _SCOPE = ["local", "remote-net", "server"]
 _CHECK_RE = r"^[a-z]+(\.[a-z0-9_]+)+$"
+_FAILURE_KINDS = [""] + list(FAILURE_KINDS)
 
 SCHEMA: Dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -131,6 +145,8 @@ SCHEMA: Dict[str, Any] = {
                 "target": {"type": "string"},
                 "ts": {"type": "number"},
                 "ts_iso": {"type": "string"},
+                # 1.2: classification of the failure, empty when none
+                "failure_kind": {"type": "string", "enum": _FAILURE_KINDS},
             },
         }},
         "disclaimer": {"type": "string"},
@@ -145,6 +161,9 @@ SCHEMA: Dict[str, Any] = {
                 }},
                 "chain_status": {"type": "string",
                                  "enum": ["complete", "incomplete", "broken", "unread"]},
+                # 1.2: address every probe connected to, and how the handshake failed
+                "handshake_ip": {"type": ["string", "null"]},
+                "handshake_failure": {"type": "string", "enum": _FAILURE_KINDS},
             },
         },
     },

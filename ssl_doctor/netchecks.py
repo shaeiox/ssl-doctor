@@ -11,6 +11,7 @@ import http.client
 import ipaddress
 import socket
 import ssl
+import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -204,16 +205,75 @@ def _make_context(verify: bool, min_v=None, max_v=None,
     return ctx
 
 
+# A stall is retried once: one sample cannot distinguish an intermittent path
+# from a persistent one, and the evidence must say which attempt did what.
+_HANDSHAKE_RETRIES = 1
+
+# OpenSSL's wording when the *peer* rejects our offer.  These are deterministic,
+# so they are never retried and they are the only evidence that allows a
+# protocol/cipher-mismatch diagnosis.
+_ALERT_MARKERS = ("alert", "no shared cipher", "no cipher", "wrong version number",
+                  "unsupported protocol", "handshake failure", "protocol version")
+
+# ...and when the connection simply went away mid-handshake, which is a path
+# problem even though OpenSSL reports it as an SSLError.
+_NETWORK_MARKERS = ("eof occurred", "connection reset", "connection aborted",
+                    "connection refused", "broken pipe", "timed out")
+
+
+class _ConnectTimeout(socket.timeout):
+    """The TCP connect itself timed out - the peer was never reached."""
+
+
+class _NegotiationTimeout(socket.timeout):
+    """TCP opened, but the peer sent no (or an incomplete) TLS response."""
+
+
+def _connect(host: str, port: int, timeout: float,
+             connect_ip: Optional[str] = None) -> socket.socket:
+    addr = connect_ip or host
+    try:
+        return socket.create_connection((addr, port), timeout=timeout)
+    except socket.timeout:
+        raise _ConnectTimeout(f"connect to {addr}:{port} timed out") from None
+
+
+def _negotiate(raw: socket.socket, ctx: ssl.SSLContext,
+               server_hostname: Optional[str], timeout: float) -> ssl.SSLSocket:
+    raw.settimeout(timeout)
+    try:
+        return ctx.wrap_socket(raw, server_hostname=server_hostname)
+    except socket.timeout:
+        _discard(raw)
+        raise _NegotiationTimeout(
+            "TLS negotiation on an open connection stalled (no server response)") from None
+    except Exception:
+        _discard(raw)
+        raise
+
+
+def _discard(raw: socket.socket) -> None:
+    try:
+        raw.close()
+    except OSError:
+        pass
+
+
 def _handshake(host: str, port: int, server_hostname: Optional[str],
                ctx: ssl.SSLContext, timeout: float,
                connect_ip: Optional[str] = None) -> ssl.SSLSocket:
-    addr = connect_ip or host
-    raw = socket.create_connection((addr, port), timeout=timeout)
-    try:
-        return ctx.wrap_socket(raw, server_hostname=server_hostname)
-    except Exception:
-        raw.close()
-        raise
+    return _negotiate(_connect(host, port, timeout, connect_ip), ctx,
+                      server_hostname, timeout)
+
+
+def _classify_negotiation_error(exc: BaseException) -> str:
+    """Map a non-timeout negotiation failure onto a contract failure kind."""
+    msg = str(exc).lower()
+    if any(m in msg for m in _NETWORK_MARKERS):
+        return "network-error"
+    if isinstance(exc, ssl.SSLError) or any(m in msg for m in _ALERT_MARKERS):
+        return "tls-alert"
+    return "network-error"
 
 
 # Readers tried in order to obtain the chain the server presented.  Tests may
@@ -272,28 +332,40 @@ def read_presented_chain(ssock: ssl.SSLSocket, host: str, port: int,
     return None, "", errors
 
 
-def check_tls_basic(host: str, port: int, sni: Optional[str],
-                    timeout: float) -> Tuple[F.Finding, Dict]:
-    """Unauthenticated TLS handshake: protocol, cipher, presented chain."""
-    facts: Dict = {}
-    ctx = _make_context(verify=False)
-    try:
-        ssock = _handshake(host, port, sni, ctx, timeout)
-    except socket.timeout:
-        return F.Finding(
-            "tls.handshake", f"TLS handshake with {host}:{port}", F.FAIL,
-            F.SCOPE_REMOTE_NET, [f"handshake/connect timed out after {timeout:.0f}s"],
-            recommendation="TCP opened previously, but the TLS negotiation stalls. "
-                           "An inspection device or wrong protocol on the port is likely.",
-            target=f"{host}:{port}"), facts
-    except (ssl.SSLError, OSError) as exc:
-        return F.Finding(
-            "tls.handshake", f"TLS handshake with {host}:{port}", F.FAIL,
-            F.SCOPE_REMOTE_NET, [f"handshake failed: {exc}"],
-            recommendation="The port may not speak TLS at all, or requires a version/"
-                           "cipher this client cannot offer. See the protocol matrix check.",
-            target=f"{host}:{port}"), facts
+_FAILURE_ADVICE = {
+    "connect-timeout":
+        "The TCP connection itself did not complete. Repeat the test from another "
+        "network, and check routing/firewalls - the earlier TCP check may have used "
+        "a different address.",
+    "negotiation-timeout":
+        "TCP opened previously, but the TLS negotiation stalls. An inspection device, "
+        "an idle timeout or the wrong protocol on the port is likely.",
+    "tls-alert":
+        "The port may not speak TLS at all, or requires a version/cipher this client "
+        "cannot offer. See the protocol matrix check.",
+    "network-error":
+        "The connection is reset or dropped during TLS negotiation - a TLS-inspection "
+        "device or a load balancer is the likely cause.",
+}
 
+_TIMEOUT_KINDS = ("connect-timeout", "negotiation-timeout")
+
+
+def _failure_summary(kind: str, addr: str, port: int) -> str:
+    if kind == "connect-timeout":
+        return f"could not open a TCP connection to {addr}:{port} within the timeout"
+    if kind == "negotiation-timeout":
+        return (f"TCP connected to {addr}:{port}, but the TLS negotiation stalled "
+                f"with no server response")
+    if kind == "tls-alert":
+        return f"the peer at {addr}:{port} rejected the TLS handshake"
+    return f"the connection to {addr}:{port} was reset or dropped during TLS negotiation"
+
+
+def _presented_facts(ssock: ssl.SSLSocket, host: str, port: int,
+                     sni: Optional[str], timeout: float) -> Dict:
+    """Negotiated protocol/cipher plus the chain the server presented."""
+    facts: Dict = {}
     try:
         proto = ssock.version() or "?"
         cipher = ssock.cipher() or ("?", "?", 0)
@@ -317,29 +389,98 @@ def check_tls_basic(host: str, port: int, sni: Optional[str],
         })
     finally:
         ssock.close()
+    return facts
 
-    if not facts.get("cert"):
+
+def check_tls_basic(host: str, port: int, sni: Optional[str],
+                    timeout: float, connect_ip: Optional[str] = None
+                    ) -> Tuple[F.Finding, Dict]:
+    """Unauthenticated TLS handshake: protocol, cipher, presented chain.
+
+    A timeout-class failure is retried once, because a single stalled sample
+    cannot be told apart from a persistent one.  A rejection by the peer is
+    never retried: it is deterministic, and it is the only evidence that can
+    support a protocol/cipher diagnosis.
+    """
+    addr = connect_ip or host
+    target = f"{host}:{port}"
+    facts: Dict = {"handshake_ip": addr, "handshake_attempts": 0}
+    ctx = _make_context(verify=False)
+    attempts: List[str] = []
+    kind, ssock = "", None
+
+    for attempt in range(1, _HANDSHAKE_RETRIES + 2):
+        facts["handshake_attempts"] = attempt
+        started = time.monotonic()
+        try:
+            ssock = _handshake(host, port, sni, ctx, timeout, connect_ip=connect_ip)
+            elapsed = time.monotonic() - started
+            attempts.append(f"attempt {attempt}: handshake completed in {elapsed:.1f}s")
+            break
+        except (_ConnectTimeout, _NegotiationTimeout) as exc:
+            elapsed = time.monotonic() - started
+            kind = ("connect-timeout" if isinstance(exc, _ConnectTimeout)
+                    else "negotiation-timeout")
+            attempts.append(f"attempt {attempt}: {exc} ({elapsed:.1f}s elapsed)")
+        except (ssl.SSLError, OSError) as exc:
+            kind = _classify_negotiation_error(exc)
+            first = str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__
+            attempts.append(f"attempt {attempt}: {first}")
+            break                      # rejection/reset: retrying cannot change it
+
+    if ssock is None:
+        facts["handshake_failure"] = kind
+        evidence = [_failure_summary(kind, addr, port)] + attempts
         return F.Finding(
-            "tls.handshake", f"TLS handshake with {host}:{port}", F.WARNING,
-            F.SCOPE_REMOTE_NET,
-            [f"handshake succeeded (protocol={proto}) but the server sent no certificate"],
-            target=f"{host}:{port}"), facts
+            "tls.handshake", f"TLS handshake with {target}", F.FAIL,
+            F.SCOPE_REMOTE_NET, evidence,
+            recommendation=_FAILURE_ADVICE.get(kind, ""),
+            target=target, failure_kind=kind), facts
 
-    leaf: certs.CertInfo = facts["cert"]
+    facts.update(_presented_facts(ssock, host, port, sni, timeout))
+    proto = facts["protocol"]
+    leaf: Optional[certs.CertInfo] = facts["cert"]
     if facts["chain"] is None:
         chain_line = "chain presented: could not be read"
     else:
         chain_line = (f"chain presented ({len(facts['chain'])}, via {facts['chain_reader']}): "
                       + " -> ".join((c.common_name or c.subject) for c in facts["chain"]))
+
+    if kind in _TIMEOUT_KINDS:
+        # Recovered stall: report it, but keep every fact the later checks need.
+        facts["handshake_failure"] = kind
+        return F.Finding(
+            "tls.handshake", f"TLS handshake with {target}", F.WARNING,
+            F.SCOPE_REMOTE_NET,
+            [_failure_summary(kind, addr, port)] + attempts + [
+                f"recovered on attempt {len(attempts)}: the handshake stalled, "
+                f"then completed"] + (
+                [f"negotiated protocol: {proto}",
+                 f"cipher: {facts['cipher']} ({facts['cipher_bits']} bit)",
+                 f"certificate presented: {leaf.subject}",
+                 f"SHA-256: {leaf.sha256}",
+                 chain_line] if leaf else []),
+            detail="The handshake is not reliably reachable: an intermittent path "
+                   "problem or an inspection device is likely.",
+            recommendation=_FAILURE_ADVICE.get(kind, ""),
+            target=target, failure_kind=kind), facts
+
+    if not leaf:
+        return F.Finding(
+            "tls.handshake", f"TLS handshake with {target}", F.WARNING,
+            F.SCOPE_REMOTE_NET,
+            [f"handshake succeeded (protocol={proto}) but the server sent no certificate"],
+            target=target), facts
+
     return F.Finding(
-        "tls.handshake", f"TLS handshake with {host}:{port}", F.PASS,
+        "tls.handshake", f"TLS handshake with {target}", F.PASS,
         F.SCOPE_REMOTE_NET,
         [f"negotiated protocol: {proto}",
          f"cipher: {facts['cipher']} ({facts['cipher_bits']} bit)",
          f"certificate presented: {leaf.subject}",
          f"SHA-256: {leaf.sha256}",
          chain_line],
-        target=f"{host}:{port}"), facts
+        target=target), facts
 
 
 def check_tls_validation(host: str, port: int, sni: Optional[str],
@@ -438,37 +579,52 @@ def check_tls_rootonly_validation(host: str, port: int, sni: Optional[str],
                          target=target)
 
 
+_RELAXED_CIPHER_POLICY = "ALL:@SECLEVEL=0"
+_RELAXED_POLICY_NOTE = ("TLS 1.0-1.2 probes used a relaxed cipher policy "
+                        "(ALL:@SECLEVEL=0): 'accepted' is not proof that a modern "
+                        "client can connect")
+
+
 def check_protocol_matrix(host: str, port: int, sni: Optional[str],
-                          timeout: float) -> F.Finding:
+                          timeout: float, connect_ip: Optional[str] = None
+                          ) -> F.Finding:
     """Probe each TLS protocol version individually."""
+    target = f"{host}:{port}"
     if not hasattr(ssl, "TLSVersion"):
         return F.Finding("tls.protocols", "TLS protocol version support",
                          F.NOT_TESTED, F.SCOPE_REMOTE_NET,
                          ["this Python/OpenSSL build cannot pin protocol versions"],
-                         target=f"{host}:{port}")
-    rows, supported, refused = [], [], []
+                         target=target)
+    rows, supported, refused, timed_out, errored = [], [], [], [], []
+    relaxed_used: List[str] = []
     versions = [
         ("TLS 1.0", ssl.TLSVersion.TLSv1),
         ("TLS 1.1", ssl.TLSVersion.TLSv1_1),
         ("TLS 1.2", ssl.TLSVersion.TLSv1_2),
         ("TLS 1.3", ssl.TLSVersion.TLSv1_3),
     ]
+    legacy = (ssl.TLSVersion.TLSv1, ssl.TLSVersion.TLSv1_1, ssl.TLSVersion.TLSv1_2)
     for label, ver in versions:
+        relaxed = ver in legacy
         ctx = _make_context(verify=False, min_v=ver, max_v=ver,
-                            ciphers="ALL:@SECLEVEL=0" if ver in (
-                                ssl.TLSVersion.TLSv1, ssl.TLSVersion.TLSv1_1,
-                                ssl.TLSVersion.TLSv1_2) else None)
+                            ciphers=_RELAXED_CIPHER_POLICY if relaxed else None)
+        if relaxed:
+            relaxed_used.append(label)
         try:
-            s = _handshake(host, port, sni, ctx, timeout)
+            s = _handshake(host, port, sni, ctx, timeout, connect_ip=connect_ip)
             rows.append(f"{label}: accepted ({s.version()})")
             supported.append(label)
             s.close()
+        except (_ConnectTimeout, _NegotiationTimeout):
+            # A timeout is not a refusal: the server never answered the offer.
+            rows.append(f"{label}: timed out after {timeout:.0f}s (no response)")
+            timed_out.append(label)
         except ssl.SSLError as exc:
             rows.append(f"{label}: refused ({str(exc).splitlines()[0][:80]})")
             refused.append(label)
         except OSError as exc:
             rows.append(f"{label}: network error ({exc})")
-            refused.append(label)
+            errored.append(label)
 
     status = F.PASS
     notes = []
@@ -485,12 +641,25 @@ def check_protocol_matrix(host: str, port: int, sni: Optional[str],
     if "TLS 1.2" not in supported and supported:
         status = F.WARNING
         notes.append("TLS 1.2 refused - many clients cannot connect to this server")
+
+    failure_kind = ""
+    if not supported:
+        if refused and len(refused) == len(versions):
+            failure_kind = "no-version-accepted"
+        elif len(timed_out) + len(errored) == len(versions):
+            failure_kind = "no-version-answered"
+
+    evidence = list(rows)
+    if relaxed_used and any(v in supported for v in relaxed_used):
+        evidence.append(_RELAXED_POLICY_NOTE)
+        if status == F.PASS or status == F.WARNING:
+            notes.append("legacy versions accepted under a relaxed cipher policy")
     return F.Finding(
         "tls.protocols", "TLS protocol version support", status, F.SCOPE_REMOTE_NET,
-        rows, detail="; ".join(notes),
+        evidence, detail="; ".join(notes),
         recommendation=("Enable TLS 1.2 (and 1.3) and disable 1.0/1.1 for a modern, "
                         "interoperable configuration." if status != F.PASS else ""),
-        target=f"{host}:{port}")
+        target=target, failure_kind=failure_kind)
 
 
 def check_sni_difference(host: str, port: int, sni: str, timeout: float) -> F.Finding:
@@ -724,10 +893,32 @@ def export_facts(facts: Dict) -> Dict:
                  "not_after": leaf.not_after.isoformat() if leaf.not_after else None}
         if leaf else None,
         "chain_status": facts.get("chain_status", "unread"),
+        "handshake_ip": facts.get("handshake_ip"),
+        "handshake_failure": facts.get("handshake_failure", ""),
     }
 
 
 # ---------------------------------------------------------------- orchestrator
+
+def _note_handshake_coherence(hs: F.Finding, matrix: F.Finding) -> None:
+    """Keep a failed handshake and a working protocol matrix from contradicting.
+
+    The two checks answer different questions, so the failed one must say which
+    versions did answer - otherwise "handshake fails" plus "TLS 1.2/1.3 accepted"
+    reads as one endpoint that cannot negotiate TLS at all.
+    """
+    accepted = [r.split(":")[0] for r in matrix.evidence if ": accepted" in r]
+    if not accepted:
+        return
+    if hs.failure_kind in _TIMEOUT_KINDS:
+        hs.evidence.append(
+            f"per-version probes completed for {', '.join(accepted)} - the failure is a "
+            f"stall on the default path, not a protocol/cipher rejection")
+    elif hs.failure_kind == "tls-alert":
+        hs.evidence.append(
+            f"per-version probes accepted {', '.join(accepted)} - the server rejected "
+            f"this offer while accepting those")
+
 
 def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None,
                            timeout: float = 8.0) -> Tuple[List[F.Finding], Dict]:
@@ -758,11 +949,18 @@ def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None
             F.SCOPE_REMOTE_NET, ["skipped: TCP failure"], target=f"{host}:{port}"))
         return out, facts
 
-    hs_f, hs_facts = check_tls_basic(host, port, server_name, timeout)
+    # Probe the address the TCP check proved reachable; comparing several
+    # addresses stays the job of check_multi_ip().
+    verified_ip = ips[0] if ips else None
+    hs_f, hs_facts = check_tls_basic(host, port, server_name, timeout,
+                                     connect_ip=verified_ip)
     out.append(hs_f)
     facts.update(hs_facts)
     if hs_f.status == F.FAIL:
-        out.append(check_protocol_matrix(host, port, server_name, timeout))
+        matrix_f = check_protocol_matrix(host, port, server_name, timeout,
+                                        connect_ip=verified_ip)
+        out.append(matrix_f)
+        _note_handshake_coherence(hs_f, matrix_f)
         return out, facts
 
     # Leaf self-checks over the network-presented cert.
@@ -817,7 +1015,8 @@ def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None
 
     out.append(check_tls_validation(host, port, server_name, timeout))
     out.append(check_tls_rootonly_validation(host, port, server_name, timeout))
-    out.append(check_protocol_matrix(host, port, server_name, timeout))
+    out.append(check_protocol_matrix(host, port, server_name, timeout,
+                                     connect_ip=verified_ip))
     out.append(check_sni_difference(host, port, server_name or host, timeout))
     out.append(check_multi_ip(host, port, ips, timeout))
     out.append(check_weak_ciphers(host, port, server_name, timeout))

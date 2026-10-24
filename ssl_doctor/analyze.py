@@ -13,6 +13,16 @@ from typing import Dict, List, Optional
 from . import findings as F
 
 
+_TIMEOUT_KINDS = ("connect-timeout", "negotiation-timeout")
+
+
+def _accepted_versions(matrix: Optional[F.Finding]) -> List[str]:
+    """Protocol versions the matrix observed completing a handshake."""
+    if not matrix or matrix.status not in (F.PASS, F.WARNING):
+        return []
+    return [row.split(":")[0] for row in matrix.evidence if ": accepted" in row]
+
+
 @dataclass
 class Cause:
     rank: int                     # lower = investigated first
@@ -96,20 +106,62 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
         return _finish(d, items)
 
     # ---- TLS negotiation ---------------------------------------------------
+    # Attribution follows the *failure mode* recorded by the probe, never the
+    # status alone: a stall and a rejection both end in FAIL but belong to
+    # different owners, and only a rejection can support a protocol/cipher cause.
     matrix = _first(remote, "tls.protocols")
-    if hs and hs.status == F.FAIL:
-        ev = hs.evidence + (matrix.evidence if matrix else [])
-        if matrix and "accepted" in " ".join(matrix.evidence):
-            add("probable", "server",
-                "TLS handshake fails for modern clients but some protocol "
-                "versions work - protocol/cipher mismatch",
-                ev, "Align enabled protocols/ciphers with the client capabilities.")
-        else:
+    if hs and (hs.status == F.FAIL
+               or (hs.status == F.WARNING and hs.failure_kind in _TIMEOUT_KINDS)):
+        kind = hs.failure_kind
+        accepted = _accepted_versions(matrix)
+        ev = ([f"handshake failure kind: {kind}"] if kind else []) + \
+            hs.evidence + (matrix.evidence if matrix else [])
+        if hs.status == F.WARNING:
+            add("probable", "network",
+                "The TLS handshake stalls and completes only on a retry - "
+                "intermittent path behaviour; the version probes answered",
+                ev, "Repeat the measurement from another network. If the stall is "
+                    "reproducible, inspect TLS-inspection devices and idle timeouts "
+                    "on the path.")
+        elif kind in _TIMEOUT_KINDS and accepted:
+            add("probable", "network",
+                "The TLS handshake stalls although version-pinned handshakes "
+                "complete - an intermittent stall or a middle-box on the path; the "
+                "server answered every protocol version offered",
+                ev, "Repeat the measurement and retest from another network; if it "
+                    "recurs, inspect TLS-inspection devices and idle timeouts on the "
+                    "path.")
+        elif kind in _TIMEOUT_KINDS:
             add("probable", "network",
                 "TCP connects but no TLS version completes a handshake - the port "
                 "may not serve TLS, or middle-boxes interfere",
                 ev, "Confirm the port speaks TLS (openssl s_client), then inspect "
                     "firewalls/inspection devices on the path.")
+        elif kind == "network-error":
+            add("probable", "network",
+                "The connection is reset or dropped during TLS negotiation - an "
+                "inspection device or load balancer is the likely cause",
+                ev, "Repeat the measurement and inspect TLS-inspection devices and "
+                    "load balancers on the path.")
+        elif kind == "tls-alert" and accepted:
+            add("probable", "server",
+                "TLS handshake fails for modern clients but some protocol "
+                "versions work - protocol/cipher mismatch",
+                ev, "Align enabled protocols/ciphers with the client capabilities.")
+        elif kind == "tls-alert":
+            add("probable", "server",
+                "The server rejects the TLS handshake - the port may not serve TLS, "
+                "or requires a version/cipher this client cannot offer",
+                ev, "Confirm the port speaks TLS (openssl s_client) and compare its "
+                    "protocol/cipher configuration with modern client defaults.")
+        else:
+            add("probable", "network",
+                "The TLS handshake fails in an unclassified way while some protocol "
+                "versions answer - cause not established",
+                ev + ["the handshake failure was not classified by the probe, so no "
+                      "protocol/cipher mismatch can be claimed"],
+                "Repeat the scan with a current client build, then inspect the path "
+                "for inspection devices.")
 
     # ---- server chain / nginx vhost (ranked ahead of client trust rules) ------
     # Judged from what the server sends and how nginx is configured - never

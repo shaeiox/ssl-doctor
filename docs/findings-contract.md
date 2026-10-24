@@ -1,14 +1,16 @@
 # Findings contract (`findings/1.x`)
 
 Every JSON report, agent upload and service export is a findings document.
-Current schema: [`schemas/findings-1.1.schema.json`](../schemas/findings-1.1.schema.json)
+Current schema: [`schemas/findings-1.2.schema.json`](../schemas/findings-1.2.schema.json)
 (source of truth: `ssl_doctor/contract.py`). Earlier minor versions stay
-published: [`findings-1.0`](../schemas/findings-1.0.schema.json).
+published: [`findings-1.1`](../schemas/findings-1.1.schema.json),
+[`findings-1.0`](../schemas/findings-1.0.schema.json).
 
 | Version | Change |
 |---|---|
 | 1.0 | Initial contract |
 | 1.1 | Optional `facts` block: `leaf` (`sha256`, `subject`, `not_after`) and `chain_status` (`complete`/`incomplete`/`broken`/`unread`). Monitoring uses it for drift and expiry |
+| 1.2 | Optional `failure_kind` on every finding, and `handshake_ip` / `handshake_failure` in `facts`. Separates *what went wrong* from the finding status, so a stall is never read as a protocol/cipher rejection |
 
 ## Versioning
 
@@ -16,6 +18,26 @@ published: [`findings-1.0`](../schemas/findings-1.0.schema.json).
   version they support and reject others with an error naming both versions.
 - **Minor** versions only add: new optional fields or new check ids.
 - **Major** versions may rename or remove fields or check ids.
+
+## Failure classification (`failure_kind`)
+
+`status` says what the outcome was; `failure_kind` says what went wrong. Both are
+needed: a stalled handshake and a rejected handshake both end in `FAIL`, but they
+have different owners (network path vs. server configuration). The value is `""`
+when nothing failed, including every `PASS`.
+
+| `failure_kind` | Emitted by | Meaning |
+|---|---|---|
+| `""` | any check | no classified failure |
+| `connect-timeout` | `tls.handshake` | the TCP connect to the probed address timed out |
+| `negotiation-timeout` | `tls.handshake` | the socket opened, but the peer sent no TLS response in time |
+| `tls-alert` | `tls.handshake` | the peer rejected the offer with a TLS alert or no shared cipher |
+| `network-error` | `tls.handshake` | the connection was reset or became unreachable during negotiation |
+| `no-version-accepted` | `tls.protocols` | every per-version probe was refused |
+| `no-version-answered` | `tls.protocols` | every per-version probe stalled or errored without a TLS answer |
+
+A `WARNING` on `tls.handshake` with a timeout-class `failure_kind` means the stall
+was confirmed by a second attempt, which then completed.
 
 ## Secrets
 

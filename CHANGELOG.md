@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased — handshake failure attribution
+
+Fixes a diagnosis that blamed the server's protocol configuration for a stalled
+TLS handshake. The findings contract moves to **1.2** (additive; 1.0 and 1.1
+stay published and keep validating).
+
+### Root cause fixed
+
+- `tls.handshake` recorded a timeout and a protocol/cipher rejection identically
+  (`FAIL`, prose evidence only), and the diagnosis mapped on the status alone.
+  A run with a stalled handshake next to "TLS 1.0–1.3 accepted" was reported as a
+  probable **server** protocol/cipher mismatch.
+- The handshake and the per-version probes re-resolved the hostname instead of
+  using the address `net.tcp` verified, so they could measure a different
+  endpoint than the one that was proven reachable.
+
+### Changed verdicts by check id
+
+| Check id | Before | Now |
+|---|---|---|
+| `tls.handshake` | Any failure: `FAIL`, evidence "handshake/connect timed out" or "handshake failed", no structured cause | Failures carry `failure_kind`. A timeout is retried once: a recovered stall is `WARNING` (and still yields all certificate facts), a repeated stall is `FAIL`. A rejection is `FAIL` on the first attempt. Evidence names the phase, the probed address and each attempt |
+| `tls.protocols` | A timeout was counted as "refused"; the relaxed cipher policy for TLS 1.0–1.2 was undisclosed | Rows are `accepted` / `refused` / `timed out` / `network error`; `failure_kind` is `no-version-accepted` or `no-version-answered`; accepted legacy versions disclose the `ALL:@SECLEVEL=0` policy |
+| `tls.handshake` + `tls.protocols` | Contradiction possible: "handshake fails" beside "TLS 1.2/1.3 accepted" | A failed handshake states which versions did answer and that the failure is a stall or rejection on the default path |
+| diagnosis | Timeout ⇒ probable **server** protocol/cipher mismatch whenever a version was accepted | Attribution follows `failure_kind`: timeouts and resets are probable **network** causes with path advice; only `tls-alert` can produce a protocol/cipher mismatch (server). Unclassified failures fall back to network with a note |
+
 ## v0.3.0 — diagnostic correctness
 
 This release fixes how SSL Doctor diagnoses the most common nginx failure: a
