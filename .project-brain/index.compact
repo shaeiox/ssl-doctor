@@ -1,0 +1,16 @@
+# Project Brain — compact index · generated from index.md · DO NOT EDIT
+# legend: "<P> <name>  <stack·tags>" then one line/topic: "<topic> <status> <date> <vN>"
+#   status: ✓v=verified ✓d=done ⚠=in-progress ✗=failed ⨯=superseded
+#   pointer = projects/<name>/<topic>.md  (inline only when it differs)
+#   tiers:  P+ = HOT (active, full)  ·  P = WARM  ·  COLD (archived) omitted — read on demand
+#   when active projects > 15, WARM collapses to: P <name> <stack> · N topics, last <date>
+#   a project's finished topics collapse past 15: '+K more, oldest <date>' (⚠ always kept)
+#   ! <rule> = HARD RULE, never violate (brain-wide on top, or under a project) · ~ = session resume
+#   @ <name> <status> <date> = person (people/<name>.md) · status: active|prospect|paused|closed
+@src index.md  @gen 2026-10-24  @updated 2026-10-24
+
+P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
+  architecture-and-scope ✓v 2026-10-24 v1
+  chain-diagnosis ✓v 2026-10-24 v1
+  server-ssh-nginx ✓v 2026-10-24 v1
+  commands-reference ✓v 2026-10-24 v1
