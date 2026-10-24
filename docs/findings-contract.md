@@ -110,6 +110,23 @@ causes only.
 `comparable`. A match covers the `comparable` endpoints only; when it is lower
 than `addresses` the finding says how many were not compared.
 
+## Agent reports (`meta.report_kind = "agent"`)
+
+`/report agent` writes `agent-report.json`: the same document `/report json`
+produces for the session (same `summary`, `findings`, `diagnosis`, `facts`),
+with run context added under `meta`. `meta` is an open object in every
+published schema, so no schema version changes.
+
+| Key | Meaning |
+|---|---|
+| `meta.report_kind` | `"agent"` |
+| `meta.agent_report.scan` | `host`, `port`, `sni`, `ips`, `handshake_ip`, `protocol`, `cipher`, `final_url` of the latest completed scan; `first_finding_utc` / `last_finding_utc`; `targets` (every distinct finding target in the session) |
+| `meta.agent_report.environment` | `tool`, `python`, `openssl`, `platform` of the process that ran the session; `local_os_evidence` (the `local.os` finding's evidence, or `null` when `/local` did not run) |
+| `meta.agent_report.configuration` | `network_timeout`, `command_timeout`, `ssh_connected` |
+
+Values the scan did not record are `null`; they are never inferred. The
+companion `agent-report.md` is rendered from this (redacted) document only.
+
 ## Secrets
 
 Documents never contain passwords, private keys or tokens. Serialization
