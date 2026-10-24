@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from . import findings as F
 
@@ -376,13 +376,21 @@ def assess_chain(chain: List[CertInfo],
                                      f"at a non-CA certificate issued by '{top.issuer}'"])
 
 
-def inspect_cert_file(path: str, hostname: str = "") -> List[Finding]:
+def inspect_cert_file(path: str, hostname: str = "",
+                     emit: Optional[Callable[[Finding], None]] = None) -> List[Finding]:
     """Produce findings for a certificate (or chain) file."""
     out: List[Finding] = []
     target = path
+
+    def _add(f: Finding) -> Finding:
+        list.append(out, f)
+        if emit is not None:
+            emit(f)
+        return f
+
     certs, err = load_cert_file(path)
     if err and not certs:
-        out.append(
+        _add(
             F.Finding("cert.parse", f"Parse certificate file {os.path.basename(path)}",
                     F.FAIL, F.SCOPE_LOCAL, [err], target=target)
         )
@@ -395,7 +403,7 @@ def inspect_cert_file(path: str, hostname: str = "") -> List[Finding]:
         if first.not_before and first.not_after else
         f"subject={first.subject}; issuer={first.issuer}"
     )
-    out.append(
+    _add(
         F.Finding("cert.parse", f"Parsed certificate file {os.path.basename(path)}",
                 F.PASS, F.SCOPE_LOCAL,
                 [
@@ -414,14 +422,14 @@ def inspect_cert_file(path: str, hostname: str = "") -> List[Finding]:
 
     # Validity window.
     if first.is_expired():
-        out.append(F.Finding(
+        _add(F.Finding(
             "cert.validity", "Certificate validity dates", F.FAIL, F.SCOPE_LOCAL,
             [f"certificate expired {-first.days_to_expiry()} days ago "
              f"(notAfter={first.not_after:%Y-%m-%d %H:%M UTC})"],
             recommendation="Renew the certificate and deploy the new file to the server.",
             target=target))
     elif first.not_yet_valid():
-        out.append(F.Finding(
+        _add(F.Finding(
             "cert.validity", "Certificate validity dates", F.FAIL, F.SCOPE_LOCAL,
             [f"certificate is not valid until {first.not_before:%Y-%m-%d %H:%M UTC}"],
             recommendation="Check the client system clock and the certificate issuance date.",
@@ -429,20 +437,20 @@ def inspect_cert_file(path: str, hostname: str = "") -> List[Finding]:
     else:
         days = first.days_to_expiry()
         if days is not None and days <= 30:
-            out.append(F.Finding(
+            _add(F.Finding(
                 "cert.validity", "Certificate validity dates", F.WARNING, F.SCOPE_LOCAL,
                 [f"certificate expires in {days} days ({first.not_after:%Y-%m-%d})"],
                 recommendation="Renew the certificate soon.",
                 target=target))
         else:
-            out.append(F.Finding(
+            _add(F.Finding(
                 "cert.validity", "Certificate validity dates", F.PASS, F.SCOPE_LOCAL,
                 [f"certificate is currently valid; {days} days remaining"],
                 target=target))
 
     # Self-signed?
     if first.is_self_signed():
-        out.append(F.Finding(
+        _add(F.Finding(
             "cert.selfsigned", "Issued by a trusted CA?", F.WARNING, F.SCOPE_LOCAL,
             ["subject and issuer are identical: this is a self-signed certificate"],
             recommendation="Clients will not trust this unless it is imported into their "
@@ -452,7 +460,7 @@ def inspect_cert_file(path: str, hostname: str = "") -> List[Finding]:
     # Hostname coverage.
     if hostname:
         ok, names = first.matches_hostname(hostname)
-        out.append(F.Finding(
+        _add(F.Finding(
             "cert.hostname", f"Hostname match for '{hostname}'",
             F.PASS if ok else F.FAIL, F.SCOPE_LOCAL,
             [f"checked against subjectAltName: {', '.join(names) or '(none)'}",
@@ -480,21 +488,21 @@ def inspect_cert_file(path: str, hostname: str = "") -> List[Finding]:
         if not ordered_ok:
             problems.append("certificates are out of order (server certificate first, then intermediates)")
         if problems:
-            out.append(F.Finding(
+            _add(F.Finding(
                 "cert.chainfile", "Certificate chain file structure", F.WARNING, F.SCOPE_LOCAL,
                 [f"{len(certs)} certificates in file", *problems],
                 recommendation="Order the file as: server certificate, then intermediate "
                                "certificate(s). The root certificate may be omitted.",
                 target=target))
         else:
-            out.append(F.Finding(
+            _add(F.Finding(
                 "cert.chainfile", "Certificate chain file structure", F.PASS, F.SCOPE_LOCAL,
                 [f"{len(certs)} certificates, correctly ordered "
                  f"({' -> '.join(c.common_name or c.subject for c in certs)})"],
                 target=target))
 
     if err:
-        out.append(F.Finding("cert.parse", "Additional data in file", F.WARNING,
+        _add(F.Finding("cert.parse", "Additional data in file", F.WARNING,
                            F.SCOPE_LOCAL, [err], target=target))
     return out
 
@@ -511,32 +519,49 @@ def _public_key_sha256_from_pem_bytes(pem: bytes) -> Tuple[Optional[str], str]:
     return hashlib.sha256(der_proc.stdout).hexdigest(), ""
 
 
-def match_cert_key(cert_path: str, key_path: str) -> List[Finding]:
+def match_cert_key(cert_path: str, key_path: str,
+                   emit: Optional[Callable[[Finding], None]] = None) -> List[Finding]:
     """Verify a private key belongs to a certificate.
 
     Never prints or logs key material.  Encrypted keys are rejected unless
     they can be read without a passphrase (we never prompt for one).
     """
     out: List[Finding] = []
+
+    def _add(f: Finding) -> Finding:
+        list.append(out, f)
+        if emit is not None:
+            emit(f)
+        return f
+
     if not shutil.which("openssl"):
-        return [F.Finding("cert.keymatch", "Certificate/private-key match", F.NOT_TESTED,
-                        F.SCOPE_LOCAL, ["openssl binary not available"])]
+        _f = F.Finding("cert.keymatch", "Certificate/private-key match", F.NOT_TESTED,
+                      F.SCOPE_LOCAL, ["openssl binary not available"])
+        if emit is not None:
+            emit(_f)
+        return [_f]
     certs, err = load_cert_file(cert_path)
     if not certs:
-        return [F.Finding("cert.keymatch", "Certificate/private-key match", F.FAIL,
-                        F.SCOPE_LOCAL, [err or "cannot parse certificate file"],
-                        target=cert_path)]
+        _f = F.Finding("cert.keymatch", "Certificate/private-key match", F.FAIL,
+                      F.SCOPE_LOCAL, [err or "cannot parse certificate file"],
+                      target=cert_path)
+        if emit is not None:
+            emit(_f)
+        return [_f]
 
     cert_fp, e1 = _public_key_sha256_from_pem_bytes(certs[0].pem)
     try:
         with open(key_path, "rb") as fh:
             key_data = fh.read()
     except OSError as exc:
-        return [F.Finding("cert.keymatch", "Certificate/private-key match", F.FAIL,
-                        F.SCOPE_LOCAL, [f"cannot read key file: {exc}"], target=key_path)]
+        _f = F.Finding("cert.keymatch", "Certificate/private-key match", F.FAIL,
+                      F.SCOPE_LOCAL, [f"cannot read key file: {exc}"], target=key_path)
+        if emit is not None:
+            emit(_f)
+        return [_f]
 
     if b"ENCRYPTED" in key_data[:200]:
-        out.append(F.Finding("cert.keymatch", "Certificate/private-key match", F.NOT_TESTED,
+        _add(F.Finding("cert.keymatch", "Certificate/private-key match", F.NOT_TESTED,
                            F.SCOPE_LOCAL,
                            ["the private key is passphrase-encrypted; ssl-doctor never "
                             "prompts for passphrases, so the match cannot be checked"],
@@ -551,20 +576,23 @@ def match_cert_key(cert_path: str, key_path: str) -> List[Finding]:
     if key_pub.returncode != 0:
         msg = key_pub.stderr.decode("utf-8", "replace").strip().splitlines()
         hint = msg[-1] if msg else "openssl could not read the key"
-        return out + [F.Finding("cert.keymatch", "Certificate/private-key match", F.FAIL,
-                              F.SCOPE_LOCAL, [f"private key unreadable: {hint}"],
-                              target=key_path)]
+        _f = F.Finding("cert.keymatch", "Certificate/private-key match", F.FAIL,
+                      F.SCOPE_LOCAL, [f"private key unreadable: {hint}"],
+                      target=key_path)
+        if emit is not None:
+            emit(_f)
+        return out + [_f]
     key_fp = hashlib.sha256(key_pub.stdout).hexdigest()
 
     if cert_fp and cert_fp == key_fp:
-        out.append(F.Finding(
+        _add(F.Finding(
             "cert.keymatch", "Certificate/private-key match", F.PASS, F.SCOPE_LOCAL,
             ["public key embedded in the certificate matches this private key",
              f"public-key SHA-256: {key_fp}"],
             target=cert_path))
     else:
         ev = [f"certificate public-key SHA-256: {cert_fp}", f"private key public SHA-256: {key_fp}"]
-        out.append(F.Finding(
+        _add(F.Finding(
             "cert.keymatch", "Certificate/private-key match", F.FAIL, F.SCOPE_LOCAL,
             ev + ["the private key does NOT belong to this certificate"],
             recommendation="The server may be serving one certificate while holding the "

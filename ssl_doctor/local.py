@@ -15,7 +15,7 @@ import ssl
 import subprocess
 import sys
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from . import findings as F
 
@@ -211,7 +211,8 @@ def check_schannel_events(limit: int = 10) -> F.Finding:
                             "TLS failures observed by Windows applications.")
 
 
-def run_local_for_remote(facts: dict, cert_path: Optional[str] = None) -> List[F.Finding]:
+def run_local_for_remote(facts: dict, cert_path: Optional[str] = None,
+                         emit: Optional[Callable[[F.Finding], None]] = None) -> List[F.Finding]:
     """Client-machine checks in the context of a remote scan's `facts`.
 
     The expected root comes from path building over the presented chain
@@ -237,7 +238,7 @@ def run_local_for_remote(facts: dict, cert_path: Optional[str] = None) -> List[F
     try:
         return run_local_diagnostics(server_time_epoch=facts.get("server_time_epoch"),
                                      chain_issuer_names=issuers, cert_path=cert_path,
-                                     anchor_unknown=anchor_unknown)
+                                     anchor_unknown=anchor_unknown, emit=emit)
     finally:
         if tmp_leaf:
             os.unlink(tmp_leaf)
@@ -246,15 +247,23 @@ def run_local_for_remote(facts: dict, cert_path: Optional[str] = None) -> List[F
 def run_local_diagnostics(server_time_epoch: Optional[float] = None,
                           chain_issuer_names: Optional[List[str]] = None,
                           cert_path: Optional[str] = None,
-                          anchor_unknown: str = "") -> List[F.Finding]:
+                          anchor_unknown: str = "",
+                          emit: Optional[Callable[[F.Finding], None]] = None) -> List[F.Finding]:
     out: List[F.Finding] = []
-    out.extend(check_os_and_clock(server_time_epoch))
-    out.append(check_proxy_config())
-    out.append(check_cert_stores())
+    def _add(f: F.Finding) -> F.Finding:
+        list.append(out, f)
+        if emit is not None:
+            emit(f)
+        return f
+
+    for _f in check_os_and_clock(server_time_epoch):
+        _add(_f)
+    _add(check_proxy_config())
+    _add(check_cert_stores())
     root_check = check_issuer_in_windows_root(chain_issuer_names or [], anchor_unknown)
     if root_check:
-        out.append(root_check)
+        _add(root_check)
     if cert_path:
-        out.append(check_certutil_verify(cert_path))
-    out.append(check_schannel_events())
+        _add(check_certutil_verify(cert_path))
+    _add(check_schannel_events())
     return out

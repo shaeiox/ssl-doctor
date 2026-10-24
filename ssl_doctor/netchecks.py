@@ -12,7 +12,7 @@ import ipaddress
 import socket
 import ssl
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from . import __version__, certs, findings as F
 
@@ -730,46 +730,57 @@ def export_facts(facts: Dict) -> Dict:
 # ---------------------------------------------------------------- orchestrator
 
 def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None,
-                           timeout: float = 8.0) -> Tuple[List[F.Finding], Dict]:
+                           timeout: float = 8.0,
+                           emit: Optional[Callable[[F.Finding], None]] = None
+                           ) -> Tuple[List[F.Finding], Dict]:
     """Run the full remote check suite against one endpoint.
 
     Returns (findings, facts).  `facts` carries structured values the CLI
     session stores for later correlation/clock analysis.
+
+    When `emit` is provided, each finding is delivered to it as it is produced,
+    in addition to being returned (for live CLI streaming).
     """
     out: List[F.Finding] = []
     facts: Dict = {"host": host, "port": port}
     server_name = sni or (None if _is_ip(host) else host)
     facts["sni"] = server_name
 
+    def _add(f: F.Finding) -> F.Finding:
+        list.append(out, f)
+        if emit is not None:
+            emit(f)
+        return f
+
     dns_f, ips = check_dns(host, timeout)
-    out.append(dns_f)
+    _add(dns_f)
     facts["ips"] = ips
     if not ips and not _is_ip(host):
-        out.append(F.Finding(
+        _add(F.Finding(
             "tls.handshake", f"TLS handshake with {host}:{port}", F.NOT_TESTED,
             F.SCOPE_REMOTE_NET, ["skipped: DNS failure"], target=f"{host}:{port}"))
         return out, facts
 
     tcp_f = check_tcp(host, port, timeout, ip=ips[0] if ips else None)
-    out.append(tcp_f)
+    _add(tcp_f)
     if tcp_f.status != F.PASS:
-        out.append(F.Finding(
+        _add(F.Finding(
             "tls.handshake", f"TLS handshake with {host}:{port}", F.NOT_TESTED,
             F.SCOPE_REMOTE_NET, ["skipped: TCP failure"], target=f"{host}:{port}"))
         return out, facts
 
     hs_f, hs_facts = check_tls_basic(host, port, server_name, timeout)
-    out.append(hs_f)
+    _add(hs_f)
     facts.update(hs_facts)
     if hs_f.status == F.FAIL:
-        out.append(check_protocol_matrix(host, port, server_name, timeout))
+        _add(check_protocol_matrix(host, port, server_name, timeout))
         return out, facts
 
     # Leaf self-checks over the network-presented cert.
     leaf = facts.get("cert")
     if leaf:
         if leaf.is_expired():
-            out.append(F.Finding(
+            _add(F.Finding(
                 "tls.certvalid", "Presented certificate validity", F.FAIL,
                 F.SCOPE_REMOTE_NET,
                 [f"server presents an EXPIRED certificate "
@@ -777,7 +788,7 @@ def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None
                 recommendation="Renew/redeploy the certificate on the server.",
                 target=f"{host}:{port}"))
         elif leaf.not_yet_valid():
-            out.append(F.Finding(
+            _add(F.Finding(
                 "tls.certvalid", "Presented certificate validity", F.FAIL,
                 F.SCOPE_REMOTE_NET,
                 [f"server presents a certificate not valid until "
@@ -785,13 +796,13 @@ def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None
                 recommendation="Check issuance and the client clock.",
                 target=f"{host}:{port}"))
         elif (leaf.days_to_expiry() or 365) <= 30:
-            out.append(F.Finding(
+            _add(F.Finding(
                 "tls.certvalid", "Presented certificate validity", F.WARNING,
                 F.SCOPE_REMOTE_NET,
                 [f"certificate expires in {leaf.days_to_expiry()} days"],
                 target=f"{host}:{port}"))
         else:
-            out.append(F.Finding(
+            _add(F.Finding(
                 "tls.certvalid", "Presented certificate validity", F.PASS,
                 F.SCOPE_REMOTE_NET,
                 [f"valid until {leaf.not_after:%Y-%m-%d} "
@@ -800,7 +811,7 @@ def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None
 
         if server_name:
             ok, names = leaf.matches_hostname(server_name)
-            out.append(F.Finding(
+            _add(F.Finding(
                 "tls.hostname", f"Hostname match for '{server_name}'",
                 F.PASS if ok else F.FAIL, F.SCOPE_REMOTE_NET,
                 ["certificate covers the name" if ok else
@@ -813,17 +824,17 @@ def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None
                 "this hostname.",
                 target=f"{host}:{port}"))
 
-        out.append(check_presented_chain(facts, host, port))
+        _add(check_presented_chain(facts, host, port))
 
-    out.append(check_tls_validation(host, port, server_name, timeout))
-    out.append(check_tls_rootonly_validation(host, port, server_name, timeout))
-    out.append(check_protocol_matrix(host, port, server_name, timeout))
-    out.append(check_sni_difference(host, port, server_name or host, timeout))
-    out.append(check_multi_ip(host, port, ips, timeout))
-    out.append(check_weak_ciphers(host, port, server_name, timeout))
+    _add(check_tls_validation(host, port, server_name, timeout))
+    _add(check_tls_rootonly_validation(host, port, server_name, timeout))
+    _add(check_protocol_matrix(host, port, server_name, timeout))
+    _add(check_sni_difference(host, port, server_name or host, timeout))
+    _add(check_multi_ip(host, port, ips, timeout))
+    _add(check_weak_ciphers(host, port, server_name, timeout))
     https_f, https_facts = check_https(host, port, server_name, timeout)
     facts.update(https_facts)
     facts["server_time_epoch"] = (
         facts["server_time"].timestamp() if facts.get("server_time") else None)
-    out.append(https_f)
+    _add(https_f)
     return out, facts
