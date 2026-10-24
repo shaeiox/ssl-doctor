@@ -23,7 +23,7 @@ import shutil
 import stat
 import subprocess
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from . import findings as F
 
@@ -468,19 +468,27 @@ class ServerSession:
                              F.SCOPE_SERVER, ["not connected; run /server connect first"])
         return None
 
-    def overview(self) -> List[F.Finding]:
+    def overview(self, emit: Optional[Callable[[F.Finding], None]] = None) -> List[F.Finding]:
         if (err := self._need_conn()):
+            if emit is not None:
+                emit(err)
             return [err]
-        rc, so, se, fatal = self.run(
-            "uname -a; echo ---; cat /etc/os-release 2>/dev/null | head -n 3; echo ---; id")
         if fatal or rc != 0:
-            return [F.Finding("srv.os", "Server OS and identity", F.FAIL, F.SCOPE_SERVER,
-                              [fatal or (se.strip() or f"rc={rc}")])]
-        return [F.Finding("srv.os", "Server OS and identity", F.PASS, F.SCOPE_SERVER,
-                          [ln.rstrip() for ln in so.splitlines() if ln.strip()])]
+            _f = F.Finding("srv.os", "Server OS and identity", F.FAIL, F.SCOPE_SERVER,
+                           [fatal or (se.strip() or f"rc={rc}")])
+            if emit is not None:
+                emit(_f)
+            return [_f]
+        _f = F.Finding("srv.os", "Server OS and identity", F.PASS, F.SCOPE_SERVER,
+                       [ln.rstrip() for ln in so.splitlines() if ln.strip()])
+        if emit is not None:
+            emit(_f)
+        return [_f]
 
-    def webserver_detection(self) -> List[F.Finding]:
+    def webserver_detection(self, emit: Optional[Callable[[F.Finding], None]] = None) -> List[F.Finding]:
         if (err := self._need_conn()):
+            if emit is not None:
+                emit(err)
             return [err]
         rc, so, se, fatal = self.run(
             "for b in nginx apache2 httpd; do "
@@ -489,32 +497,54 @@ class ServerSession:
             "done; "
             "command -v openssl >/dev/null 2>&1 && echo \"openssl: $(openssl version)\"")
         if fatal:
-            return [F.Finding("srv.web", "Web server detection", F.FAIL, F.SCOPE_SERVER,
-                              [fatal])]
+            _f = F.Finding("srv.web", "Web server detection", F.FAIL, F.SCOPE_SERVER,
+                           [fatal])
+            if emit is not None:
+                emit(_f)
+            return [_f]
         lines = [ln.strip() for ln in (so + se).splitlines() if ln.strip()]
         if not lines:
-            return [F.Finding(
+            _f = F.Finding(
                 "srv.web", "Web server detection", F.WARNING, F.SCOPE_SERVER,
                 ["no nginx/apache binaries found in the PATH of this account"],
                 recommendation="Confirm which service terminates TLS (load balancer? "
-                               "IIS? another host?) and re-target the checks.")]
-        return [F.Finding("srv.web", "Web server detection", F.PASS, F.SCOPE_SERVER,
-                          lines)]
+                               "IIS? another host?) and re-target the checks.")
+            if emit is not None:
+                emit(_f)
+            return [_f]
+        _f = F.Finding("srv.web", "Web server detection", F.PASS, F.SCOPE_SERVER,
+                       lines)
+        if emit is not None:
+            emit(_f)
+        return [_f]
 
-    def scan_cert(self, cert_path: str, key_path: str = "") -> List[F.Finding]:
+    def scan_cert(self, cert_path: str, key_path: str = "",
+                  emit: Optional[Callable[[F.Finding], None]] = None) -> List[F.Finding]:
         """Inspect a certificate (and optionally key pairing) ON the server."""
         if (err := self._need_conn()):
+            if emit is not None:
+                emit(err)
             return [err]
         out: List[F.Finding] = []
+
+        def _add(f: F.Finding) -> F.Finding:
+            list.append(out, f)
+            if emit is not None:
+                emit(f)
+            return f
+
         q = shlex.quote
         rc, so, se, fatal = self.run(
             f"openssl x509 -noout -subject -issuer -dates -serial -fingerprint -sha256 "
             f"-ext subjectAltName -in {q(cert_path)} 2>&1; echo rc=$?")
         if fatal:
-            return [F.Finding("srv.cert", f"Server certificate {cert_path}", F.FAIL,
-                              F.SCOPE_SERVER, [fatal], target=cert_path)]
+            _f = F.Finding("srv.cert", f"Server certificate {cert_path}", F.FAIL,
+                           F.SCOPE_SERVER, [fatal], target=cert_path)
+            if emit is not None:
+                emit(_f)
+            return [_f]
         if "rc=0" not in so:
-            out.append(F.Finding(
+            _add(F.Finding(
                 "srv.cert", f"Server certificate {cert_path}", F.FAIL, F.SCOPE_SERVER,
                 [ln for ln in so.splitlines() if ln.strip()][-4:] or ["unreadable"],
                 recommendation="Check the path and read permissions for the service "
@@ -529,7 +559,7 @@ class ServerSession:
             elif ln and not ln.startswith("rc="):
                 ev.append(ln)
         self.last_remote_cert_sha256 = fp
-        out.append(F.Finding(
+        _add(F.Finding(
             "srv.cert", f"Server certificate {cert_path}", F.PASS, F.SCOPE_SERVER,
             ev + ([f"sha256: {fp}"] if fp else []), target=cert_path))
 
@@ -546,21 +576,21 @@ class ServerSession:
                 elif ln.startswith("key="):
                     key_h = ln[4:].strip()
             if not cert_h or not key_h:
-                out.append(F.Finding(
+                _add(F.Finding(
                     "srv.keymatch", "Certificate/key pairing on server", F.WARNING,
                     F.SCOPE_SERVER,
                     ["could not derive public key fingerprints (permissions or "
                      "unsupported key type)"],
                     detail=se2.strip()[:200], target=cert_path))
             elif cert_h == key_h:
-                out.append(F.Finding(
+                _add(F.Finding(
                     "srv.keymatch", "Certificate/key pairing on server", F.PASS,
                     F.SCOPE_SERVER,
                     ["configured certificate and private key match",
                      f"public-key sha256: {cert_h}"],
                     target=cert_path))
             else:
-                out.append(F.Finding(
+                _add(F.Finding(
                     "srv.keymatch", "Certificate/key pairing on server", F.FAIL,
                     F.SCOPE_SERVER,
                     ["the configured private key does NOT match the configured "
@@ -599,9 +629,11 @@ class ServerSession:
                 target=p))
         return out
 
-    def tls_config_scan(self) -> List[F.Finding]:
+    def tls_config_scan(self, emit: Optional[Callable[[F.Finding], None]] = None) -> List[F.Finding]:
         """Find configured certs/vhosts. Read-only; degrades without privileges."""
         if (err := self._need_conn()):
+            if emit is not None:
+                emit(err)
             return [err]
         rc, so, se, fatal = self.run(
             f"({self.nginx_cmd} -T 2>/dev/null | grep -iE 'server_name|listen|ssl_certificate' "
@@ -611,22 +643,32 @@ class ServerSession:
             "/etc/apache2/sites-enabled /etc/httpd/conf.d 2>/dev/null | head -n 30")
         lines = [ln.rstrip()[:200] for ln in so.splitlines() if ln.strip()]
         if fatal:
-            return [F.Finding("srv.tlsconf", "TLS virtual host configuration", F.FAIL,
-                              F.SCOPE_SERVER, [fatal])]
+            _f = F.Finding("srv.tlsconf", "TLS virtual host configuration", F.FAIL,
+                           F.SCOPE_SERVER, [fatal])
+            if emit is not None:
+                emit(_f)
+            return [_f]
         if not lines:
-            return [F.Finding(
+            _f = F.Finding(
                 "srv.tlsconf", "TLS virtual host configuration", F.NOT_TESTED,
                 F.SCOPE_SERVER,
                 ["no readable TLS configuration found for this account"],
                 recommendation="Re-run with an account that can read the web server "
                                "configuration, or supply cert/key paths directly with "
-                               "/server cert <cert> [key].")]
+                               "/server cert <cert> [key].")
+            if emit is not None:
+                emit(_f)
+            return [_f]
         finding = F.Finding("srv.tlsconf", "TLS virtual host configuration", F.PASS,
                             F.SCOPE_SERVER, lines)
+        if emit is not None:
+            emit(finding)
         return [finding]
 
-    def log_scan(self) -> List[F.Finding]:
+    def log_scan(self, emit: Optional[Callable[[F.Finding], None]] = None) -> List[F.Finding]:
         if (err := self._need_conn()):
+            if emit is not None:
+                emit(err)
             return [err]
         rc, so, se, fatal = self.run(
             "for f in /var/log/nginx/error.log /var/log/apache2/error.log "
@@ -635,28 +677,40 @@ class ServerSession:
             "grep -iE 'ssl|certificate' $f 2>/dev/null | tail -n 8; fi; done")
         lines = [ln.rstrip()[:200] for ln in so.splitlines() if ln.strip()]
         if fatal:
-            return [F.Finding("srv.logs", "TLS-related service log entries", F.FAIL,
-                              F.SCOPE_SERVER, [fatal])]
+            _f = F.Finding("srv.logs", "TLS-related service log entries", F.FAIL,
+                           F.SCOPE_SERVER, [fatal])
+            if emit is not None:
+                emit(_f)
+            return [_f]
         if not lines:
-            return [F.Finding("srv.logs", "TLS-related service log entries",
-                              F.NOT_TESTED, F.SCOPE_SERVER,
-                              ["no readable TLS log entries found for this account"],
-                              recommendation="Re-run with an account that can read the "
-                                             "web server error logs.")]
-        return [F.Finding("srv.logs", "TLS-related service log entries", F.WARNING,
-                          F.SCOPE_SERVER, lines)]
+            _f = F.Finding("srv.logs", "TLS-related service log entries",
+                           F.NOT_TESTED, F.SCOPE_SERVER,
+                           ["no readable TLS log entries found for this account"],
+                           recommendation="Re-run with an account that can read the "
+                                          "web server error logs.")
+            if emit is not None:
+                emit(_f)
+            return [_f]
+        _f = F.Finding("srv.logs", "TLS-related service log entries", F.WARNING,
+                       F.SCOPE_SERVER, lines)
+        if emit is not None:
+            emit(_f)
+        return [_f]
 
-    def nginx_scan(self, domain: str, port: int = 443) -> List[F.Finding]:
-        """Deep read of the nginx SSL configuration, focused on `domain`:`port`.
-
-        Gathers config read-only (``nginx -T`` when permitted, otherwise the
-        readable conf files), parses it locally, picks the server block that
-        answers for the domain, and verifies the referenced certificate/key.
-        """
+    def nginx_scan(self, domain: str, port: int = 443,
+                   emit: Optional[Callable[[F.Finding], None]] = None) -> List[F.Finding]:
         if (err := self._need_conn()):
+            if emit is not None:
+                emit(err)
             return [err]
         out: List[F.Finding] = []
         sources = ""
+
+        def _add(f: F.Finding) -> F.Finding:
+            list.append(out, f)
+            if emit is not None:
+                emit(f)
+            return f
         # 1. try full dump (needs privileged account on most systems)
         rc, so, se, fatal = self.run(f"{self.nginx_cmd} -T 2>/dev/null")
         if not fatal and rc == 0 and so.strip():
@@ -670,18 +724,24 @@ class ServerSession:
                 "/usr/local/etc/nginx/nginx.conf; do "
                 "if [ -r \"$f\" ]; then echo \"--- FILE: $f\"; cat \"$f\"; fi; done")
             if fatal2:
-                return [F.Finding("nginx.conf", "Nginx TLS configuration", F.FAIL,
-                                  F.SCOPE_SERVER, [fatal2])]
+                _f = F.Finding("nginx.conf", "Nginx TLS configuration", F.FAIL,
+                               F.SCOPE_SERVER, [fatal2])
+                if emit is not None:
+                    emit(_f)
+                return [_f]
             sources, used = so2, "readable files under /etc/nginx (and local conf dirs)"
         if not sources.strip() or "server" not in sources:
-            return [F.Finding(
+            _f = F.Finding(
                 "nginx.conf", "Nginx TLS configuration", F.NOT_TESTED, F.SCOPE_SERVER,
                 ["no readable nginx configuration for account "
                  f"'{self.cfg.username}' (nginx -T typically needs elevated rights)"],
                 recommendation="Re-run with an account allowed to read the nginx "
                                "configuration, or use /server cert <path> [key] with "
-                               "the certificate paths directly.")]
-        out.append(F.Finding("nginx.conf", "Nginx TLS configuration", F.PASS,
+                               "the certificate paths directly.")
+            if emit is not None:
+                emit(_f)
+            return [_f]
+        _add(F.Finding("nginx.conf", "Nginx TLS configuration", F.PASS,
                              F.SCOPE_SERVER, [f"configuration source: {used}"]))
 
         nodes = _parse_nginx_nodes(sources)
@@ -692,7 +752,7 @@ class ServerSession:
             listens = dirs.get("listen", [])
             if any("ssl" in a for a in listens) or "443" in _listen_ports(listens):
                 ssl_blocks.append(dirs)
-        out.append(F.Finding(
+        _add(F.Finding(
             "nginx.blocks", "Nginx server blocks", F.PASS, F.SCOPE_SERVER,
             [f"server blocks total: {len(blocks)}, TLS-enabled: {len(ssl_blocks)}",
              *[f"listen {' / '.join(' '.join(a) for a in d.get('listen', ['-']))} · "
@@ -701,7 +761,7 @@ class ServerSession:
 
         match, how, notes = _match_nginx_server(blocks, domain, port)
         if not match:
-            out.append(F.Finding(
+            _add(F.Finding(
                 "nginx.domain", f"Nginx vhost for '{domain}'", F.WARNING,
                 F.SCOPE_SERVER, [f"no server block found: {how}"],
                 recommendation="TLS may be terminated elsewhere (load balancer, "
@@ -720,7 +780,7 @@ class ServerSession:
         if "fallback" in how:
             ev.append("nginx answered with a FALLBACK server block - the domain has "
                       "no dedicated vhost; clients may receive the wrong certificate")
-        out.append(F.Finding(
+        _add(F.Finding(
             "nginx.domain", f"Nginx vhost for '{domain}'", status, F.SCOPE_SERVER, ev,
             recommendation="" if status == F.PASS else
             "Create/align a server block whose server_name covers this domain.",
@@ -733,7 +793,7 @@ class ServerSession:
             legacy = [p for p in prots if p.rstrip("v").rstrip(";") in ("TLSv1", "TLSv1.0", "TLSv1.1")
                       or p in ("TLSv1", "TLSv1.1", "SSLv2", "SSLv3")]
             st = F.WARNING if legacy else F.PASS
-            out.append(F.Finding(
+            _add(F.Finding(
                 "nginx.protocols", "Nginx ssl_protocols", st, F.SCOPE_SERVER,
                 [f"ssl_protocols {' '.join(prots)}"] +
                 ([f"deprecated: {', '.join(legacy)}"] if legacy else
@@ -742,7 +802,7 @@ class ServerSession:
                                "must be supported." if legacy else "",
                 target=self.cfg.host))
         else:
-            out.append(F.Finding(
+            _add(F.Finding(
                 "nginx.protocols", "Nginx ssl_protocols", F.WARNING, F.SCOPE_SERVER,
                 ["no ssl_protocols directive in the matched block - nginx/OS defaults "
                  "apply and vary between builds"],
@@ -750,7 +810,7 @@ class ServerSession:
                        "surprises after upgrades.",
                 target=self.cfg.host))
         ciphers = matched_dirs.get("ssl_ciphers", [])
-        out.append(F.Finding(
+        _add(F.Finding(
             "nginx.ciphers", "Nginx ssl_ciphers", F.PASS if ciphers else F.NOT_TESTED,
             F.SCOPE_SERVER,
             [f"ssl_ciphers {' '.join(ciphers[0])}" if ciphers else
@@ -769,7 +829,7 @@ class ServerSession:
         cert_paths = [a[0] for a in matched_dirs.get("ssl_certificate", []) if a]
         key_paths = [a[0] for a in matched_dirs.get("ssl_certificate_key", []) if a]
         if cert_paths:
-            out.append(F.Finding(
+            _add(F.Finding(
                 "nginx.certref", "ssl_certificate in matched vhost", F.PASS,
                 F.SCOPE_SERVER,
                 [f"ssl_certificate {cert_paths[0]}"
@@ -779,7 +839,7 @@ class ServerSession:
                     else "")],
                 target=self.cfg.host))
         if not cert_paths:
-            out.append(F.Finding(
+            _add(F.Finding(
                 "nginx.certref", "ssl_certificate in matched vhost", F.WARNING,
                 F.SCOPE_SERVER,
                 ["the matched server block has no ssl_certificate directive"],
@@ -789,9 +849,9 @@ class ServerSession:
             return out
         cert_path = cert_paths[0]
         key_path = key_paths[0] if key_paths else ""
-        out.append(self._chainfile_finding(cert_path))
+        _add(self._chainfile_finding(cert_path))
         # deep cert + key verification (also populates last_remote_cert_sha256)
-        out.extend(self.scan_cert(cert_path, key_path))
+        out.extend(self.scan_cert(cert_path, key_path, emit=emit))
         self.nginx_cert_path, self.nginx_key_path = cert_path, key_path
         return out
 
@@ -830,22 +890,32 @@ class ServerSession:
         return F.Finding("nginx.chainfile", title, F.WARNING, F.SCOPE_SERVER, ev,
                          recommendation=rec, target=cert_path)
 
-    def compare_configured_vs_presented(self, presented_sha256: str) -> F.Finding:
+    def compare_configured_vs_presented(self, presented_sha256: str,
+                                       emit: Optional[Callable[[F.Finding], None]] = None
+                                       ) -> F.Finding:
         """Compare network-presented cert fingerprint with the configured file."""
         if (err := self._need_conn()):
+            if emit is not None:
+                emit(err)
             return err
         if not self.last_remote_cert_sha256:
-            return F.Finding(
+            _f = F.Finding(
                 "srv.compare", "Configured vs presented certificate", F.NOT_TESTED,
                 F.SCOPE_SERVER,
                 ["no server certificate scanned yet - run /server cert <path> first"])
+            if emit is not None:
+                emit(_f)
+            return _f
         if not presented_sha256:
-            return F.Finding(
+            _f = F.Finding(
                 "srv.compare", "Configured vs presented certificate", F.NOT_TESTED,
                 F.SCOPE_SERVER,
                 ["no network TLS check has run yet - run /tls <host> [port] first"])
+            if emit is not None:
+                emit(_f)
+            return _f
         same = self.last_remote_cert_sha256 == presented_sha256.lower().replace(":", "")
-        return F.Finding(
+        _f = F.Finding(
             "srv.compare", "Configured vs presented certificate",
             F.PASS if same else F.FAIL, F.SCOPE_SERVER,
             ([f"the certificate file on the server matches what clients receive",
@@ -858,6 +928,9 @@ class ServerSession:
             "Possible causes: the service was not reloaded after a cert change, a "
             "different vhost/SNI answers, or a load balancer terminates TLS elsewhere.",
             target=self.cfg.host)
+        if emit is not None:
+            emit(_f)
+        return _f
 
 
 # ---------------------------------------------------------------- local session

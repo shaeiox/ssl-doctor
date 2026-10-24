@@ -135,8 +135,17 @@ class SSLDoctorCLI:
         self.remote_facts: Dict = {}
         self._diagnosis = None
         self._running = True
+        self._BATCH_MODE = False
 
-    # ---------------- helpers ----------------
+    @property
+    def _STREAM_OUTPUT(self) -> bool:
+        is_tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
+        return is_tty and not getattr(self, "_BATCH_MODE", False)
+
+    @property
+    def _batch_mode(self) -> bool:
+        return getattr(self, "_BATCH_MODE", False)
+
     def out(self, text: str = "") -> None:
         print(text)
 
@@ -163,6 +172,60 @@ class SSLDoctorCLI:
                 "network_timeout": self.net_timeout,
                 "command_timeout": self.cmd_timeout,
                 "ssh_connected": bool(self.server and self.server.connected)}
+
+    def _emit_finding(self, f: F.Finding) -> None:
+        print_finding(f)
+        try:
+            sys.stdout.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _print_result(self, result) -> None:
+        if result is None:
+            return
+        if isinstance(result, tuple):
+            findings = result[0]
+            if isinstance(findings, list):
+                print_findings(findings)
+            elif findings is not None:
+                print_finding(findings)
+            return
+        if isinstance(result, list):
+            print_findings(result)
+        else:
+            print_finding(result)
+
+    def _run_phase(self, text: str, fn, *args, **kwargs):
+        """Run a check phase, streaming findings on tty/interactive mode."""
+        if self._STREAM_OUTPUT:
+            print(paint(f"… {text}", C.GRAY))
+            try:
+                sys.stdout.flush()
+            except Exception:  # noqa: BLE001
+                pass
+            emit = self._emit_finding
+            # Try passing emit through; fall back to manual emission.
+            try:
+                result = fn(*args, emit=emit, **kwargs)
+            except TypeError:
+                result = fn(*args, **kwargs)
+                self._emit_result(result)
+            return result
+        with Spinner(text):
+            result = fn(*args, **kwargs)
+        self._print_result(result)
+        return result
+
+    def _emit_result(self, result) -> None:
+        if result is None:
+            return
+        if isinstance(result, tuple):
+            result = result[0]
+        if isinstance(result, list):
+            for f in result:
+                self._emit_finding(f)
+        else:
+            self._emit_finding(result)
 
     # ---------------- command dispatch ----------------
     def execute(self, line: str) -> bool:
@@ -274,10 +337,9 @@ class SSLDoctorCLI:
                 return
             path = os.path.expanduser(rest[0])
             hostname = rest[1] if len(rest) > 1 else ""
-            with Spinner(f"inspecting {os.path.basename(path)}"):
-                items = certmod.inspect_cert_file(path, hostname)
+            items = self._run_phase(f"inspecting {os.path.basename(path)}",
+                                    certmod.inspect_cert_file, path, hostname)
             self.store.extend(items)
-            print_findings(items)
             return
         if args[0] == "match":
             if len(args) < 3:
@@ -285,10 +347,9 @@ class SSLDoctorCLI:
                 return
             cpath, kpath = (os.path.expanduser(a) for a in args[1:3])
             self.note("key material is never displayed; only digests are compared")
-            with Spinner("comparing public keys"):
-                items = certmod.match_cert_key(cpath, kpath)
+            items = self._run_phase("comparing public keys",
+                                    certmod.match_cert_key, cpath, kpath)
             self.store.extend(items)
-            print_findings(items)
             return
         self.error("usage: /cert inspect <file> [hostname] | /cert match <cert> <key>")
 
@@ -302,16 +363,21 @@ class SSLDoctorCLI:
 
     def _gather_remote(self, host: str, port: int, sni: Optional[str],
                       profile: bool = True) -> List[F.Finding]:
-        with Spinner(f"running remote TLS diagnostics against {host}:{port}"):
-            items, facts = netchecks.run_remote_diagnostics(
-                host, port, sni=sni, timeout=self.net_timeout)
+        text = f"running remote TLS diagnostics against {host}:{port}"
+        result = self._run_phase(text, netchecks.run_remote_diagnostics,
+                                 host, port, sni=sni, timeout=self.net_timeout)
+        items, facts = result
         if profile and facts.get("cert"):
-            items.insert(0, netchecks.domain_profile(
-                host, port, facts.get("ips", []), facts))
+            prof = netchecks.domain_profile(
+                host, port, facts.get("ips", []), facts)
+            items.insert(0, prof)
+            if self._STREAM_OUTPUT:
+                self._emit_finding(prof)
+            else:
+                print_finding(prof)
         self.store.extend(items)
         self.remote_facts = facts
         self._diagnosis = None
-        print_findings(items)
         return items
 
     def cmd_tls(self, args: List[str]) -> None:
@@ -334,10 +400,9 @@ class SSLDoctorCLI:
     # ---------------- /local ----------------
     def cmd_local(self, args: List[str]) -> None:
         cert_path = args[0] if args else None
-        with Spinner("collecting local system information"):
-            items = localmod.run_local_for_remote(self.remote_facts, cert_path)
+        items = self._run_phase("collecting local system information",
+                                localmod.run_local_for_remote, self.remote_facts, cert_path)
         self.store.extend(items)
-        print_findings(items)
 
     # ---------------- /scan (guided) ----------------
     def cmd_scan(self, args: List[str]) -> None:
@@ -408,23 +473,46 @@ class SSLDoctorCLI:
             return
         srv = self.server
         domain = srv.cfg.tls_host or host
-        with Spinner("reading server identity (read-only)"):
-            items = srv.overview() + srv.webserver_detection()
+        if self._STREAM_OUTPUT:
+            print(paint("… reading server identity (read-only)", C.GRAY))
+            sys.stdout.flush()
+            items = srv.overview(emit=self._emit_finding) + srv.webserver_detection(emit=self._emit_finding)
+        else:
+            with Spinner("reading server identity (read-only)"):
+                items = srv.overview() + srv.webserver_detection()
+            print_findings(items)
         self.store.extend(items)
-        print_findings(items)
-        with Spinner(f"examining nginx SSL configuration for '{domain}:{port}'"):
-            items = srv.nginx_scan(domain, port)
+
+        if self._STREAM_OUTPUT:
+            print(paint(f"… examining nginx SSL configuration for '{domain}:{port}'", C.GRAY))
+            sys.stdout.flush()
+            items = srv.nginx_scan(domain, port, emit=self._emit_finding)
+        else:
+            with Spinner(f"examining nginx SSL configuration for '{domain}:{port}'"):
+                items = srv.nginx_scan(domain, port)
+            print_findings(items)
         self.store.extend(items)
-        print_findings(items)
+
         presented = ""
         cert = self.remote_facts.get("cert")
         if cert:
             presented = cert.sha256
-        items = [srv.compare_configured_vs_presented(presented)]
-        with Spinner("scanning TLS service logs (read-only)"):
-            items += srv.log_scan()
+        cmp_f = srv.compare_configured_vs_presented(presented, emit=self._emit_finding if self._STREAM_OUTPUT else None)
+        if not self._STREAM_OUTPUT:
+            # buffered: emit happens inside compare only if emit passed; we passed None, so print here
+            print_finding(cmp_f)
+        items = [cmp_f]
+
+        if self._STREAM_OUTPUT:
+            print(paint("… scanning TLS service logs (read-only)", C.GRAY))
+            sys.stdout.flush()
+            log_items = srv.log_scan(emit=self._emit_finding)
+        else:
+            with Spinner("scanning TLS service logs (read-only)"):
+                log_items = srv.log_scan()
+            print_findings(log_items)
+        items = items + log_items
         self.store.extend(items)
-        print_findings(items)
 
     # ---------------- /server ----------------
     def cmd_server(self, args: List[str]) -> None:
@@ -454,8 +542,13 @@ class SSLDoctorCLI:
             return
         srv = self.server
         if sub == "overview":
-            with Spinner("querying server"):
-                items = srv.overview() + srv.webserver_detection()
+            if self._STREAM_OUTPUT:
+                print(paint("… querying server", C.GRAY))
+                sys.stdout.flush()
+                items = srv.overview(emit=self._emit_finding) + srv.webserver_detection(emit=self._emit_finding)
+            else:
+                with Spinner("querying server"):
+                    items = srv.overview() + srv.webserver_detection()
         elif sub == "nginx":
             domain, port = srv.cfg.tls_host, srv.cfg.tls_port
             if len(args) > 1:
@@ -465,8 +558,13 @@ class SSLDoctorCLI:
                     return
                 if ":" not in args[1].split("//")[-1]:
                     port = srv.cfg.tls_port      # bare domain: session's TLS port
-            with Spinner(f"examining nginx SSL configuration for '{domain}:{port}'"):
-                items = srv.nginx_scan(domain, port)
+            if self._STREAM_OUTPUT:
+                print(paint(f"… examining nginx SSL configuration for '{domain}:{port}'", C.GRAY))
+                sys.stdout.flush()
+                items = srv.nginx_scan(domain, port, emit=self._emit_finding)
+            else:
+                with Spinner(f"examining nginx SSL configuration for '{domain}:{port}'"):
+                    items = srv.nginx_scan(domain, port)
         elif sub == "cert":
             if len(args) < 2:
                 self.error("usage: /server cert <remote-cert-path> [remote-key-path]")
@@ -474,30 +572,53 @@ class SSLDoctorCLI:
             cert_path = args[1]
             key_path = args[2] if len(args) > 2 else ""
             self.note("key material stays on the server; only digests are compared")
-            with Spinner(f"inspecting {cert_path} on the server"):
-                items = srv.scan_cert(cert_path, key_path)
+            if self._STREAM_OUTPUT:
+                print(paint(f"… inspecting {cert_path} on the server", C.GRAY))
+                sys.stdout.flush()
+                items = srv.scan_cert(cert_path, key_path, emit=self._emit_finding)
                 paths = [cert_path] + ([key_path] if key_path else [])
-                items += srv.file_permissions(paths)
+                perm_items = srv.file_permissions(paths)
+                for f in perm_items:
+                    self._emit_finding(f)
+                items = items + perm_items
+            else:
+                with Spinner(f"inspecting {cert_path} on the server"):
+                    items = srv.scan_cert(cert_path, key_path)
+                    paths = [cert_path] + ([key_path] if key_path else [])
+                    items += srv.file_permissions(paths)
         elif sub == "config":
-            with Spinner("reading TLS/vhost configuration (read-only)"):
-                items = srv.tls_config_scan()
+            if self._STREAM_OUTPUT:
+                print(paint("… reading TLS/vhost configuration (read-only)", C.GRAY))
+                sys.stdout.flush()
+                items = srv.tls_config_scan(emit=self._emit_finding)
+            else:
+                with Spinner("reading TLS/vhost configuration (read-only)"):
+                    items = srv.tls_config_scan()
         elif sub == "logs":
-            with Spinner("scanning service logs (read-only)"):
-                items = srv.log_scan()
+            if self._STREAM_OUTPUT:
+                print(paint("… scanning service logs (read-only)", C.GRAY))
+                sys.stdout.flush()
+                items = srv.log_scan(emit=self._emit_finding)
+            else:
+                with Spinner("scanning service logs (read-only)"):
+                    items = srv.log_scan()
         elif sub == "compare":
             presented = ""
             cert = self.remote_facts.get("cert")
             if cert:
                 presented = cert.sha256
-            items = [srv.compare_configured_vs_presented(presented)]
+            cmp_f = srv.compare_configured_vs_presented(
+                presented, emit=self._emit_finding if self._STREAM_OUTPUT else None)
+            if not self._STREAM_OUTPUT:
+                print_finding(cmp_f)
+            items = [cmp_f]
         else:
             self.error("usage: /server connect|status|overview|nginx [domain]|cert|"
                        "config|logs|compare|disconnect")
             return
         self.store.extend(items)
-        print_findings(items)
-
-    def _server_connect(self) -> None:
+        if not self._STREAM_OUTPUT:
+            print_findings(items)
         self.out(paint("SSH connection setup (credentials are never displayed "
                        "or written to disk):", C.BOLD))
         host = self.prompt("SSH hostname or IP")
@@ -709,6 +830,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             i += 1
 
     if batch:
+        cli._BATCH_MODE = True
         cli.banner()
         for line in batch:
             print(paint(f"ssl-doctor> {line}", C.GREEN, C.BOLD))
