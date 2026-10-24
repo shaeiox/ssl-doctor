@@ -1,5 +1,134 @@
 # Changelog
 
+## v0.7.0 — evidence-grounded TLS diagnosis
+
+Diagnosis fixes from the handshake-attribution, evidence-based-probe,
+legacy-protocol and legacy-TLS-semantics work. The findings contract moves from
+1.1 to **1.5**; every step is additive and 1.0–1.4 stay published.
+
+### Legacy-TLS diagnosis semantics
+
+On a `google.com:443` scan TLS 1.0/1.1 completed a handshake only under
+`ALL:@SECLEVEL=0` and their default-policy probes failed locally with
+`NO_PROTOCOLS_AVAILABLE`. The classification was already correct, but the
+remediation said to "treat legacy TLS as enabled until proven otherwise", the
+open warning was reduced to a free-text note plus the generic "some checks report
+warnings/failures", and a match among 4 of 7 DNS addresses read as "all 4
+comparable endpoints". Findings contract **1.5** (additive; 1.0–1.4 stay published).
+
+#### Root causes fixed
+
+- The default-policy re-probe outcome was folded into `relaxed-only-unverified`
+  without recording *why*: a client that never sent the probe (`client-limited`)
+  and a probe without an answer read the same. It is now kept per version in
+  `facts.probe_policy.default_probe`, and the evidence row says when nothing was
+  sent to the server.
+- Findings had no place for "why the evidence cannot settle this", so it lived in
+  prose. `Finding.uncertainty` now carries it, separate from `evidence`.
+- A warning with no justified cause had no structured home in the diagnosis.
+  `diagnosis.unresolved` keeps `observed` / `conclusion` / `uncertainty` /
+  `recommendation` apart; the generic note now names the unexplained findings.
+- The endpoint comparison had no address count, so a partial match could not say
+  it was partial. `endpoint_comparison.addresses` and an explicit coverage caveat
+  were added.
+
+#### Changed verdicts by check id
+
+| Check id | Before | Now |
+|---|---|---|
+| `tls.protocols` (unverified legacy) | "Treat legacy TLS as enabled until proven otherwise … then disable them if accepted" | "Not confirmed - verify before changing anything", with a controlled `openssl s_client -tls1` / `-tls1_1` test and its limitations; the server's configuration is named as authoritative |
+| `tls.multiip` | "all 4 comparable endpoint(s) present the same certificate facts" | "the 4 comparable endpoint(s) present the same certificate facts; 3 of 7 DNS address(es) were not compared", plus an uncertainty entry |
+| diagnosis | note "Deprecated TLS may be enabled …" + "some checks report warnings/failures" | `unresolved` entry for `tls.protocols`; `overall` stays cause-derived |
+
+### Legacy-protocol evidence
+
+A single warning on `tls.protocols` could claim that "deprecated TLS 1.0/1.1 are
+accepted by the server" after probing them only with `ALL:@SECLEVEL=0`. A lowered
+security level proves that the server's stack can still negotiate a version when
+legacy cipher suites are offered; it does not prove that an ordinary,
+default-configured client can connect. The findings contract moves to **1.4**
+(additive: per-version `support` classes and four new observations; 1.0–1.3 stay
+published and keep validating).
+
+#### Root causes fixed
+
+- `check_protocol_matrix` probed TLS 1.0/1.1 exclusively under the relaxed cipher
+  policy, so acceptance was reported as ordinary-client support. A default-policy
+  probe now runs for every legacy version that answers, and the two facts are
+  recorded separately.
+- A probe the local client could not perform (`NO_PROTOCOLS_AVAILABLE`,
+  `NO_CIPHERS_AVAILABLE`, `CA MD TOO WEAK`, a local SSL-context error) was returned
+  as `refused`, i.e. as a server answer. With a modern OpenSSL build the default
+  context has no TLS 1.0/1.1 ciphers, so a legitimate client limitation would have
+  read as a server refusal.
+
+#### Changed verdicts by check id
+
+| Check id | Before | Now |
+|---|---|---|
+| `tls.protocols` | TLS 1.0/1.1 were probed only with `ALL:@SECLEVEL=0`; any answer became `[POSSIBLE · server] "deprecated TLS 1.0/1.1 are accepted by the server"` and the generic "protocol configuration carries compatibility/security risks" cause | Four per-version classes (`default`, `relaxed-only`, `relaxed-only-unverified`, `rejected`/`inconclusive`) and four observations. `default` ⇒ ordinary clients can negotiate the version; `relaxed-only` ⇒ a default-configured client is refused, reported with an explicit limitation; `relaxed-only-unverified` ⇒ a note, a WARNING and no cause about server support. Client-side probe limits are reported as a limitation of the test, never as a refusal |
+
+#### Tests
+
+- `tests/test_protocol_policy.py` (new): legacy accepted under the default policy,
+  relaxed-only acceptance, an unverifiable default-policy probe, TLS 1.2 default
+  support, TLS 1.3 support, refusals, timeouts before/after the handshake, and the
+  diagnosis certainty, limitations and remediation that each case earns.
+- `tests/test_probe_consistency.py` updated where it pinned the superseded
+  semantics (`relaxed`-only tables, `client-limited` local errors, per-row
+  inconclusive assertions).
+
+### Evidence-based probes
+
+Three unsupported warnings from a single scan are fixed at their source, and the
+diagnosis now separates what was observed from what it infers. Findings contract
+moves to **1.3** (additive: `observation`, `limitations`, `endpoints`,
+`endpoint_comparison`, `probe_policy`; 1.0-1.2 stay published and keep validating).
+
+#### Root causes fixed
+
+- `check_multi_ip` compared error strings with certificate fingerprints, so an
+  unreachable endpoint read as "different certificate"; it also compared only the
+  fingerprint and probed addresses `net.tcp` never verified.
+- The protocol matrix never saw the protocol the primary handshake negotiated, a
+  timeout row was inert, and relaxed-policy acceptance was not separated from
+  default-client interoperability.
+- An SNI fingerprint difference was promoted to a virtual-host defect although a
+  default certificate for clients without SNI is normal.
+
+#### Changed verdicts by check id
+
+| Check id | Before | Now |
+|---|---|---|
+| `tls.multiip` | Any difference between endpoint result *strings*, including unreachable endpoints, was a WARNING and a probable server cause | Only endpoints that completed a handshake for the same server name are compared, over fingerprint, hostname coverage and chain status. Fewer than two comparable endpoints ⇒ `NOT TESTED` (inconclusive, no cause); a measured difference ⇒ `WARNING` with both values and a listed limitation |
+| `tls.sni` | A differing no-SNI certificate was a WARNING with "check virtual-host configuration", promoted to a possible server cause | An observation (`PASS` + `observation=sni-certificate-differs`); no cause; a missing no-SNI probe is `NOT TESTED`; only a failing handshake for the requested name is `FAIL` |
+| `tls.protocols` | A stalled probe could be silent or read as a policy result; relaxed acceptance looked like ordinary support | Rows are accepted / accepted under relaxed policy / refused / inconclusive; a version the primary negotiated is never "refused"; inconclusive rows are retried once inside a budget and prevent a clean PASS; a TLS 1.2 default-policy probe states whether a modern client can connect |
+
+### Handshake failure attribution
+
+Fixes a diagnosis that blamed the server's protocol configuration for a stalled
+TLS handshake. The findings contract moves to **1.2** (additive; 1.0 and 1.1
+stay published and keep validating).
+
+#### Root cause fixed
+
+- `tls.handshake` recorded a timeout and a protocol/cipher rejection identically
+  (`FAIL`, prose evidence only), and the diagnosis mapped on the status alone.
+  A run with a stalled handshake next to "TLS 1.0–1.3 accepted" was reported as a
+  probable **server** protocol/cipher mismatch.
+- The handshake and the per-version probes re-resolved the hostname instead of
+  using the address `net.tcp` verified, so they could measure a different
+  endpoint than the one that was proven reachable.
+
+#### Changed verdicts by check id
+
+| Check id | Before | Now |
+|---|---|---|
+| `tls.handshake` | Any failure: `FAIL`, evidence "handshake/connect timed out" or "handshake failed", no structured cause | Failures carry `failure_kind`. A timeout is retried once: a recovered stall is `WARNING` (and still yields all certificate facts), a repeated stall is `FAIL`. A rejection is `FAIL` on the first attempt. Evidence names the phase, the probed address and each attempt |
+| `tls.protocols` | A timeout was counted as "refused"; the relaxed cipher policy for TLS 1.0–1.2 was undisclosed | Rows are `accepted` / `refused` / `timed out` / `network error`; `failure_kind` is `no-version-accepted` or `no-version-answered`; accepted legacy versions disclose the `ALL:@SECLEVEL=0` policy |
+| `tls.handshake` + `tls.protocols` | Contradiction possible: "handshake fails" beside "TLS 1.2/1.3 accepted" | A failed handshake states which versions did answer and that the failure is a stall or rejection on the default path |
+| diagnosis | Timeout ⇒ probable **server** protocol/cipher mismatch whenever a version was accepted | Attribution follows `failure_kind`: timeouts and resets are probable **network** causes with path advice; only `tls-alert` can produce a protocol/cipher mismatch (server). Unclassified failures fall back to network with a note |
+
 ## v0.6.0 — modern two-stroke startup banner
 
 Adds a modern two-stroke startup banner (wordmark, tagline, credit) sized for

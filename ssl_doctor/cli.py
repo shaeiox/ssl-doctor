@@ -407,6 +407,10 @@ def print_finding(f: F.Finding, verbose: bool = True) -> None:
         return
     for line in f.evidence:
         _tw_type(f"          {paint(_GLYPHS['bullet'], 'muted')} {line}")
+    if f.failure_kind:
+        _tw_type(paint(f"          failure kind: {f.failure_kind}", dim=True))
+    if f.observation:
+        _tw_type(paint(f"          observation: {f.observation}", dim=True))
     if f.detail:
         _tw_type(paint(f"          {f.detail}", dim=True))
     if f.recommendation:
@@ -1290,8 +1294,18 @@ class SSLDoctorCLI:
                      f" {paint(_GLYPHS['sep'], 'muted')} {c.origin}] {c.summary}")
             for e in c.evidence[:4]:
                 self.out(paint(f"       evidence: {e}", dim=True))
+            for lim in c.limitations:
+                self.out(paint(f"       limit: {lim}", dim=True))
             if c.recommendation:
                 self.out(paint(f"       fix: {c.recommendation}", "accent"))
+        for u in self._diagnosis.unresolved:
+            self.out(f"{INDENT}[{paint('UNRESOLVED', 'warning', bold=True)}"
+                     f" {paint(_GLYPHS['sep'], 'muted')} {u.check}] {u.observed}")
+            self.out(paint(f"       conclusion: {u.conclusion}", dim=True))
+            for unc in u.uncertainty:
+                self.out(paint(f"       uncertain: {unc}", dim=True))
+            if u.recommendation:
+                self.out(paint(f"       next: {u.recommendation}", "accent"))
         for n in self._diagnosis.notes:
             self.out(paint(f"  note: {n}", "muted", dim=True))
         self.note("\ngenerate a report with /report html")
@@ -1315,8 +1329,10 @@ class SSLDoctorCLI:
             self._diagnosis = diag
         meta = self._meta()
         secrets = self.server.known_secrets() if self.server else []
+        # Also emitted when no certificate was captured: the facts block carries
+        # the handshake address and failure classification that explain why.
         facts = netchecks.export_facts(self.remote_facts) \
-            if self.remote_facts.get("cert") else None
+            if self.remote_facts.get("host") else None
         ts = time.strftime("%Y%m%d-%H%M%S")
         written = []
         if fmt in ("json", "both"):

@@ -38,6 +38,11 @@ class Finding:
     recommendation: str = ""      # practical remediation, if any
     target: str = ""              # e.g. "host:port" or a file path
     ts: float = field(default_factory=time.time)
+    failure_kind: str = ""        # classification; see contract.FAILURE_KINDS
+    observation: str = ""         # what was seen (not a failure); contract.OBSERVATIONS
+    # Why the evidence cannot settle the question the check asks; kept apart
+    # from `evidence` (what was observed) so a diagnosis can cite it verbatim.
+    uncertainty: List[str] = field(default_factory=list)
 
     def worst_rank(self) -> int:
         return _STATUS_RANK.get(self.status, 99)

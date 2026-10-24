@@ -438,8 +438,82 @@ pipeline used by `/tls` and `/scan`. It returns `(findings, facts)`.
 ```
 
 The `facts` dictionary carries the parsed certificate, IPs, SNI, chain status,
-anchor, redirect hops, final URL, and server time. It is stored in
-`SSLDoctorCLI.remote_facts` and reused for local clock comparison and reports.
+anchor, redirect hops, final URL, server time, `handshake_ip` and
+`handshake_failure`. It is stored in `SSLDoctorCLI.remote_facts` and reused for
+local clock comparison and reports.
+
+### Handshake failure flow
+
+`check_tls_basic(host, port, sni, timeout, connect_ip=<address net.tcp verified>)`
+splits the probe into two observable phases:
+
+```text
+_connect()    → socket          raises _ConnectTimeout     → failure_kind "connect-timeout"
+_negotiate()  → ssl.SSLSocket   raises _NegotiationTimeout → failure_kind "negotiation-timeout"
+                                ssl.SSLError/OSError       → "tls-alert" or "network-error"
+```
+
+1. A timeout-class failure is retried once on a fresh connection; a rejection or
+   reset is not retried, because retrying cannot change a deterministic answer.
+2. Both attempts fail → `FAIL`. The first attempt completes → `WARNING` with the
+   stall recorded, and every certificate fact still captured, so validity,
+   hostname, chain and validation checks keep running.
+3. `facts["handshake_ip"]` and `facts["handshake_attempts"]` record the address
+   and the number of attempts; `facts["handshake_failure"]` keeps the
+   classification for consumers.
+4. On `FAIL`, the protocol matrix runs and then `_note_handshake_coherence()`
+   appends the accepted versions to the handshake evidence, so the two findings
+   cannot contradict each other silently.
+5. `check_protocol_matrix()` pins the same address, classifies every row
+   (accepted / refused / timed out / network error), and sets `failure_kind` to
+   `no-version-accepted` or `no-version-answered`. A timeout is never a refusal.
+
+### Endpoint comparison and SNI observation
+
+`check_multi_ip(host, port, ips, timeout, sni=…, facts=…)` probes up to four
+addresses and records one state per address in `facts["endpoints"]`
+(`negotiated`, `tls-rejected`, `tcp-unreachable`, `timed-out`,
+`probe-unavailable`). Only `negotiated` endpoints whose server name matches the
+requested one are compared, and only over leaf fingerprint, hostname coverage and
+chain status. `< 2` comparable endpoints ⇒ `NOT TESTED` with
+`observation="endpoint-comparison-inconclusive"`; a measured difference ⇒
+`WARNING` with `observation="endpoint-certificate-difference"`.
+
+`check_sni_difference()` reports one of: same certificate (PASS, no observation),
+a different certificate without SNI (PASS, `observation="sni-certificate-differs"`,
+explicitly described as legitimate default-vhost behaviour), the no-SNI probe
+failing (NOT TESTED, `observation="sni-without-probe-failed"`), or a failing
+handshake for the requested name (FAIL). It never recommends a virtual-host
+change on the strength of a fingerprint difference.
+
+### Protocol matrix
+
+`check_protocol_matrix(..., negotiated=<primary protocol>, facts=...)` probes each
+version and classifies it per version: `default` (accepted with the default cipher
+policy), `relaxed-only` (TLS 1.0/1.1 answered only under `ALL:@SECLEVEL=0` and the
+default-policy probe was refused), `relaxed-only-unverified` (relaxed answer but
+the default-policy probe was client-limited or timed out), `rejected`, or
+`inconclusive`. TLS 1.3 is probed under the default policy only; relaxed-policy
+acceptance of TLS 1.0/1.1 proves only that the server's stack can still negotiate
+the version when legacy suites are offered, so it never becomes a claim about
+ordinary clients. A version the primary handshake negotiated is never reported as
+refused; an inconclusive row is retried once inside a budget of
+`timeout × PROBE_BUDGET_FACTOR × (versions + 3)`. The finding's observation is
+`legacy-accepted-default`, `legacy-accepted-relaxed-only`,
+`legacy-accepted-unverified`, `tls12-relaxed-only` or `probe-inconclusive`;
+`legacy-accepted-default`, `legacy-accepted-relaxed-only` and
+`tls12-relaxed-only` raise a server cause (the last two with a listed limitation),
+`legacy-accepted-unverified` and `probe-inconclusive` produce a diagnosis note. When TLS 1.2 is
+accepted under the relaxed policy, a default-policy probe adds an interoperability
+line (a modern client can connect, or only the lowered security level can).
+`_is_local_probe_limitation()` separates `NO_PROTOCOLS_AVAILABLE`,
+`NO_CIPHERS_AVAILABLE`, `CA MD TOO WEAK` and local context errors from a server
+answer, so a client that cannot build the offer is never reported as a refusal.
+
+`analyze.diagnose()` attributes from `failure_kind`, not from the status:
+timeouts and resets are probable **network** causes whose advice is to repeat the
+measurement and inspect the path; only `tls-alert` can produce a server
+protocol/cipher-mismatch cause; an unclassified failure falls back to network.
 
 ---
 

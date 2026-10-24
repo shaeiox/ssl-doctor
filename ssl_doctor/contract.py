@@ -21,8 +21,58 @@ import re
 import urllib.parse
 from typing import Any, Dict, Iterable, List
 
-SCHEMA_VERSION = "1.1"   # 1.1: optional "facts" block
+SCHEMA_VERSION = "1.5"   # 1.1: facts block; 1.2: failure classification;
+                         # 1.3: cause limitations, observation classes, endpoint state;
+                         # 1.4: legacy-protocol acceptance classes;
+                         # 1.5: finding uncertainty, unresolved diagnosis entries,
+                         #      default-probe states, endpoint address coverage
 SUPPORTED_MAJOR = 1
+
+# Machine-readable classification of a failed probe.  "What went wrong" is
+# separate from the finding status, because a stall and a rejection both end in
+# FAIL while having different owners (network path vs. server configuration).
+# Empty string = no classified failure (including every PASS).
+FAILURE_KINDS: Dict[str, str] = {
+    "connect-timeout": "the TCP connect to the probed address timed out",
+    "negotiation-timeout": "the socket opened but the peer sent no TLS response in time",
+    "tls-alert": "the peer rejected the offer with a TLS alert or no shared cipher",
+    "network-error": "the connection was reset or became unreachable during negotiation",
+    "no-version-accepted": "every per-version probe was refused",
+    "no-version-answered": "every per-version probe stalled or errored without a TLS answer",
+    "probe-inconclusive": "the probe could not establish a result within the evidence available",
+    "endpoint-unreachable": "no endpoint could be reached to collect certificate evidence",
+}
+
+# Machine-readable classes for things that were *observed* but are not failures.
+# Kept apart from FAILURE_KINDS so a diagnosis can treat an observation as
+# corroboration instead of turning it into a defect.
+OBSERVATIONS: Dict[str, str] = {
+    "endpoint-certificate-difference":
+        "two or more comparable endpoints presented different certificate facts",
+    "endpoint-comparison-inconclusive":
+        "fewer than two endpoints yielded comparable certificate evidence",
+    "sni-certificate-differs":
+        "a different certificate is served when the client sends no SNI",
+    "sni-without-probe-failed":
+        "the certificate served without SNI could not be obtained",
+    "probe-inconclusive":
+        "at least one protocol-version probe produced no definite result",
+    "legacy-accepted-default":
+        "deprecated TLS versions were accepted with the default cipher policy",
+    "legacy-accepted-relaxed-only":
+        "deprecated TLS versions were accepted only when legacy cipher suites were "
+        "offered; a default-configured client is refused by the server",
+    "legacy-accepted-unverified":
+        "deprecated TLS versions answered only under a relaxed cipher policy and the "
+        "default-policy probe could not establish ordinary-client compatibility",
+    "tls12-relaxed-only":
+        "TLS 1.2 answers only when legacy cipher suites are offered, so a "
+        "default-configured client is refused",
+}
+
+# Endpoint probe states (see netchecks._probe_endpoint).
+ENDPOINT_STATES = ["negotiated", "tls-rejected", "tcp-unreachable", "timed-out",
+                   "probe-unavailable"]
 
 CHECK_IDS: Dict[str, str] = {
     # remote network
@@ -78,6 +128,12 @@ CHECK_IDS: Dict[str, str] = {
 _STATUS = ["PASS", "FAIL", "WARNING", "NOT TESTED"]
 _SCOPE = ["local", "remote-net", "server"]
 _CHECK_RE = r"^[a-z]+(\.[a-z0-9_]+)+$"
+_FAILURE_KINDS = [""] + list(FAILURE_KINDS)
+_OBSERVATIONS = [""] + list(OBSERVATIONS)
+_PROBE_SUPPORT = ["", "default", "relaxed-only", "relaxed-only-unverified",
+                  "rejected", "inconclusive"]
+# Raw outcome of a default-policy probe; "client-limited" = never sent.
+_PROBE_STATES = ["accepted", "refused", "inconclusive", "unsupported", "client-limited"]
 
 SCHEMA: Dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -112,9 +168,26 @@ SCHEMA: Dict[str, Any] = {
                         "summary": {"type": "string"},
                         "evidence": {"type": "array", "items": {"type": "string"}},
                         "recommendation": {"type": "string"},
+                        # 1.3: where the evidence for this cause is incomplete
+                        "limitations": {"type": "array", "items": {"type": "string"}},
                     },
                 }},
                 "notes": {"type": "array", "items": {"type": "string"}},
+                # 1.5: warnings that stay open because no cause is justified
+                "unresolved": {"type": "array", "items": {
+                    "type": "object",
+                    "required": ["check", "status", "observed", "conclusion",
+                                 "uncertainty"],
+                    "properties": {
+                        "check": {"type": "string", "pattern": _CHECK_RE},
+                        "status": {"type": "string", "enum": _STATUS},
+                        "observation": {"type": "string", "enum": _OBSERVATIONS},
+                        "observed": {"type": "string"},
+                        "conclusion": {"type": "string"},
+                        "uncertainty": {"type": "array", "items": {"type": "string"}},
+                        "recommendation": {"type": "string"},
+                    },
+                }},
             },
         },
         "findings": {"type": "array", "items": {
@@ -131,6 +204,12 @@ SCHEMA: Dict[str, Any] = {
                 "target": {"type": "string"},
                 "ts": {"type": "number"},
                 "ts_iso": {"type": "string"},
+                # 1.2: classification of the failure, empty when none
+                "failure_kind": {"type": "string", "enum": _FAILURE_KINDS},
+                # 1.3: what was observed, when the check reports an observation
+                "observation": {"type": "string", "enum": _OBSERVATIONS},
+                # 1.5: why the evidence cannot settle the check's question
+                "uncertainty": {"type": "array", "items": {"type": "string"}},
             },
         }},
         "disclaimer": {"type": "string"},
@@ -145,6 +224,46 @@ SCHEMA: Dict[str, Any] = {
                 }},
                 "chain_status": {"type": "string",
                                  "enum": ["complete", "incomplete", "broken", "unread"]},
+                # 1.2: address every probe connected to, and how the handshake failed
+                "handshake_ip": {"type": ["string", "null"]},
+                "handshake_failure": {"type": "string", "enum": _FAILURE_KINDS},
+                # 1.3: per-endpoint outcome states and the comparison result
+                "endpoints": {"type": "array", "items": {
+                    "type": "object",
+                    "required": ["ip", "state"],
+                    "properties": {
+                        "ip": {"type": "string"},
+                        "state": {"type": "string", "enum": ENDPOINT_STATES + [""]},
+                        "detail": {"type": "string"},
+                        "sha256": {"type": "string"},
+                        "sni": {"type": ["string", "null"]},
+                    },
+                }},
+                "endpoint_comparison": {"type": ["object", "null"], "properties": {
+                    "probed": {"type": "integer"},
+                    "comparable": {"type": "integer"},
+                    # 1.5: addresses DNS returned; comparable < addresses = partial
+                    "addresses": {"type": "integer"},
+                    "difference": {"type": "boolean"},
+                    "attribute": {"type": "string"},
+                }},
+                "probe_policy": {"type": ["object", "null"], "properties": {
+                    "negotiated": {"type": "string"},
+                    "relaxed_versions": {"type": "array", "items": {"type": "string"}},
+                    # 1.4: which policy actually proved each version
+                    "support": {"type": "object", "properties": {
+                        "TLS 1.0": {"type": "string", "enum": _PROBE_SUPPORT},
+                        "TLS 1.1": {"type": "string", "enum": _PROBE_SUPPORT},
+                        "TLS 1.2": {"type": "string", "enum": _PROBE_SUPPORT},
+                        "TLS 1.3": {"type": "string", "enum": _PROBE_SUPPORT},
+                    }},
+                    "confirmed_legacy": {"type": "array", "items": {"type": "string"}},
+                    "unverified_legacy": {"type": "array", "items": {"type": "string"}},
+                    # 1.5: default-policy probe outcome per re-probed version
+                    "default_probe": {"type": "object", "properties": {
+                        v: {"type": "string", "enum": _PROBE_STATES}
+                        for v in ("TLS 1.0", "TLS 1.1", "TLS 1.2")}},
+                }},
             },
         },
     },

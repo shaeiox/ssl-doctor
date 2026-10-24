@@ -97,10 +97,13 @@ font-size:12.5px;white-space:pre-wrap;word-break:break-word}
 def _diagnosis_from(d: Optional[Dict[str, Any]]) -> Optional[Diagnosis]:
     if not d:
         return None
-    from .analyze import Cause
+    from .analyze import Cause, Unresolved
     known = {f.name for f in dataclasses.fields(Cause)}
+    known_u = {f.name for f in dataclasses.fields(Unresolved)}
     return Diagnosis(causes=[Cause(**{k: v for k, v in c.items() if k in known})
-                             for c in d["causes"]], notes=list(d["notes"]))
+                             for c in d["causes"]], notes=list(d["notes"]),
+                     unresolved=[Unresolved(**{k: v for k, v in u.items() if k in known_u})
+                                 for u in d.get("unresolved", [])])
 
 
 def _badge(status: str) -> str:
@@ -156,7 +159,14 @@ def html_from_payload(payload: Dict[str, Any]) -> str:
             parts.append(f'<div class="{cls}"><b>#{c.rank} [{esc(c.certainty.upper())} · '
                          f'{esc(c.origin)}]</b> {esc(c.summary)}'
                          + (f'<ul>{"".join(f"<li class=mono>{esc(e[:400])}</li>" for e in c.evidence)}</ul>' if c.evidence else "")
+                         + (f'<ul>{"".join(f"<li><i>limitation: {esc(l)}</i></li>" for l in c.limitations)}</ul>' if c.limitations else "")
                          + (f'<div><b>Remediation:</b> {esc(c.recommendation)}</div>' if c.recommendation else "")
+                         + "</div>")
+        for u in diagnosis.unresolved:
+            parts.append(f'<div class="cause warn"><b>[UNRESOLVED · {esc(u.check)}]</b> '
+                         f'{esc(u.observed)}<div><b>Conclusion:</b> {esc(u.conclusion)}</div>'
+                         + (f'<ul>{"".join(f"<li><i>uncertainty: {esc(x)}</i></li>" for x in u.uncertainty)}</ul>' if u.uncertainty else "")
+                         + (f'<div><b>Next step:</b> {esc(u.recommendation)}</div>' if u.recommendation else "")
                          + "</div>")
         if diagnosis.notes:
             parts.append("<ul>" + "".join(f"<li>{esc(n)}</li>" for n in diagnosis.notes) + "</ul>")
@@ -169,10 +179,12 @@ def html_from_payload(payload: Dict[str, Any]) -> str:
         parts.append(f'<div class="card"><h2>{esc(heading)}</h2><table class="scopes">')
         for f in items:
             ev = "".join(f"<li class=mono>{esc(e[:400])}</li>" for e in f.evidence)
+            kind = (f" · failure: {esc(f.failure_kind)}" if f.failure_kind else "")
+            kind += (f" · observation: {esc(f.observation)}" if f.observation else "")
             parts.append(
                 f"<tr><td>{_badge(f.status)}</td>"
                 f"<td><b>{esc(f.title)}</b>"
-                + (f'<div class=meta>target: {esc(f.target)} · check: <code class="check">{esc(f.check)}</code></div>' if f.target else f'<div class=meta>check: <code class="check">{esc(f.check)}</code></div>')
+                + (f'<div class=meta>target: {esc(f.target)} · check: <code class="check">{esc(f.check)}</code>{kind}</div>' if f.target else f'<div class=meta>check: <code class="check">{esc(f.check)}</code>{kind}</div>')
                 + (f"<ul>{ev}</ul>" if ev else "")
                 + (f"<div><i>{esc(f.detail)}</i></div>" if f.detail else "")
                 + (f"<div><b>Recommendation:</b> {esc(f.recommendation)}</div>" if f.recommendation else "")

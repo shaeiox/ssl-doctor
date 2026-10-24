@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssl-doctor.dev/schemas/findings-1.1.schema.json",
+  "title": "SSL Doctor findings document",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "tool",
+    "generated_utc",
+    "summary",
+    "findings"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+$"
+    },
+    "tool": {
+      "type": "string"
+    },
+    "generated_utc": {
+      "type": "string"
+    },
+    "meta": {
+      "type": "object"
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "PASS",
+        "FAIL",
+        "WARNING",
+        "NOT TESTED"
+      ],
+      "properties": {
+        "PASS": {
+          "type": "integer"
+        },
+        "FAIL": {
+          "type": "integer"
+        },
+        "WARNING": {
+          "type": "integer"
+        },
+        "NOT TESTED": {
+          "type": "integer"
+        }
+      }
+    },
+    "diagnosis": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "overall",
+        "causes",
+        "notes"
+      ],
+      "properties": {
+        "overall": {
+          "type": "string",
+          "enum": [
+            "PASS",
+            "WARNING",
+            "FAIL"
+          ]
+        },
+        "causes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "rank",
+              "certainty",
+              "origin",
+              "summary",
+              "evidence"
+            ],
+            "properties": {
+              "rank": {
+                "type": "integer"
+              },
+              "certainty": {
+                "type": "string",
+                "enum": [
+                  "confirmed",
+                  "probable",
+                  "possible"
+                ]
+              },
+              "origin": {
+                "type": "string",
+                "enum": [
+                  "network",
+                  "server",
+                  "client",
+                  "certificate"
+                ]
+              },
+              "summary": {
+                "type": "string"
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "recommendation": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "check",
+          "title",
+          "status",
+          "scope",
+          "evidence"
+        ],
+        "properties": {
+          "check": {
+            "type": "string",
+            "pattern": "^[a-z]+(\\.[a-z0-9_]+)+$"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PASS",
+              "FAIL",
+              "WARNING",
+              "NOT TESTED"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "local",
+              "remote-net",
+              "server"
+            ]
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "detail": {
+            "type": "string"
+          },
+          "recommendation": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "number"
+          },
+          "ts_iso": {
+            "type": "string"
+          },
+          "failure_kind": {
+            "type": "string",
+            "enum": [
+              "",
+              "connect-timeout",
+              "negotiation-timeout",
+              "tls-alert",
+              "network-error",
+              "no-version-accepted",
+              "no-version-answered"
+            ]
+          }
+        }
+      }
+    },
+    "disclaimer": {
+      "type": "string"
+    },
+    "facts": {
+      "type": "object",
+      "properties": {
+        "leaf": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "subject": {
+              "type": "string"
+            },
+            "not_after": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "chain_status": {
+          "type": "string",
+          "enum": [
+            "complete",
+            "incomplete",
+            "broken",
+            "unread"
+          ]
+        },
+        "handshake_ip": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "handshake_failure": {
+          "type": "string",
+          "enum": [
+            "",
+            "connect-timeout",
+            "negotiation-timeout",
+            "tls-alert",
+            "network-error",
+            "no-version-accepted",
+            "no-version-answered"
+          ]
+        }
+      }
+    }
+  }
+}

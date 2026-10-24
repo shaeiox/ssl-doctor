@@ -10,9 +10,14 @@
 @src index.md  @gen 2026-10-24  @updated 2026-10-24
 
 P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
+  ~ 2026-10-24 next: push master + v0.7.0 · blocker: none
   architecture-and-scope ✓v 2026-10-24 v1
   chain-diagnosis ✓v 2026-10-24 v1
   server-ssh-nginx ✓v 2026-10-24 v1
   commands-reference ✓v 2026-10-24 v1
+  evidence-based-probes ✓v 2026-10-24 v1
+  protocol-policy-evidence ✓v 2026-10-24 v1
+  legacy-tls-diagnosis-semantics ✓d 2026-10-24 v1
+  tls-handshake-attribution ✓v 2026-10-24 v1
   ui-design-system ✓v 2026-10-24 v1
   _decisions ✓v 2026-10-24 v1

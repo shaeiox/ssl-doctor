@@ -119,6 +119,40 @@ wrong endpoint).
 | `tls.verify.rootonly` | Validation against trusted **roots only**, with no cached or bundled intermediates (what a client that has never seen the intermediate sees). PASS on `tls.verify` with FAIL here means the server is missing its intermediate. |
 | `tls.hostname` | Name coverage from **subjectAltName only**. A CN-only certificate fails, because modern clients ignore the CN. |
 
+Endpoint comparison compares only endpoints that completed a handshake for the
+same server name, over certificate fingerprint, hostname coverage and chain
+status. An unreachable, rejected or timed-out endpoint produced no certificate,
+so it can never be evidence that a certificate differs; with fewer than two
+comparable endpoints the result is `NOT TESTED` (inconclusive) instead of a
+warning. `tls.sni` reports how the server answers with and without SNI as an
+*observation*: a different default certificate is normal for name-based virtual
+hosting, and only `tls.hostname`/`tls.verify` decide whether the requested name is
+served correctly. Protocol rows state whether a version was accepted under the
+relaxed `ALL:@SECLEVEL=0` policy or with default settings, and an inconclusive
+probe is reported as inconclusive - never as a refusal - while a version the
+primary handshake negotiated is never reported as unsupported.
+
+Deprecated TLS 1.0/1.1 are always probed a second time with default settings,
+because a handshake with `ALL:@SECLEVEL=0` only shows that the server's stack can
+still negotiate the version when legacy cipher suites are offered - not that an
+ordinary client can. `facts.probe_policy.support` records `default`,
+`relaxed-only`, `relaxed-only-unverified`, `rejected` or `inconclusive` per
+version. `relaxed-only` is a warning with the policy limitation attached,
+`relaxed-only-unverified` is a warning plus a diagnosis note and no claim about
+server support, and a probe this client could not perform (no protocols or
+ciphers available in its default context) is reported as a limitation of the
+test, never as a server refusal.
+
+Handshake failures carry a machine-readable `failure_kind` (`connect-timeout`,
+`negotiation-timeout`, `tls-alert`, `network-error`). A timeout is retried once:
+if the second attempt completes, the finding is `WARNING` and the diagnosis says
+the path is intermittent. A rejection is never retried and is the only evidence
+that can support a protocol/cipher cause. All TLS probes connect to the address
+the TCP check proved reachable, and name it in the evidence. The TLS 1.0–1.3
+matrix classifies each row as accepted, refused, timed out or network error, and
+states when legacy versions were probed with the relaxed cipher policy
+`ALL:@SECLEVEL=0`.
+
 The chain is read via the public Python API (3.13+), the equivalent internal API
 (3.10–3.12), or `openssl s_client -showcerts`. The handshake evidence names the
 method that was used.
