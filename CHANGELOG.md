@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased — evidence-based probes
+
+Three unsupported warnings from a single scan are fixed at their source, and the
+diagnosis now separates what was observed from what it infers. Findings contract
+moves to **1.3** (additive: `observation`, `limitations`, `endpoints`,
+`endpoint_comparison`, `probe_policy`; 1.0-1.2 stay published and keep validating).
+
+### Root causes fixed
+
+- `check_multi_ip` compared error strings with certificate fingerprints, so an
+  unreachable endpoint read as "different certificate"; it also compared only the
+  fingerprint and probed addresses `net.tcp` never verified.
+- The protocol matrix never saw the protocol the primary handshake negotiated, a
+  timeout row was inert, and relaxed-policy acceptance was not separated from
+  default-client interoperability.
+- An SNI fingerprint difference was promoted to a virtual-host defect although a
+  default certificate for clients without SNI is normal.
+
+### Changed verdicts by check id
+
+| Check id | Before | Now |
+|---|---|---|
+| `tls.multiip` | Any difference between endpoint result *strings*, including unreachable endpoints, was a WARNING and a probable server cause | Only endpoints that completed a handshake for the same server name are compared, over fingerprint, hostname coverage and chain status. Fewer than two comparable endpoints ⇒ `NOT TESTED` (inconclusive, no cause); a measured difference ⇒ `WARNING` with both values and a listed limitation |
+| `tls.sni` | A differing no-SNI certificate was a WARNING with "check virtual-host configuration", promoted to a possible server cause | An observation (`PASS` + `observation=sni-certificate-differs`); no cause; a missing no-SNI probe is `NOT TESTED`; only a failing handshake for the requested name is `FAIL` |
+| `tls.protocols` | A stalled probe could be silent or read as a policy result; relaxed acceptance looked like ordinary support | Rows are accepted / accepted under relaxed policy / refused / inconclusive; a version the primary negotiated is never "refused"; inconclusive rows are retried once inside a budget and prevent a clean PASS; a TLS 1.2 default-policy probe states whether a modern client can connect |
+
 ## Unreleased — handshake failure attribution
 
 Fixes a diagnosis that blamed the server's protocol configuration for a stalled

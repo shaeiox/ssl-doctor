@@ -48,6 +48,19 @@ wrong endpoint).
 | `tls.verify.rootonly` | Validation against trusted **roots only**, with no cached or bundled intermediates (what a client that has never seen the intermediate sees). PASS on `tls.verify` with FAIL here means the server is missing its intermediate. |
 | `tls.hostname` | Name coverage from **subjectAltName only**. A CN-only certificate fails, because modern clients ignore the CN. |
 
+Endpoint comparison compares only endpoints that completed a handshake for the
+same server name, over certificate fingerprint, hostname coverage and chain
+status. An unreachable, rejected or timed-out endpoint produced no certificate,
+so it can never be evidence that a certificate differs; with fewer than two
+comparable endpoints the result is `NOT TESTED` (inconclusive) instead of a
+warning. `tls.sni` reports how the server answers with and without SNI as an
+*observation*: a different default certificate is normal for name-based virtual
+hosting, and only `tls.hostname`/`tls.verify` decide whether the requested name is
+served correctly. Protocol rows state whether a version was accepted under the
+relaxed `ALL:@SECLEVEL=0` policy or with default settings, and an inconclusive
+probe is reported as inconclusive - never as a refusal - while a version the
+primary handshake negotiated is never reported as unsupported.
+
 Handshake failures carry a machine-readable `failure_kind` (`connect-timeout`,
 `negotiation-timeout`, `tls-alert`, `network-error`). A timeout is retried once:
 if the second attempt completes, the finding is `WARNING` and the diagnosis says

@@ -21,7 +21,8 @@ import re
 import urllib.parse
 from typing import Any, Dict, Iterable, List
 
-SCHEMA_VERSION = "1.2"   # 1.1: optional "facts" block; 1.2: failure classification
+SCHEMA_VERSION = "1.3"   # 1.1: facts block; 1.2: failure classification;
+                         # 1.3: cause limitations, observation classes, endpoint state
 SUPPORTED_MAJOR = 1
 
 # Machine-readable classification of a failed probe.  "What went wrong" is
@@ -35,7 +36,29 @@ FAILURE_KINDS: Dict[str, str] = {
     "network-error": "the connection was reset or became unreachable during negotiation",
     "no-version-accepted": "every per-version probe was refused",
     "no-version-answered": "every per-version probe stalled or errored without a TLS answer",
+    "probe-inconclusive": "the probe could not establish a result within the evidence available",
+    "endpoint-unreachable": "no endpoint could be reached to collect certificate evidence",
 }
+
+# Machine-readable classes for things that were *observed* but are not failures.
+# Kept apart from FAILURE_KINDS so a diagnosis can treat an observation as
+# corroboration instead of turning it into a defect.
+OBSERVATIONS: Dict[str, str] = {
+    "endpoint-certificate-difference":
+        "two or more comparable endpoints presented different certificate facts",
+    "endpoint-comparison-inconclusive":
+        "fewer than two endpoints yielded comparable certificate evidence",
+    "sni-certificate-differs":
+        "a different certificate is served when the client sends no SNI",
+    "sni-without-probe-failed":
+        "the certificate served without SNI could not be obtained",
+    "probe-inconclusive":
+        "at least one protocol-version probe produced no definite result",
+}
+
+# Endpoint probe states (see netchecks._probe_endpoint).
+ENDPOINT_STATES = ["negotiated", "tls-rejected", "tcp-unreachable", "timed-out",
+                   "probe-unavailable"]
 
 CHECK_IDS: Dict[str, str] = {
     # remote network
@@ -92,6 +115,7 @@ _STATUS = ["PASS", "FAIL", "WARNING", "NOT TESTED"]
 _SCOPE = ["local", "remote-net", "server"]
 _CHECK_RE = r"^[a-z]+(\.[a-z0-9_]+)+$"
 _FAILURE_KINDS = [""] + list(FAILURE_KINDS)
+_OBSERVATIONS = [""] + list(OBSERVATIONS)
 
 SCHEMA: Dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -126,6 +150,8 @@ SCHEMA: Dict[str, Any] = {
                         "summary": {"type": "string"},
                         "evidence": {"type": "array", "items": {"type": "string"}},
                         "recommendation": {"type": "string"},
+                        # 1.3: where the evidence for this cause is incomplete
+                        "limitations": {"type": "array", "items": {"type": "string"}},
                     },
                 }},
                 "notes": {"type": "array", "items": {"type": "string"}},
@@ -147,6 +173,8 @@ SCHEMA: Dict[str, Any] = {
                 "ts_iso": {"type": "string"},
                 # 1.2: classification of the failure, empty when none
                 "failure_kind": {"type": "string", "enum": _FAILURE_KINDS},
+                # 1.3: what was observed, when the check reports an observation
+                "observation": {"type": "string", "enum": _OBSERVATIONS},
             },
         }},
         "disclaimer": {"type": "string"},
@@ -164,6 +192,28 @@ SCHEMA: Dict[str, Any] = {
                 # 1.2: address every probe connected to, and how the handshake failed
                 "handshake_ip": {"type": ["string", "null"]},
                 "handshake_failure": {"type": "string", "enum": _FAILURE_KINDS},
+                # 1.3: per-endpoint outcome states and the comparison result
+                "endpoints": {"type": "array", "items": {
+                    "type": "object",
+                    "required": ["ip", "state"],
+                    "properties": {
+                        "ip": {"type": "string"},
+                        "state": {"type": "string", "enum": ENDPOINT_STATES + [""]},
+                        "detail": {"type": "string"},
+                        "sha256": {"type": "string"},
+                        "sni": {"type": ["string", "null"]},
+                    },
+                }},
+                "endpoint_comparison": {"type": ["object", "null"], "properties": {
+                    "probed": {"type": "integer"},
+                    "comparable": {"type": "integer"},
+                    "difference": {"type": "boolean"},
+                    "attribute": {"type": "string"},
+                }},
+                "probe_policy": {"type": ["object", "null"], "properties": {
+                    "negotiated": {"type": "string"},
+                    "relaxed_versions": {"type": "array", "items": {"type": "string"}},
+                }},
             },
         },
     },

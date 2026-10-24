@@ -7,6 +7,7 @@ and only make GET/HEAD requests after the TLS layer is established.
 
 from __future__ import annotations
 
+import errno
 import http.client
 import ipaddress
 import socket
@@ -580,169 +581,457 @@ def check_tls_rootonly_validation(host: str, port: int, sni: Optional[str],
 
 
 _RELAXED_CIPHER_POLICY = "ALL:@SECLEVEL=0"
-_RELAXED_POLICY_NOTE = ("TLS 1.0-1.2 probes used a relaxed cipher policy "
-                        "(ALL:@SECLEVEL=0): 'accepted' is not proof that a modern "
-                        "client can connect")
+
+# Upper bound on how long the matrix may spend relative to one probe deadline:
+# every version gets at most one retry, so the worst case is 2 x versions.
+PROBE_BUDGET_FACTOR = 2
+
+_VERSION_LABELS = {
+    "TLSv1": "TLS 1.0", "TLSv1.0": "TLS 1.0",
+    "TLSv1.1": "TLS 1.1", "TLSv1.2": "TLS 1.2", "TLSv1.3": "TLS 1.3",
+}
+
+ACCEPTED = "accepted"
+REFUSED = "refused"
+INCONCLUSIVE = "inconclusive"
+UNSUPPORTED = "unsupported"
+
+
+def _probe_version(host: str, port: int, sni: Optional[str], label: str,
+                   version, timeout: float, connect_ip: Optional[str],
+                   relaxed: bool) -> Tuple[str, str]:
+    """Probe one pinned protocol version.
+
+    Returns (state, detail) where state is accepted / refused / inconclusive /
+    unsupported.  A timeout or a local limitation is *inconclusive*: it says
+    nothing about whether the server supports the version.
+    """
+    if not hasattr(ssl, "TLSVersion"):
+        return UNSUPPORTED, "this Python/OpenSSL build cannot pin protocol versions"
+    try:
+        ctx = _make_context(verify=False, min_v=version, max_v=version,
+                            ciphers=_RELAXED_CIPHER_POLICY if relaxed else None)
+    except Exception as exc:      # noqa: BLE001 - a local limitation, not a verdict
+        return INCONCLUSIVE, f"local probe error: {type(exc).__name__}: {exc}"[:120]
+    try:
+        s = _handshake(host, port, sni, ctx, timeout, connect_ip=connect_ip)
+        negotiated = s.version() or "?"
+        s.close()
+        return ACCEPTED, negotiated
+    except (_ConnectTimeout, _NegotiationTimeout) as exc:
+        return INCONCLUSIVE, f"probe timed out: {exc}"
+    except ssl.SSLError as exc:
+        return REFUSED, str(exc).splitlines()[0][:80]
+    except OSError as exc:
+        return INCONCLUSIVE, f"network error: {str(exc).splitlines()[0][:100]}"
+    except Exception as exc:                      # noqa: BLE001 - stay inconclusive
+        return INCONCLUSIVE, f"local probe error: {type(exc).__name__}: {exc}"[:120]
 
 
 def check_protocol_matrix(host: str, port: int, sni: Optional[str],
-                          timeout: float, connect_ip: Optional[str] = None
-                          ) -> F.Finding:
-    """Probe each TLS protocol version individually."""
+                          timeout: float, connect_ip: Optional[str] = None,
+                          negotiated: Optional[str] = None,
+                          facts: Optional[Dict] = None) -> F.Finding:
+    """Probe each TLS protocol version individually and report it honestly.
+
+    `negotiated` is the protocol the primary handshake established.  A version
+    that the primary handshake negotiated is never reported as refused or
+    unsupported; if its own probe is inconclusive, it stays inconclusive and
+    cites the primary success.
+    """
     target = f"{host}:{port}"
+    facts = facts if facts is not None else {}
     if not hasattr(ssl, "TLSVersion"):
         return F.Finding("tls.protocols", "TLS protocol version support",
                          F.NOT_TESTED, F.SCOPE_REMOTE_NET,
                          ["this Python/OpenSSL build cannot pin protocol versions"],
                          target=target)
-    rows, supported, refused, timed_out, errored = [], [], [], [], []
-    relaxed_used: List[str] = []
-    versions = [
-        ("TLS 1.0", ssl.TLSVersion.TLSv1),
-        ("TLS 1.1", ssl.TLSVersion.TLSv1_1),
-        ("TLS 1.2", ssl.TLSVersion.TLSv1_2),
-        ("TLS 1.3", ssl.TLSVersion.TLSv1_3),
-    ]
-    legacy = (ssl.TLSVersion.TLSv1, ssl.TLSVersion.TLSv1_1, ssl.TLSVersion.TLSv1_2)
-    for label, ver in versions:
-        relaxed = ver in legacy
-        ctx = _make_context(verify=False, min_v=ver, max_v=ver,
-                            ciphers=_RELAXED_CIPHER_POLICY if relaxed else None)
-        if relaxed:
-            relaxed_used.append(label)
-        try:
-            s = _handshake(host, port, sni, ctx, timeout, connect_ip=connect_ip)
-            rows.append(f"{label}: accepted ({s.version()})")
-            supported.append(label)
-            s.close()
-        except (_ConnectTimeout, _NegotiationTimeout):
-            # A timeout is not a refusal: the server never answered the offer.
-            rows.append(f"{label}: timed out after {timeout:.0f}s (no response)")
-            timed_out.append(label)
-        except ssl.SSLError as exc:
-            rows.append(f"{label}: refused ({str(exc).splitlines()[0][:80]})")
-            refused.append(label)
-        except OSError as exc:
-            rows.append(f"{label}: network error ({exc})")
-            errored.append(label)
 
-    status = F.PASS
-    notes = []
-    if not supported:
+    versions = [("TLS 1.0", ssl.TLSVersion.TLSv1, True),
+                ("TLS 1.1", ssl.TLSVersion.TLSv1_1, True),
+                ("TLS 1.2", ssl.TLSVersion.TLSv1_2, True),
+                ("TLS 1.3", ssl.TLSVersion.TLSv1_3, False)]
+    primary_label = _VERSION_LABELS.get(negotiated or "", "")
+    started = time.monotonic()
+    budget = timeout * PROBE_BUDGET_FACTOR * len(versions)
+    rows, accepted_versions, refused_versions = [], [], []
+    inconclusive_versions, relaxed_accepted = [], []
+    relaxed_used = [label for label, _v, relaxed in versions if relaxed]
+    attempts = 0
+
+    def attempts_left() -> bool:
+        return attempts < PROBE_BUDGET_FACTOR * len(versions) and \
+            (time.monotonic() - started) < budget
+
+    for label, version, relaxed in versions:
+        attempts += 1
+        state, detail = _probe_version(host, port, sni, label, version, timeout,
+                                       connect_ip, relaxed)
+        retried = False
+        if state == INCONCLUSIVE and attempts_left():
+            attempts += 1
+            retried = True
+            state, detail = _probe_version(host, port, sni, label, version,
+                                            timeout, connect_ip, relaxed)
+
+        if state == ACCEPTED:
+            accepted_versions.append(label)
+            if relaxed:
+                relaxed_accepted.append(label)
+                rows.append(f"{label}: accepted under relaxed cipher policy "
+                            f"({detail})" + (" after 1 retry" if retried else ""))
+            else:
+                rows.append(f"{label}: accepted ({detail})" +
+                            (" after 1 retry" if retried else ""))
+        elif state == REFUSED:
+            if label == primary_label:
+                # Contradiction: the primary handshake proved this version works.
+                inconclusive_versions.append(label)
+                rows.append(f"{label}: inconclusive - probe answered with an error "
+                            f"({detail}), although the primary handshake negotiated "
+                            f"{negotiated}")
+            else:
+                refused_versions.append(label)
+                rows.append(f"{label}: refused ({detail})")
+        elif state == UNSUPPORTED:
+            inconclusive_versions.append(label)
+            rows.append(f"{label}: inconclusive - {detail}")
+        else:
+            inconclusive_versions.append(label)
+            cite = (f"; the primary handshake negotiated {negotiated}"
+                    if label == primary_label else "")
+            budget_note = ("" if retried else
+                           "; retry skipped: probe budget exhausted")
+            rows.append(f"{label}: inconclusive - {detail}{cite}{budget_note}")
+
+    # TLS 1.2 can be negotiated by both policies; the default-policy probe is
+    # what tells "a modern client can connect" apart from "only a lowered
+    # security level can".
+    interop_line = ""
+    if "TLS 1.2" in accepted_versions and attempts_left():
+        state, detail = _probe_version(host, port, sni, "TLS 1.2",
+                                       ssl.TLSVersion.TLSv1_2, timeout, connect_ip,
+                                       False)
+        if state == ACCEPTED:
+            interop_line = (f"TLS 1.2: also accepted with the default cipher policy "
+                            f"({detail}) - a default-configured modern client can use it")
+        elif state == REFUSED:
+            interop_line = ("TLS 1.2: accepted only under the relaxed cipher policy - "
+                            "a default-configured modern client is refused")
+        else:
+            interop_line = (f"TLS 1.2: default-policy probe inconclusive ({detail}) - "
+                            "client interoperability not established")
+        rows.append(interop_line)
+
+    facts["probe_policy"] = {"negotiated": negotiated or "",
+                             "relaxed_versions": relaxed_used}
+
+    status, notes = F.PASS, []
+    if not accepted_versions:
         status = F.FAIL
-        notes.append("no TLS version could complete a handshake")
-    elif supported == ["TLS 1.3"]:
+        notes.append("no TLS version completed a handshake")
+    elif accepted_versions == ["TLS 1.3"]:
         notes.append("only TLS 1.3 supported")
-    if any(v in supported for v in ("TLS 1.0", "TLS 1.1")):
+    if any(v in accepted_versions for v in ("TLS 1.0", "TLS 1.1")):
         if status == F.PASS:
             status = F.WARNING
-        notes.append("deprecated TLS 1.0/1.1 are enabled (security/policy risk and "
-                     "a sign of legacy configuration)")
-    if "TLS 1.2" not in supported and supported:
+        notes.append("deprecated TLS 1.0/1.1 are accepted by the server "
+                     "(security/policy risk and a sign of legacy configuration)")
+    if "TLS 1.2" not in accepted_versions and accepted_versions:
         status = F.WARNING
-        notes.append("TLS 1.2 refused - many clients cannot connect to this server")
+        notes.append("TLS 1.2 was not accepted - many clients cannot connect")
+    if inconclusive_versions:
+        if status == F.PASS:
+            status = F.WARNING
+        notes.append("probe inconclusive for " + ", ".join(inconclusive_versions) +
+                     " - no conclusion about server support is drawn for those "
+                     "versions")
+    if relaxed_accepted:
+        notes.append("legacy acceptance was probed with a relaxed cipher policy "
+                     "(ALL:@SECLEVEL=0); see the interoperability line for what a "
+                     "default-configured client gets")
 
     failure_kind = ""
-    if not supported:
-        if refused and len(refused) == len(versions):
+    if not accepted_versions:
+        if refused_versions and len(refused_versions) == len(versions):
             failure_kind = "no-version-accepted"
-        elif len(timed_out) + len(errored) == len(versions):
+        elif len(inconclusive_versions) == len(versions):
             failure_kind = "no-version-answered"
+    observation = "probe-inconclusive" if inconclusive_versions else ""
+    if observation and not failure_kind:
+        failure_kind = "probe-inconclusive"
 
-    evidence = list(rows)
-    if relaxed_used and any(v in supported for v in relaxed_used):
-        evidence.append(_RELAXED_POLICY_NOTE)
-        if status == F.PASS or status == F.WARNING:
-            notes.append("legacy versions accepted under a relaxed cipher policy")
     return F.Finding(
         "tls.protocols", "TLS protocol version support", status, F.SCOPE_REMOTE_NET,
-        evidence, detail="; ".join(notes),
+        rows,
+        detail="; ".join(notes),
         recommendation=("Enable TLS 1.2 (and 1.3) and disable 1.0/1.1 for a modern, "
                         "interoperable configuration." if status != F.PASS else ""),
-        target=target, failure_kind=failure_kind)
+        target=target, failure_kind=failure_kind, observation=observation)
 
 
-def check_sni_difference(host: str, port: int, sni: str, timeout: float) -> F.Finding:
-    """Compare the certificate with and without SNI."""
+def _sni_cert(host: str, port: int, server_name: Optional[str],
+              timeout: float) -> certs.CertInfo:
+    """Certificate served for this server name (raises on failure)."""
+    ctx = _make_context(verify=False)
+    s = _handshake(host, port, server_name, ctx, timeout)
+    try:
+        der = s.getpeercert(binary_form=True)
+    finally:
+        s.close()
+    if not der:
+        raise ssl.SSLError("the server sent no certificate")
+    return certs.decode_der(der, enrich=False)
+
+
+def check_sni_difference(host: str, port: int, sni: str,
+                         timeout: float) -> F.Finding:
+    """Report how the server answers with and without SNI.
+
+    A different certificate for clients that send no SNI is what name-based TLS
+    virtual hosting is supposed to do (default vhost, CDN, shared hosting), so
+    it is recorded as an observation.  The defect question - does the endpoint
+    serve a certificate for the requested name? - is answered by tls.hostname.
+    """
+    title = "Behaviour with and without SNI"
     target = f"{host}:{port}"
     if _is_ip(host):
-        return F.Finding("tls.sni", "SNI dependence", F.NOT_TESTED,
-                         F.SCOPE_REMOTE_NET,
+        return F.Finding("tls.sni", title, F.NOT_TESTED, F.SCOPE_REMOTE_NET,
                          ["target is an IP literal; SNI comparison not applicable"],
                          target=target)
 
-    def fp(server_name: Optional[str]) -> str:
-        ctx = _make_context(verify=False)
-        s = _handshake(host, port, server_name, ctx, timeout)
-        der = s.getpeercert(binary_form=True)
-        s.close()
-        return certs.decode_der(der, enrich=False).sha256 if der else ""
-
     try:
-        with_sni = fp(sni)
+        with_sni = _sni_cert(host, port, sni, timeout)
     except (ssl.SSLError, OSError) as exc:
-        return F.Finding("tls.sni", "SNI dependence", F.FAIL, F.SCOPE_REMOTE_NET,
+        return F.Finding("tls.sni", title, F.FAIL, F.SCOPE_REMOTE_NET,
                          [f"handshake with SNI '{sni}' failed: {exc}"],
+                         recommendation="The endpoint does not serve TLS for this "
+                                        "name. Check the virtual host that should "
+                                        "answer for it.",
                          target=target)
+
     try:
-        without_sni = fp(None)
+        without_sni = _sni_cert(host, port, None, timeout)
     except (ssl.SSLError, OSError) as exc:
         return F.Finding(
-            "tls.sni", "SNI dependence", F.WARNING, F.SCOPE_REMOTE_NET,
-            [f"without SNI the server fails: {exc}",
-             f"with SNI '{sni}' it serves cert SHA-256 {with_sni[:16]}..."],
-            recommendation="This server requires SNI. Very old clients (or wrong "
-                           "default vhost configs) will fail here.",
-            target=target)
-    if with_sni != without_sni:
+            "tls.sni", title, F.NOT_TESTED, F.SCOPE_REMOTE_NET,
+            [f"without SNI the probe failed: {str(exc).splitlines()[0][:120]}",
+             f"with SNI '{sni}' the server serves SHA-256 {with_sni.sha256[:24]}...",
+             "SNI dependence could not be determined from this probe"],
+            detail="Some servers require SNI or reset connections that omit it. "
+                   "That is a client-compatibility fact, not a configuration defect.",
+            target=target, observation="sni-without-probe-failed")
+
+    covers = with_sni.matches_hostname(sni)[0]
+    coverage_line = (f"with SNI '{sni}' the served certificate covers that name"
+                     if covers else
+                     f"with SNI '{sni}' the served certificate does NOT cover that name")
+    if with_sni.sha256 == without_sni.sha256:
         return F.Finding(
-            "tls.sni", "SNI dependence", F.WARNING, F.SCOPE_REMOTE_NET,
-            ["the server presents DIFFERENT certificates with and without SNI",
-             f"with SNI:    {with_sni[:24]}...",
-             f"without SNI: {without_sni[:24]}..."],
-            recommendation="Clients not sending the correct SNI server name receive a "
-                           "different (possibly wrong) certificate. Check virtual-host "
-                           "configuration and the default SSL site.",
+            "tls.sni", title, F.PASS, F.SCOPE_REMOTE_NET,
+            ["the same certificate is served with and without SNI", coverage_line],
             target=target)
+
     return F.Finding(
-        "tls.sni", "SNI dependence", F.PASS, F.SCOPE_REMOTE_NET,
-        ["same certificate served with and without SNI"], target=target)
+        "tls.sni", title, F.PASS, F.SCOPE_REMOTE_NET,
+        [f"observation: without SNI the server serves a different certificate "
+         f"(SHA-256 {without_sni.sha256[:24]}... vs {with_sni.sha256[:24]}... with SNI)",
+         coverage_line,
+         "a default certificate for clients that send no SNI is legitimate for "
+         "name-based TLS virtual hosting (default vhost, CDN or shared hosting)",
+         "clients that send the requested name (every modern client) receive the "
+         "certificate above"],
+        detail="Observation only. Whether the endpoint is misconfigured depends on "
+               "tls.hostname and tls.verify for the requested name, not on the "
+               "certificate used for clients that send no SNI.",
+        target=target, observation="sni-certificate-differs")
 
 
-def check_multi_ip(host: str, port: int, ips: List[str], timeout: float) -> F.Finding:
-    """When DNS returned several IPs, compare the certificate each presents."""
+_ENDPOINT_CAP = 4          # bound the number of extra connections per scan
+
+# Endpoint states: what a probe actually produced.  Only "negotiated" carries
+# certificate evidence, so only it may take part in a comparison.
+EP_NEGOTIATED = "negotiated"
+EP_REJECTED = "tls-rejected"
+EP_UNREACHABLE = "tcp-unreachable"
+EP_TIMEOUT = "timed-out"
+EP_NO_CERT = "probe-unavailable"
+
+
+def _is_unreachable(exc: BaseException) -> bool:
+    """True when the failure means the address could not be reached at all."""
+    if isinstance(exc, (_ConnectTimeout, _NegotiationTimeout)):
+        return False
+    if isinstance(exc, ssl.SSLError) and "timed out" not in str(exc).lower():
+        return False
+    code = getattr(exc, "errno", None)
+    if code in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED,
+                errno.EADDRNOTAVAIL, errno.ENETDOWN, errno.EHOSTDOWN):
+        return True
+    text = str(exc).lower()
+    return any(m in text for m in ("unreachable", "no route", "refused",
+                                   "not known", "name or service not known"))
+
+
+def _probe_endpoint(host: str, port: int, sni: Optional[str], timeout: float,
+                    ip: str) -> Dict:
+    """Probe one address and report *what happened*, not just a fingerprint.
+
+    Returns {"ip", "state", "detail", "sha256", "hostname_ok", "chain_status",
+    "sni"}.  Certificate fields are filled only for state "negotiated"; every
+    other state explains why no certificate evidence exists.
+    """
+    record = {"ip": ip, "state": EP_UNREACHABLE, "detail": "", "sha256": "",
+              "hostname_ok": None, "chain_status": "", "sni": sni}
+    ssock = None
+    try:
+        ctx = _make_context(verify=False)
+        ssock = _handshake(host, port, sni, ctx, timeout, connect_ip=ip)
+        der = ssock.getpeercert(binary_form=True)
+        name_for_chain = host if not _is_ip(host) else None
+        chain_der, _reader, _errors = read_presented_chain(
+            ssock, host, port, sni, timeout)
+        ssock = None
+    except (_ConnectTimeout, _NegotiationTimeout) as exc:
+        record.update(state=EP_TIMEOUT, detail=str(exc))
+        return record
+    except ssl.SSLError as exc:
+        record.update(state=EP_REJECTED, detail=str(exc).splitlines()[0][:120])
+        return record
+    except OSError as exc:
+        if _is_unreachable(exc):
+            record.update(state=EP_UNREACHABLE, detail=str(exc).splitlines()[0][:120])
+        else:
+            record.update(state=EP_TIMEOUT, detail=str(exc).splitlines()[0][:120])
+        return record
+    finally:
+        if ssock is not None:
+            _discard(ssock)
+
+    if not der:
+        record.update(state=EP_NO_CERT, detail="handshake succeeded without a certificate")
+        return record
+    leaf = certs.decode_der(der, enrich=False)
+    record.update(state=EP_NEGOTIATED, sha256=leaf.sha256,
+                  hostname_ok=(leaf.matches_hostname(sni)[0] if sni else None))
+    if chain_der is not None:
+        chain = [certs.decode_der(c) for c in chain_der]
+        chain[0] = leaf
+        try:
+            record["chain_status"] = certs.assess_chain(
+                chain, certs.load_root_anchors() if len(chain) == 1 else None).status
+        except Exception:            # noqa: BLE001 - chain judgement is best effort
+            record["chain_status"] = "unread"
+    return record
+
+
+def _describe_endpoint(rec: Dict) -> str:
+    ip, state = rec["ip"], rec["state"]
+    if state == EP_NEGOTIATED:
+        bits = [f"SHA-256 {rec['sha256'][:16]}..."]
+        if rec.get("hostname_ok") is not None:
+            bits.append("covers the requested name" if rec["hostname_ok"]
+                        else "does NOT cover the requested name")
+        if rec.get("chain_status"):
+            bits.append(f"chain {rec['chain_status']}")
+        return f"{ip}: negotiated - " + ", ".join(bits)
+    reason = f" ({rec['detail']})" if rec.get("detail") else ""
+    return f"{ip}: {state}{reason}"
+
+
+def check_multi_ip(host: str, port: int, ips: List[str], timeout: float,
+                   sni: Optional[str] = None, facts: Optional[Dict] = None
+                   ) -> F.Finding:
+    """Compare certificate evidence across the addresses DNS returned.
+
+    A certificate difference is reported only when at least two endpoints
+    completed a handshake for the same server name and their certificate facts
+    differ.  An unreachable, rejected or timed-out endpoint produced no
+    certificate, so it can never be evidence of a difference.
+    """
     target = f"{host}:{port}"
+    facts = facts if facts is not None else {}
+    server_name = sni if sni is not None else (None if _is_ip(host) else host)
     uniq = sorted(set(ips))
+    facts["endpoints"] = []
     if len(uniq) < 2:
+        facts["endpoint_comparison"] = {"probed": 0, "comparable": 0,
+                                        "difference": False, "attribute": ""}
         return F.Finding("tls.multiip", "Multiple endpoint comparison", F.NOT_TESTED,
                          F.SCOPE_REMOTE_NET,
-                         ["DNS returned fewer than two addresses"],
+                         ["DNS returned fewer than two addresses - nothing to compare"],
                          target=target)
-    rows, fps = [], {}
-    for ip in uniq[:4]:  # cap probes
-        try:
-            ctx = _make_context(verify=False)
-            s = _handshake(host, port, host if not _is_ip(host) else None, ctx,
-                           timeout, connect_ip=ip)
-            der = s.getpeercert(binary_form=True)
-            s.close()
-            fp = certs.decode_der(der, enrich=False).sha256 if der else "(no cert)"
-        except (ssl.SSLError, OSError) as exc:
-            fp = f"handshake failed: {str(exc).splitlines()[0][:60]}"
-        fps[ip] = fp
-        rows.append(f"{ip}: {fp[:32] if fp.startswith(('0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f')) else fp}")
-    distinct = {v for v in fps.values()}
-    if len(distinct) == 1:
-        return F.Finding("tls.multiip", "Multiple endpoint comparison", F.PASS,
-                         F.SCOPE_REMOTE_NET,
-                         ["all endpoints present the same certificate", *rows],
-                         target=target)
+
+    probe_ips = uniq[:_ENDPOINT_CAP]
+    records = [_probe_endpoint(host, port, server_name, timeout, ip)
+               for ip in probe_ips]
+    rows = [_describe_endpoint(r) for r in records]
+    comparable = [r for r in records
+                  if r["state"] == EP_NEGOTIATED and r.get("sni") == server_name]
+    facts["endpoints"] = records
+    facts["endpoint_comparison"] = {"probed": len(records), "comparable": len(comparable),
+                                    "difference": False, "attribute": ""}
+    scope = (f"probed {len(records)} of {len(uniq)} address(es), server name "
+             f"'{server_name or '-'}', timeout {timeout:.0f}s")
+
+    if len(comparable) < 2:
+        only = [r for r in records if r["state"] != EP_NEGOTIATED]
+        if comparable:
+            summary = (f"endpoint comparison inconclusive: {len(comparable)} of "
+                       f"{len(records)} endpoints yielded a certificate")
+            kind, obs = "probe-inconclusive", "endpoint-comparison-inconclusive"
+        else:
+            summary = ("endpoint comparison inconclusive: no endpoint yielded a "
+                       "certificate")
+            kind = ("endpoint-unreachable"
+                    if only and all(r["state"] in (EP_UNREACHABLE, EP_TIMEOUT)
+                                    for r in only) else "probe-inconclusive")
+            obs = "endpoint-comparison-inconclusive"
+        return F.Finding(
+            "tls.multiip", "Multiple endpoint comparison", F.NOT_TESTED,
+            F.SCOPE_REMOTE_NET,
+            [summary, f"{scope}; {len(comparable)} comparable of "
+                     f"{len(records)} probed", *rows],
+            detail="Comparing certificates needs at least two endpoints that "
+                   "completed a handshake for the same server name.",
+            recommendation="Entrypoints in this network could not all be reached. "
+                           "Retest from a network with the same address-family "
+                           "reachability before concluding anything about the "
+                           "certificates behind the name.",
+            target=target, failure_kind=kind, observation=obs)
+
+    differences = []
+    if len({r["sha256"] for r in comparable}) > 1:
+        differences.append("certificate identity")
+    covered = {r["hostname_ok"] for r in comparable if r["hostname_ok"] is not None}
+    if len(covered) > 1:
+        differences.append("hostname coverage")
+    chains = {r["chain_status"] for r in comparable if r["chain_status"]}
+    if len(chains) > 1:
+        differences.append("chain status")
+
+    if not differences:
+        facts["endpoint_comparison"].update({"comparable": len(comparable)})
+        return F.Finding(
+            "tls.multiip", "Multiple endpoint comparison", F.PASS, F.SCOPE_REMOTE_NET,
+            [f"all {len(comparable)} comparable endpoint(s) present the same "
+             f"certificate facts", f"{scope}", *rows],
+            target=target)
+
+    facts["endpoint_comparison"].update({"difference": True,
+                                         "attribute": ", ".join(differences)})
     return F.Finding(
         "tls.multiip", "Multiple endpoint comparison", F.WARNING, F.SCOPE_REMOTE_NET,
-        ["endpoints present DIFFERENT results (load-balanced pools with inconsistent "
-         "certificates cause intermittent failures)", *rows],
-        recommendation="Align certificate deployment across all nodes/IPs.",
-        target=target)
+        [f"{len(comparable)} comparable endpoints differ in: "
+         f"{', '.join(differences)}",
+         "the difference is measured, not inferred: every listed endpoint completed "
+         "a handshake for the same server name",
+         f"{scope}", *rows],
+        detail="Different frontends behind one name can legitimately serve different "
+               "certificates; this reports the measured difference, not its cause.",
+        recommendation="If every client should see the same certificate, align "
+                       "certificate deployment across the endpoints listed above.",
+        target=target, observation="endpoint-certificate-difference")
 
 
 def check_weak_ciphers(host: str, port: int, sni: Optional[str],
@@ -895,6 +1184,9 @@ def export_facts(facts: Dict) -> Dict:
         "chain_status": facts.get("chain_status", "unread"),
         "handshake_ip": facts.get("handshake_ip"),
         "handshake_failure": facts.get("handshake_failure", ""),
+        "endpoints": facts.get("endpoints", []),
+        "endpoint_comparison": facts.get("endpoint_comparison"),
+        "probe_policy": facts.get("probe_policy"),
     }
 
 
@@ -958,7 +1250,9 @@ def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None
     facts.update(hs_facts)
     if hs_f.status == F.FAIL:
         matrix_f = check_protocol_matrix(host, port, server_name, timeout,
-                                        connect_ip=verified_ip)
+                                         connect_ip=verified_ip,
+                                         negotiated=facts.get("protocol"),
+                                         facts=facts)
         out.append(matrix_f)
         _note_handshake_coherence(hs_f, matrix_f)
         return out, facts
@@ -1016,9 +1310,10 @@ def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None
     out.append(check_tls_validation(host, port, server_name, timeout))
     out.append(check_tls_rootonly_validation(host, port, server_name, timeout))
     out.append(check_protocol_matrix(host, port, server_name, timeout,
-                                     connect_ip=verified_ip))
+                                     connect_ip=verified_ip,
+                                     negotiated=facts.get("protocol"), facts=facts))
     out.append(check_sni_difference(host, port, server_name or host, timeout))
-    out.append(check_multi_ip(host, port, ips, timeout))
+    out.append(check_multi_ip(host, port, ips, timeout, sni=server_name, facts=facts))
     out.append(check_weak_ciphers(host, port, server_name, timeout))
     https_f, https_facts = check_https(host, port, server_name, timeout)
     facts.update(https_facts)

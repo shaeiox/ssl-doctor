@@ -139,7 +139,12 @@ class FailureKindTests(unittest.TestCase):
             "1.1 must stay unchanged; the field is new in 1.2")
         self.assertIn("failure_kind", contract.SCHEMA["properties"]["findings"]["items"]
                       ["properties"])
-        self.assertEqual(contract.SCHEMA_VERSION, "1.2")
+        # 1.3 adds the observation class, cause limitations and the endpoint block
+        self.assertIn("observation", contract.SCHEMA["properties"]["findings"]["items"]
+                      ["properties"])
+        self.assertIn("limitations", contract.SCHEMA["properties"]["diagnosis"]
+                      ["properties"]["causes"]["items"]["properties"])
+        self.assertEqual(contract.SCHEMA_VERSION, "1.3")
 
 
 @unittest.skipUnless(openssl_available(), "openssl binary not available")

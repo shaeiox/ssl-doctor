@@ -468,6 +468,36 @@ _negotiate()  → ssl.SSLSocket   raises _NegotiationTimeout → failure_kind "n
    (accepted / refused / timed out / network error), and sets `failure_kind` to
    `no-version-accepted` or `no-version-answered`. A timeout is never a refusal.
 
+### Endpoint comparison and SNI observation
+
+`check_multi_ip(host, port, ips, timeout, sni=…, facts=…)` probes up to four
+addresses and records one state per address in `facts["endpoints"]`
+(`negotiated`, `tls-rejected`, `tcp-unreachable`, `timed-out`,
+`probe-unavailable`). Only `negotiated` endpoints whose server name matches the
+requested one are compared, and only over leaf fingerprint, hostname coverage and
+chain status. `< 2` comparable endpoints ⇒ `NOT TESTED` with
+`observation="endpoint-comparison-inconclusive"`; a measured difference ⇒
+`WARNING` with `observation="endpoint-certificate-difference"`.
+
+`check_sni_difference()` reports one of: same certificate (PASS, no observation),
+a different certificate without SNI (PASS, `observation="sni-certificate-differs"`,
+explicitly described as legitimate default-vhost behaviour), the no-SNI probe
+failing (NOT TESTED, `observation="sni-without-probe-failed"`), or a failing
+handshake for the requested name (FAIL). It never recommends a virtual-host
+change on the strength of a fingerprint difference.
+
+### Protocol matrix
+
+`check_protocol_matrix(..., negotiated=<primary protocol>, facts=...)` probes each
+version with a per-version policy (relaxed `ALL:@SECLEVEL=0` for 1.0-1.2, default
+for 1.3) and reports per row: accepted / accepted under relaxed cipher policy /
+refused / inconclusive. A version the primary handshake negotiated is never
+reported as refused or unsupported; an inconclusive row is retried once inside a
+budget of `timeout × PROBE_BUDGET_FACTOR × versions`, and the finding carries
+`observation="probe-inconclusive"`. When TLS 1.2 is accepted under the relaxed
+policy, a default-policy probe adds an interoperability line (a modern client can
+connect, or only the lowered security level can).
+
 `analyze.diagnose()` attributes from `failure_kind`, not from the status:
 timeouts and resets are probable **network** causes whose advice is to repeat the
 measurement and inspect the path; only `tls-alert` can produce a server

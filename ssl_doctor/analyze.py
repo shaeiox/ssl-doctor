@@ -31,12 +31,14 @@ class Cause:
     summary: str
     evidence: List[str] = field(default_factory=list)
     recommendation: str = ""
+    limitations: List[str] = field(default_factory=list)  # known gaps in the evidence
 
     def to_dict(self) -> Dict:
         return {
             "rank": self.rank, "certainty": self.certainty, "origin": self.origin,
             "summary": self.summary, "evidence": self.evidence,
             "recommendation": self.recommendation,
+            "limitations": self.limitations,
         }
 
 
@@ -81,11 +83,17 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
     local = [it for it in items if it.scope == F.SCOPE_LOCAL]
     rank = 10
 
-    def add(certainty, origin, summary, evidence, recommendation, bump=0):
+    def add(certainty, origin, summary, evidence, recommendation, bump=0,
+            limitations=None):
         nonlocal rank
         d.causes.append(Cause(rank + bump, certainty, origin, summary,
-                              evidence, recommendation))
+                              evidence, recommendation,
+                              list(limitations or [])))
         rank += 10
+
+    def note(text: str) -> None:
+        if text not in d.notes:
+            d.notes.append(text)
 
     # ---- transport first ---------------------------------------------------
     dns = _first(remote, "net.dns")
@@ -116,13 +124,14 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
         accepted = _accepted_versions(matrix)
         ev = ([f"handshake failure kind: {kind}"] if kind else []) + \
             hs.evidence + (matrix.evidence if matrix else [])
+        single_sample = ["one scan is a single sample; a stall may be transient"]
         if hs.status == F.WARNING:
             add("probable", "network",
                 "The TLS handshake stalls and completes only on a retry - "
                 "intermittent path behaviour; the version probes answered",
                 ev, "Repeat the measurement from another network. If the stall is "
                     "reproducible, inspect TLS-inspection devices and idle timeouts "
-                    "on the path.")
+                    "on the path.", limitations=single_sample)
         elif kind in _TIMEOUT_KINDS and accepted:
             add("probable", "network",
                 "The TLS handshake stalls although version-pinned handshakes "
@@ -130,7 +139,7 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
                 "server answered every protocol version offered",
                 ev, "Repeat the measurement and retest from another network; if it "
                     "recurs, inspect TLS-inspection devices and idle timeouts on the "
-                    "path.")
+                    "path.", limitations=single_sample)
         elif kind in _TIMEOUT_KINDS:
             add("probable", "network",
                 "TCP connects but no TLS version completes a handshake - the port "
@@ -229,9 +238,14 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
         if c and c.status == F.FAIL:
             namefail = c
     if namefail:
+        sni_obs = _first(remote, "tls.sni")
+        corroborate = ([f"additional observation: {e}" for e in sni_obs.evidence
+                        if "observation" in e.lower()]
+                       if sni_obs and sni_obs.observation == "sni-certificate-differs"
+                       else [])
         add("confirmed", "certificate",
             "The certificate does not cover the hostname in use (name mismatch)",
-            namefail.evidence, namefail.recommendation)
+            namefail.evidence + corroborate, namefail.recommendation)
 
     # ---- trust chain ---------------------------------------------------------
     chainwl = chain
@@ -294,16 +308,33 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
             "The configured private key does not match the certificate on the "
             "server",
             keymatch_srv.evidence, keymatch_srv.recommendation)
-    if sni and sni.status == F.WARNING and not (namefail and verify):
-        add("possible", "server",
-            "SNI/virtual-host inconsistency: clients sending a wrong or missing "
-            "server name get a different certificate",
-            sni.evidence, sni.recommendation, bump=40)
-    if multi and multi.status == F.WARNING:
+    # An SNI observation ("a different default certificate is served") is not a
+    # defect: name-based virtual hosting is expected to do exactly that.  Only a
+    # failing handshake with the requested name is a finding of its own.
+    if sni and sni.status == F.FAIL:
         add("probable", "server",
-            "Load-balanced endpoints present different certificates - "
-            "intermittent failures depending on which node answers",
-            multi.evidence, multi.recommendation, bump=30)
+            "The endpoint does not complete a TLS handshake for the requested "
+            "server name",
+            sni.evidence, sni.recommendation or
+            "Check that a virtual host answers for this name.", bump=40)
+
+    # Endpoint comparison: only a measured difference between comparable
+    # endpoints is a cause.  Missing evidence is reported as a note.
+    if multi and multi.observation == "endpoint-certificate-difference":
+        add("probable", "server",
+            "Comparable endpoints behind this name present different certificate "
+            "facts - clients may see different certificates depending on the "
+            "endpoint they reach",
+            multi.evidence, multi.recommendation, bump=30,
+            limitations=["only the first endpoints returned by DNS were compared",
+                         "a measured difference does not by itself prove a "
+                         "misconfiguration: frontends may be deployed differently"])
+    elif multi and multi.status == F.NOT_TESTED:
+        detail = next((e for e in multi.evidence
+                       if "inconclusive" in e.lower() or "no endpoint" in e.lower()),
+                      "not enough endpoints returned certificate evidence")
+        note(f"Endpoint comparison inconclusive - {detail.split(':', 1)[-1].strip()}"
+             .replace("inconclusive - inconclusive", "inconclusive"))
 
     # ---- local trust / policy issues ------------------------------------------
     rootmiss = _first(local, "local.rootca")
@@ -314,7 +345,8 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
             and not server_chain_cause:
         add("probable", "client",
             "The issuing root CA is missing from this machine's trusted root store",
-            rootmiss.evidence, rootmiss.recommendation, bump=20)
+            rootmiss.evidence, rootmiss.recommendation, bump=20,
+            limitations=["this machine may not be the client that is failing"])
     certutil = _first(local, "local.certutil")
     if certutil and certutil.status == F.FAIL and verify and verify.status == F.PASS:
         add("probable", "client",
@@ -330,10 +362,24 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
 
     # ---- protocol hardening observations (warnings only) ----------------------
     if matrix and matrix.status == F.WARNING:
+        limits = []
+        relaxed = [r.split(":")[0] for r in matrix.evidence
+                   if "relaxed cipher policy" in r]
+        if relaxed:
+            limits.append("legacy acceptance was probed with a relaxed cipher policy "
+                          f"(ALL:@SECLEVEL=0): {', '.join(relaxed)}")
+        if matrix.observation == "probe-inconclusive":
+            limits.append("at least one version probe produced no definite result")
         add("possible", "server",
             "Protocol configuration carries compatibility/security risks",
             matrix.evidence + ([matrix.detail] if matrix.detail else []),
-            matrix.recommendation, bump=50)
+            matrix.recommendation, bump=50, limitations=limits)
+    if matrix and matrix.observation == "probe-inconclusive":
+        inconclusive = [r for r in matrix.evidence if "inconclusive" in r]
+        note("Protocol probe inconclusive: " + ("; ".join(inconclusive) or
+                                               "a version probe returned no result") +
+             " - this is a probe result, not evidence that the server refuses the "
+             "version")
     if nginx_prot and nginx_prot.status == F.WARNING and not (matrix and
                                                               matrix.status == F.WARNING):
         add("possible", "server", "nginx protocol configuration carries risks",
@@ -359,6 +405,10 @@ def _finish(d: Diagnosis, items: List[F.Finding]) -> Diagnosis:
             d.notes.append(
                 "No specific root cause pattern matched, but some checks report "
                 "warnings/failures - review the findings below.")
+        elif any(f.status == F.NOT_TESTED for f in items):
+            d.notes.append(
+                "No root cause established: some checks could not be completed and "
+                "their evidence is inconclusive (see the not-tested findings).")
         else:
             d.notes.append("All executed checks passed. If a problem persists, run "
                            "server-side checks (/server connect) and Windows client "

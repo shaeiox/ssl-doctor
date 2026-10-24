@@ -105,6 +105,8 @@ def print_finding(f: F.Finding, verbose: bool = True) -> None:
         print(f"          {paint('·', C.GRAY)} {line}")
     if f.failure_kind:
         print(paint(f"          failure kind: {f.failure_kind}", C.DIM))
+    if f.observation:
+        print(paint(f"          observation: {f.observation}", C.DIM))
     if f.detail:
         print(paint(f"          {f.detail}", C.DIM))
     if f.recommendation:
@@ -609,6 +611,8 @@ class SSLDoctorCLI:
                      f"{c.summary}")
             for e in c.evidence[:4]:
                 self.out(paint(f"       evidence: {e}", C.DIM))
+            for lim in c.limitations:
+                self.out(paint(f"       limit: {lim}", C.DIM))
             if c.recommendation:
                 self.out(paint(f"       fix: {c.recommendation}", C.CYAN))
         for n in self._diagnosis.notes:

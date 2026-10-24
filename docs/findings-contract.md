@@ -1,9 +1,10 @@
 # Findings contract (`findings/1.x`)
 
 Every JSON report, agent upload and service export is a findings document.
-Current schema: [`schemas/findings-1.2.schema.json`](../schemas/findings-1.2.schema.json)
+Current schema: [`schemas/findings-1.3.schema.json`](../schemas/findings-1.3.schema.json)
 (source of truth: `ssl_doctor/contract.py`). Earlier minor versions stay
-published: [`findings-1.1`](../schemas/findings-1.1.schema.json),
+published: [`findings-1.2`](../schemas/findings-1.2.schema.json),
+[`findings-1.1`](../schemas/findings-1.1.schema.json),
 [`findings-1.0`](../schemas/findings-1.0.schema.json).
 
 | Version | Change |
@@ -11,6 +12,7 @@ published: [`findings-1.1`](../schemas/findings-1.1.schema.json),
 | 1.0 | Initial contract |
 | 1.1 | Optional `facts` block: `leaf` (`sha256`, `subject`, `not_after`) and `chain_status` (`complete`/`incomplete`/`broken`/`unread`). Monitoring uses it for drift and expiry |
 | 1.2 | Optional `failure_kind` on every finding, and `handshake_ip` / `handshake_failure` in `facts`. Separates *what went wrong* from the finding status, so a stall is never read as a protocol/cipher rejection |
+| 1.3 | Optional `observation` on findings (what was *seen*, not a failure), `limitations` on every cause (where its evidence is incomplete), and `endpoints` / `endpoint_comparison` / `probe_policy` in `facts`. Lets the diagnosis separate observations from defects and state its confidence honestly |
 
 ## Versioning
 
@@ -35,9 +37,41 @@ when nothing failed, including every `PASS`.
 | `network-error` | `tls.handshake` | the connection was reset or became unreachable during negotiation |
 | `no-version-accepted` | `tls.protocols` | every per-version probe was refused |
 | `no-version-answered` | `tls.protocols` | every per-version probe stalled or errored without a TLS answer |
+| `probe-inconclusive` | `tls.protocols`, `tls.multiip` | the probe could not establish a result from the available evidence |
+| `endpoint-unreachable` | `tls.multiip` | no endpoint could be reached, so no certificate evidence exists |
 
 A `WARNING` on `tls.handshake` with a timeout-class `failure_kind` means the stall
 was confirmed by a second attempt, which then completed.
+
+## Observations (`observation`)
+
+An observation says what was *seen*; it is not a failure and must not be turned
+into a configuration defect on its own. `""` means "nothing notable observed".
+
+| `observation` | Emitted by | Meaning |
+|---|---|---|
+| `endpoint-certificate-difference` | `tls.multiip` | two or more comparable endpoints presented different certificate facts |
+| `endpoint-comparison-inconclusive` | `tls.multiip` | fewer than two endpoints yielded comparable certificate evidence |
+| `sni-certificate-differs` | `tls.sni` | a different certificate is served when the client sends no SNI (normal for name-based virtual hosting) |
+| `sni-without-probe-failed` | `tls.sni` | the certificate served without SNI could not be obtained |
+| `probe-inconclusive` | `tls.protocols` | at least one protocol-version probe produced no definite result |
+
+## Cause limitations (`limitations`)
+
+Every cause lists the material gaps in its evidence, for example "only the first
+endpoints returned by DNS were compared" or "legacy acceptance was probed with a
+relaxed cipher policy". A cause with no limitations is one that rests on a
+direct, complete measurement.
+
+## Endpoint states (`facts.endpoints`)
+
+| `state` | Meaning | Comparable? |
+|---|---|---|
+| `negotiated` | handshake completed; certificate facts captured | yes |
+| `tls-rejected` | the peer answered with a TLS alert | no |
+| `tcp-unreachable` | the address could not be reached | no |
+| `timed-out` | connect or negotiation exceeded the deadline | no |
+| `probe-unavailable` | handshake completed without a readable certificate | no |
 
 ## Secrets
 
@@ -58,8 +92,8 @@ forms) and any `PRIVATE KEY` PEM block, replacing them with `[REDACTED]`.
 | `tls.verify` | Validation against the full system trust store |
 | `tls.verify.rootonly` | Validation against trusted roots only (no cached intermediates) |
 | `tls.protocols` | TLS protocol version matrix |
-| `tls.sni` | Certificate difference with and without SNI |
-| `tls.multiip` | Certificate consistency across DNS endpoints |
+| `tls.sni` | Behaviour with and without SNI (an observation, not a defect claim) |
+| `tls.multiip` | Certificate consistency across comparable DNS endpoints (unreachable endpoints are not compared) |
 | `tls.weakcipher` | Acceptance of obsolete cipher suites |
 | `https.response` | HTTPS response and redirect analysis |
 | `scan.domain` | Domain identity profile |

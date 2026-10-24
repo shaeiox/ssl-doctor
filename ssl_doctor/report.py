@@ -140,6 +140,7 @@ def html_from_payload(payload: Dict[str, Any]) -> str:
             parts.append(f'<div class="{cls}"><b>#{c.rank} [{esc(c.certainty.upper())} · '
                          f'{esc(c.origin)}]</b> {esc(c.summary)}'
                          + (f'<ul>{"".join(f"<li class=mono>{esc(e[:400])}</li>" for e in c.evidence)}</ul>' if c.evidence else "")
+                         + (f'<ul>{"".join(f"<li><i>limitation: {esc(l)}</i></li>" for l in c.limitations)}</ul>' if c.limitations else "")
                          + (f'<div><b>Remediation:</b> {esc(c.recommendation)}</div>' if c.recommendation else "")
                          + "</div>")
         if diagnosis.notes:
@@ -154,6 +155,7 @@ def html_from_payload(payload: Dict[str, Any]) -> str:
         for f in items:
             ev = "".join(f"<li class=mono>{esc(e[:400])}</li>" for e in f.evidence)
             kind = (f" · failure: {esc(f.failure_kind)}" if f.failure_kind else "")
+            kind += (f" · observation: {esc(f.observation)}" if f.observation else "")
             parts.append(
                 f"<tr><td>{_badge(f.status)}</td>"
                 f"<td><b>{esc(f.title)}</b>"

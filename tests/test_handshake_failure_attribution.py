@@ -184,7 +184,10 @@ class FailureKindContractTests(unittest.TestCase):
     def test_registry_values_are_the_documented_ones(self):
         self.assertEqual(set(FAILURE_KINDS), {
             "connect-timeout", "negotiation-timeout", "tls-alert", "network-error",
-            "no-version-accepted", "no-version-answered"})
+            "no-version-accepted", "no-version-answered",
+            # 1.3: an inconclusive probe and an unreachable endpoint are failures
+            # to obtain evidence, not findings about the server
+            "probe-inconclusive", "endpoint-unreachable"})
 
     def test_finding_defaults_to_unclassified(self):
         self.assertEqual(F.Finding("tls.chain", "t", F.PASS, F.SCOPE_REMOTE_NET

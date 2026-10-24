@@ -51,7 +51,7 @@ Comparison result:
 
 | Comparable endpoints | Difference found | Finding |
 |---|---|---|
-| ≥ 2 | yes | `WARNING` — "endpoints present different certificate results", naming the addresses, the differing attribute (identity / hostname coverage / chain) and each value |
+| ≥ 2 | yes | `WARNING` — "endpoints present different certificate results" (a measured difference; the cause is `probable` because frontends may legitimately differ), naming the addresses, the differing attribute (identity / hostname coverage / chain) and each value |
 | ≥ 2 | no | `PASS` — "N endpoints present the same certificate, hostname coverage and chain status" |
 | exactly 1 | — | `NOT TESTED` — "endpoint comparison inconclusive: 1 of N endpoints yielded a certificate (the others: …)"; `failure_kind="probe-inconclusive"` |
 | 0 | — | `NOT TESTED` — "no endpoint yielded a certificate"; `failure_kind="endpoint-unreachable"` when every failure was transport-level |
@@ -110,8 +110,8 @@ Title change `SNI dependence` → `Behaviour with and without SNI` keeps the che
 
 ```text
 confirmed  direct measurement of the fault, complete evidence
-           (e.g. two reachable endpoints serve different leaves; the requested
-           name is not covered by the certificate that was served)
+           (e.g. the requested name is not covered by the certificate that was
+           served)
 probable   direct measurement with a material gap
            (e.g. one comparable endpoint only; a single sample; a fault
            inferred from this machine's trust store)
@@ -123,6 +123,9 @@ Hard rules added:
 
 - Transport failures (`tcp-unreachable`, `timed-out`) and `probe-inconclusive` outcomes never raise a `confirmed` or `probable` configuration cause; they raise at most a `possible` cause or a diagnosis note.
 - A certificate-inconsistency cause requires ≥ 2 comparable endpoints **and** a measured difference; with one comparable endpoint the diagnosis says "inconclusive" in `notes`.
+- A measured endpoint difference is `probable`, not `confirmed`: the measurement is
+  direct, but a difference between frontends is not proof of a misconfiguration
+  (amended during implementation — see task 6.1).
 - An SNI observation alone never yields a cause; it is appended to an existing cause's evidence when that cause already exists on independent grounds.
 - Relaxed-policy acceptance yields a `possible` security cause whose `limitations` state the policy.
 
