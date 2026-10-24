@@ -1,4 +1,4 @@
-# SSL Doctor v0.3.0
+# SSL Doctor v0.7.0
 
 Offline-capable SSL/TLS diagnostic tool for IT support engineers. It answers:
 *why does this TLS connection fail — the client machine, the nginx server, the
@@ -16,6 +16,29 @@ python3 ssldoctor.py                                      # interactive session
 python3 ssldoctor.py "/tls example.com"                   # one-shot command
 python3 ssldoctor.py -c "/scan example.com --with-server" -c "/report both out"
 ```
+
+| Option | Effect |
+|---|---|
+| `-c "<command>"` | run a command non-interactively (repeatable); exit code `1` when the diagnosis is `FAIL` |
+| `--timeout <seconds>` | network timeout (default 8 s; `/timeout` changes it in a session) |
+| `--no-tui` (or `--plain`) | line-oriented REPL instead of the full-screen shell |
+| `--typewriter`, `--typewriter-speed <cps>` | type output out gradually on an interactive terminal (also `/typewriter on\|off\|speed <n>`) |
+| `-h`, `--help` | banner and command list |
+
+Environment: `NO_COLOR` / `SSL_DOCTOR_COLOR=never|always` control colour,
+`SSL_DOCTOR_TUI=0` disables the full-screen shell.
+
+### Development
+
+Nothing needs installing to run the tool. A virtual environment is optional and
+is not part of the repository (`venv/` is git-ignored):
+
+```bash
+python3 -m venv venv                       # optional
+venv/bin/python -m unittest discover -s tests
+```
+
+Tests that need the `openssl` binary are skipped when it is missing.
 
 ## Terminal look
 
@@ -119,7 +142,10 @@ same rounded composer around its prompt; piped and `NO_COLOR` output stays plain
   composer's label and are answered in it, with the accepted keys
   (`[Y]es  [N]o`) in its bottom border — the accepted answers are unchanged, and
   passwords are masked and never written to the transcript.
-- **Diagnosis** keeps its ranked causes, certainty labels and `fix:` lines.
+- **Diagnosis** keeps its ranked causes, certainty labels, `limit:` and `fix:`
+  lines. A warning that justifies no root cause is listed as `UNRESOLVED`, with
+  what was observed, what can be concluded, why it stays uncertain, and the next
+  step to verify it.
 
 ### Colour and glyphs
 
@@ -134,7 +160,7 @@ every terminal:
 | `COLORTERM=truecolor` or `24bit` | TrueColor |
 | `TERM` contains `256color` | 256-colour |
 | otherwise, on a terminal | 16-colour |
-| `TERM=dumb`, Windows console without ANSI, or an encoding that cannot render `✓ │` | plain / dashed ASCII frames |
+| `TERM=dumb`, Windows console without ANSI, or an encoding that cannot render `✓ │` | plain, ASCII frames (`+ - \|`) |
 
 Plain mode is byte-compatible with earlier releases (plus the `+ x !` glyphs),
 so `-c` batches, captured logs, JSON reports and the findings contract are
@@ -177,7 +203,10 @@ same server name, over certificate fingerprint, hostname coverage and chain
 status. An unreachable, rejected or timed-out endpoint produced no certificate,
 so it can never be evidence that a certificate differs; with fewer than two
 comparable endpoints the result is `NOT TESTED` (inconclusive) instead of a
-warning. `tls.sni` reports how the server answers with and without SNI as an
+warning. A match covers the compared endpoints only: when DNS returned more
+addresses than were compared, the finding says so (for example "the 4 comparable
+endpoint(s) present the same certificate facts; 3 of 7 DNS address(es) were not
+compared"). `tls.sni` reports how the server answers with and without SNI as an
 *observation*: a different default certificate is normal for name-based virtual
 hosting, and only `tls.hostname`/`tls.verify` decide whether the requested name is
 served correctly. Protocol rows state whether a version was accepted under the
@@ -190,11 +219,15 @@ because a handshake with `ALL:@SECLEVEL=0` only shows that the server's stack ca
 still negotiate the version when legacy cipher suites are offered - not that an
 ordinary client can. `facts.probe_policy.support` records `default`,
 `relaxed-only`, `relaxed-only-unverified`, `rejected` or `inconclusive` per
-version. `relaxed-only` is a warning with the policy limitation attached,
-`relaxed-only-unverified` is a warning plus a diagnosis note and no claim about
-server support, and a probe this client could not perform (no protocols or
-ciphers available in its default context) is reported as a limitation of the
-test, never as a server refusal.
+version, and `facts.probe_policy.default_probe` the raw outcome of the
+default-policy re-probe (`accepted`, `refused`, `client-limited`, …).
+`relaxed-only` is a warning with the policy limitation attached.
+`relaxed-only-unverified` stays a visible warning and an `UNRESOLVED` diagnosis
+entry, with no claim about server support; its remediation is a controlled test
+from a client that can still offer the version, with that test's limitations
+spelled out. A probe this client could not even send (`NO_PROTOCOLS_AVAILABLE`,
+no ciphers in its default context) is `client-limited`: a limitation of the test,
+never a server refusal.
 
 Handshake failures carry a machine-readable `failure_kind` (`connect-timeout`,
 `negotiation-timeout`, `tls-alert`, `network-error`). A timeout is retried once:
@@ -252,7 +285,17 @@ Via a read-only SSH session (`/server connect` or `/scan --server-only` /
 | `/server overview · nginx · cert · config · logs · compare` | The read-only server-side checks listed above |
 | `/diagnose` | Correlate everything into ranked causes (confirmed / probable / possible) with evidence + remediation |
 | `/report [html\|json\|both] [path]` | Self-contained HTML and/or machine-readable JSON |
+| `/typewriter [on\|off\|speed <n>]` | Gradual output on an interactive terminal |
 | `/timeout`, `/findings`, `/clear`, `/help`, `/version`, `/exit` | Session utilities |
+
+JSON reports follow the versioned **findings contract** (currently `1.5`;
+schemas in [`schemas/`](schemas/), reference in
+[`docs/findings-contract.md`](docs/findings-contract.md)). Minor versions only
+add fields, so 1.0–1.4 documents keep validating.
+
+`ssldoctor.py agent enroll|run` runs SSL Doctor as an outbound-only scan agent
+for the optional service in [`service/`](service/); see
+[`docs/agents.md`](docs/agents.md).
 
 ## Security behavior
 
@@ -284,12 +327,19 @@ Via a read-only SSH session (`/server connect` or `/scan --server-only` /
 ```
 ssldoctor.py            entry point
 ssl_doctor/
-  cli.py                REPL, theme/frames/spinner, prompts, scan orchestration
+  cli.py                REPL, theme/frames/spinner, banner, prompts, scan orchestration
+  tui.py                full-screen shell: layout, transcript, composer, key reader
   findings.py           PASS/FAIL/WARNING/NOT TESTED model + session store
   certs.py              offline certificate parsing + key matching (digest-only)
   netchecks.py          target parsing, domain profile, DNS/TCP/TLS/HTTPS checks
   local.py              client machine + Windows-specific diagnostics
   server.py             SSH transport, host-key trust, nginx config analysis
-  analyze.py            correlation rules -> prioritized root causes
+  analyze.py            correlation rules -> prioritized root causes, unresolved findings
   report.py             JSON + HTML report rendering
+  contract.py           findings-contract schema, validation, redaction
+  agent.py              outbound-only scan agent (`ssldoctor.py agent`)
+schemas/                published findings-contract JSON schemas (1.0-1.5)
+docs/                   contract, agents, executed commands, execution flow
+service/                optional multi-tenant service (separate package)
+tests/                  unittest suite (`python -m unittest discover -s tests`)
 ```
