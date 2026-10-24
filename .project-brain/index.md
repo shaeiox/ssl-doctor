@@ -10,3 +10,5 @@
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md
 - server-ssh-nginx → Read-only SSH, nginx vhost resolution, chain linkage, configured-vs-presented   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/server-ssh-nginx.md
 - commands-reference → Actual executed commands documented (local/remote, traced to source)   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/commands-reference.md
+- ui-design-system → Claude Code-inspired theme, frames, prompts, spinner, plain-mode guarantees   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/ui-design-system.md
+- _decisions → One-line decision log: colours, frames, static input, report pills   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/_decisions.md

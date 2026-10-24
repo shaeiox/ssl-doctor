@@ -1,8 +1,13 @@
 """Interactive command-line interface for SSL Doctor.
 
-A persistent REPL with slash commands.  Colours disable automatically when
-stdout is not a terminal or NO_COLOR is set.  A spinner shows progress during
-network/SSH work.  Also supports one-shot batch usage:
+A persistent REPL with slash commands.  Presentation follows the Claude Code
+terminal design language: semantic colour roles that degrade from TrueColor to
+256 to 16 to plain, one frame per command, dashed ASCII input, hot-pink frames
+around machine work and lavender frames around questions put back to the
+operator.  Colour disables automatically when stdout is not a terminal, when
+NO_COLOR is set, or when the terminal cannot render the glyphs.
+
+Also supports one-shot batch usage:
 
     python3 ssldoctor.py -c "/tls example.com" -c "/report html out.html"
 """
@@ -11,8 +16,11 @@ from __future__ import annotations
 
 import getpass
 import os
+import random
 import shlex
+import shutil
 import sys
+import textwrap
 import threading
 import time
 from typing import Dict, List, Optional
@@ -26,31 +34,197 @@ from . import netchecks
 from . import report as reportmod
 from . import server as servermod
 
-# ------------------------------------------------------------------- colors
-
-_USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
-if sys.platform.startswith("win"):  # enable ANSI on modern Windows consoles
-    try:
-        os.system("")
-    except Exception:
-        pass
+# -------------------------------------------------------------------- theme
+#
+# Colours are named by role, never by escape code, so the whole interface can
+# step down from TrueColor to 256 to 16 to plain without changing a call site.
 
 
-class C:
-    GREEN = "\033[32m"; RED = "\033[31m"; YELLOW = "\033[33m"
-    BLUE = "\033[34m"; CYAN = "\033[36m"; GRAY = "\033[90m"
-    BOLD = "\033[1m"; DIM = "\033[2m"; RESET = "\033[0m"
+class ColorMode:
+    """Terminal colour capability, resolved once per process."""
+
+    TRUECOLOR = "truecolor"
+    ANSI256 = "ansi256"
+    ANSI16 = "ansi16"
+    PLAIN = "plain"
 
 
-def paint(text: str, *codes: str) -> str:
-    if not _USE_COLOR or not codes:
-        return text
-    return "".join(codes) + text + C.RESET
-
-
-_STATUS_COLOR = {
-    F.PASS: C.GREEN, F.FAIL: C.RED, F.WARNING: C.YELLOW, F.NOT_TESTED: C.GRAY,
+# role -> (truecolor rgb, 256-colour index, basic 16-colour SGR code)
+ROLES = {
+    "foreground": ((255, 255, 255), 15, 97),
+    "primary": ((215, 119, 87), 173, 33),
+    "shimmer": ((235, 159, 127), 216, 33),
+    "tool": ((253, 93, 177), 206, 95),
+    "accent": ((177, 185, 249), 147, 94),
+    "success": ((78, 186, 101), 71, 32),
+    "warning": ((255, 193, 7), 220, 33),
+    "error": ((255, 107, 128), 204, 31),
+    "muted": ((136, 136, 136), 245, 90),
+    "inactive": ((153, 153, 153), 246, 90),
+    "subtle": ((80, 80, 80), 239, 90),
+    "surface": ((55, 55, 55), 237, 40),
 }
+
+_RESET = "\033[0m"
+
+# layout constants from the design system
+INDENT = "  "
+MIN_BLOCK_WIDTH = 40
+MAX_BLOCK_WIDTH = 72
+DEFAULT_WIDTH = 80
+
+
+def _role_sgr(role: str, mode: str) -> str:
+    rgb, index, basic = ROLES[role]
+    if mode == ColorMode.TRUECOLOR:
+        return "38;2;%d;%d;%d" % rgb
+    if mode == ColorMode.ANSI256:
+        return "38;5;%d" % index
+    return str(basic)
+
+
+def _vt_enabled() -> bool:
+    """Turn on ANSI processing for Windows consoles; False when unsupported."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        state = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(state)):
+            return False
+        return bool(kernel32.SetConsoleMode(handle, state.value | 0x0004))
+    except Exception:
+        return False
+
+
+def resolve_color_mode(stream=None, env=None, windows: Optional[bool] = None,
+                       enable_vt=None) -> str:
+    """Pick one colour level, honouring NO_COLOR and SSL_DOCTOR_COLOR first."""
+    env = os.environ if env is None else env
+    stream = sys.stdout if stream is None else stream
+    windows = (os.name == "nt") if windows is None else windows
+    enable_vt = _vt_enabled if enable_vt is None else enable_vt
+
+    if env.get("NO_COLOR") is not None:
+        return ColorMode.PLAIN
+    forced = (env.get("SSL_DOCTOR_COLOR") or "").strip().lower()
+    if forced in ("never", "plain"):
+        return ColorMode.PLAIN
+    try:
+        is_tty = bool(stream.isatty())
+    except Exception:
+        is_tty = False
+    if not is_tty:  # pipes, files and captured test output stay plain
+        return ColorMode.PLAIN
+    if (env.get("TERM") or "").strip().lower() == "dumb":
+        return ColorMode.PLAIN
+    if windows and not enable_vt():
+        return ColorMode.PLAIN
+    colorterm = (env.get("COLORTERM") or "").strip().lower()
+    if colorterm in ("truecolor", "24bit"):
+        return ColorMode.TRUECOLOR
+    if "256color" in (env.get("TERM") or "").lower():
+        return ColorMode.ANSI256
+    return ColorMode.ANSI16
+
+
+class Glyphs:
+    """Unicode marks with the design system's ASCII fallbacks."""
+
+    UNICODE = {"pass": "✓", "fail": "✗", "warn": "⚠", "run": "▸",
+               "bullet": "•", "sep": "·", "unknown": "?"}
+    ASCII = {"pass": "+", "fail": "x", "warn": "!", "run": ">",
+             "bullet": "-", "sep": "-", "unknown": "?"}
+
+    def __init__(self, unicode_ok: bool = True, box_ok: bool = True) -> None:
+        self.unicode = unicode_ok
+        self.box = box_ok
+        self.table = self.UNICODE if unicode_ok else self.ASCII
+
+    def __getitem__(self, key: str) -> str:
+        return self.table[key]
+
+    @property
+    def vert(self) -> str:
+        return "│" if self.box else "|"
+
+    @property
+    def h(self) -> str:
+        """Horizontal rule: box drawing on capable terminals, dashed ASCII else."""
+        return "─" if self.box else "-"
+
+    def corner(self, unicode_char: str, ascii_char: str) -> str:
+        return unicode_char if self.box else ascii_char
+
+    @property
+    def ellipsis(self) -> str:
+        return "…" if self.unicode else "..."
+
+
+def resolve_glyphs(mode: str, stream=None) -> Glyphs:
+    """Plain mode is ASCII; a terminal gets Unicode only if it can encode it."""
+    if mode == ColorMode.PLAIN:
+        return Glyphs(False, False)
+    stream = sys.stdout if stream is None else stream
+    encoding = getattr(stream, "encoding", None)
+    if not encoding:
+        return Glyphs(True, True)
+    try:
+        "✓✗⚠▸•·│┌┐└┘─".encode(encoding)
+    except (LookupError, UnicodeEncodeError):
+        return Glyphs(False, False)  # frames fall back to dashed ASCII too
+    return Glyphs(True, True)
+
+
+_MODE = resolve_color_mode()
+_GLYPHS = resolve_glyphs(_MODE)
+# Compatibility alias: older code and third-party snippets read this.
+_USE_COLOR = _MODE != ColorMode.PLAIN
+
+
+def set_color_mode(mode: str) -> None:
+    """Re-resolve the palette (used by tests and embedding callers)."""
+    global _MODE, _GLYPHS, _USE_COLOR
+    _MODE = mode
+    _GLYPHS = resolve_glyphs(mode)
+    _USE_COLOR = mode != ColorMode.PLAIN
+
+
+def paint(text: str, role: str = "", bold: bool = False, dim: bool = False) -> str:
+    """Colour one string by semantic role; no-op in plain mode."""
+    if _MODE == ColorMode.PLAIN or not text:
+        return text
+    codes = []
+    if role:
+        if role not in ROLES:  # a bug here must not crash a scan
+            raise KeyError(f"unknown colour role: {role}")
+        codes.append(_role_sgr(role, _MODE))
+    if bold:
+        codes.append("1")
+    if dim:
+        codes.append("2")
+    if not codes:
+        return text
+    return "\033[" + ";".join(codes) + "m" + text + _RESET
+
+
+def _answer_hints(label: str, default: str) -> str:
+    """Key hints for a question, derived from the answers its call site takes."""
+    low = label.lower()
+    if "(yes/no)" in low or default.strip().lower() in ("yes", "no"):
+        return "[Y]es  [N]o"
+    if "1=" in low and "2=" in low:
+        return "[1] password  [2] private key"
+    return ""
+
+_STATUS_ROLE = {
+    F.PASS: "success", F.FAIL: "error", F.WARNING: "warning", F.NOT_TESTED: "muted",
+}
+
+_CERTAINTY_ROLE = {"confirmed": "error", "probable": "warning", "possible": "muted"}
 
 _SCOPE_LABEL = {
     F.SCOPE_LOCAL: "local",
@@ -58,69 +232,250 @@ _SCOPE_LABEL = {
     F.SCOPE_SERVER: "server",
 }
 
-SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+# ----------------------------------------------------------------- terminal
+
+
+def terminal_width(default: int = DEFAULT_WIDTH) -> int:
+    try:
+        return shutil.get_terminal_size((default, 24)).columns
+    except Exception:
+        return default
+
+
+def block_width(label: str = "") -> int:
+    """Clamp the frame to the terminal, but never narrow the header label."""
+    columns = terminal_width()
+    width = max(MIN_BLOCK_WIDTH, min(columns - 2, MAX_BLOCK_WIDTH))
+    if label:
+        needed = len(INDENT) + len(label) + 6
+        width = max(width, min(needed, max(columns - 2, MIN_BLOCK_WIDTH)))
+    return width
+
+
+def _wrap(text: str, width: int) -> List[str]:
+    """Wrap without dropping characters; long tokens are broken, not elided."""
+    if width <= 0:
+        return [text]
+    lines = textwrap.wrap(text, width=max(12, width), break_long_words=True,
+                          break_on_hyphens=False) or [""]
+    return lines
+
+
+def dashed_rule(width: int) -> str:
+    """Signature input rule: hyphens and pipes, never Unicode box drawing."""
+    width = max(MIN_BLOCK_WIDTH, width)
+    return " ".join("-" for _ in range(max(1, (width + 1) // 2)))
+
+
+# --------------------------------------------------------------- indicators
+
+SPINNER_FRAMES = ["·", "✢", "✳", "✶", "✻", "✽"]
+# reverse-mirror cycle: up one way, back the other
+SPINNER_CYCLE = SPINNER_FRAMES + SPINNER_FRAMES[-2:0:-1]
+
+SPINNER_VERBS = (
+    "handshaking", "chaining", "ciphering", "pinning", "tracing", "sniffing",
+    "untangling", "auditing", "decoding", "percolating", "ruminating",
+    "noodling",
+)
 
 
 class Spinner:
-    """Minimal progress spinner; falls back to plain text off-tty."""
+    """Signature thinking indicator; one plain line when output is redirected."""
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, verb: Optional[str] = None) -> None:
         self.text = text
+        self.verb = verb or random.choice(SPINNER_VERBS)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._dirty = False
 
     def __enter__(self) -> "Spinner":
-        if _USE_COLOR:
+        if _MODE != ColorMode.PLAIN:
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
         else:
-            print(paint(f"… {self.text}", C.GRAY))
+            print(paint(f"... {self.text}", "muted"))
         return self
 
+    def _render(self, frame: str, tone: str) -> str:
+        return " ".join((
+            paint(frame, tone, bold=True),
+            paint(f"{self.verb}{_GLYPHS.ellipsis}", "primary"),
+            paint(self.text, "muted", dim=True),
+        ))
+
     def _run(self) -> None:
-        i = 0
+        index = 0
         while not self._stop.is_set():
-            sys.stdout.write(f"\r{paint(SPINNER[i % len(SPINNER)], C.CYAN)} {self.text}")
+            frame = SPINNER_CYCLE[index % len(SPINNER_CYCLE)]
+            tone = "primary" if index % 2 == 0 else "shimmer"
+            sys.stdout.write("\r" + self._render(frame, tone) + "\033[K")
             sys.stdout.flush()
-            i += 1
-            time.sleep(0.09)
-        sys.stdout.write("\r" + " " * (len(self.text) + 3) + "\r")
+            self._dirty = True
+            index += 1
+            time.sleep(0.12)
+        self._clear()
+
+    def _clear(self) -> None:
+        if not self._dirty:
+            return
+        sys.stdout.write("\r\033[K")
         sys.stdout.flush()
+        self._dirty = False
 
     def __exit__(self, *exc) -> None:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=0.5)
+            self._clear()
 
 
 # ------------------------------------------------------------------- output
 
+def _counts(items: List[F.Finding]) -> Dict[str, int]:
+    return {s: sum(1 for f in items if f.status == s) for s in _STATUS_ROLE}
+
+
+def _counts_segments(items: List[F.Finding]):
+    c = _counts(items)
+    return [
+        (f"{c[F.PASS]} passed", "success"),
+        (f"{c[F.FAIL]} failed", "error"),
+        (f"{c[F.WARNING]} warnings", "warning"),
+        (f"{c[F.NOT_TESTED]} not tested", "muted"),
+    ]
+
+
+def _counts_text(items: List[F.Finding], sep: str) -> str:
+    return sep.join(text for text, _ in _counts_segments(items))
+
+
+def _counts_line(items: List[F.Finding]) -> str:
+    sep = paint(f" {_GLYPHS['sep']} ", "muted")
+    return sep.join(paint(text, role, dim=True)
+                    for text, role in _counts_segments(items))
+
+
+def _status_glyph(status: str) -> str:
+    return {
+        F.PASS: _GLYPHS["pass"], F.FAIL: _GLYPHS["fail"],
+        F.WARNING: _GLYPHS["warn"], F.NOT_TESTED: _GLYPHS["unknown"],
+    }.get(status, _GLYPHS["sep"])
+
+
 def print_finding(f: F.Finding, verbose: bool = True) -> None:
-    color = _STATUS_COLOR.get(f.status, "")
-    scope = paint(_SCOPE_LABEL.get(f.scope, f.scope), C.DIM)
-    print(f"[{paint(f.status, color, C.BOLD):>9}] {f.title}  {paint('·', C.GRAY)} {scope}")
+    """Print one finding in the plain, pipe-friendly format."""
+    role = _STATUS_ROLE.get(f.status, "")
+    scope = paint(_SCOPE_LABEL.get(f.scope, f.scope), "muted", dim=True)
+    status = paint(f"{_status_glyph(f.status)} {f.status}".rjust(9), role, bold=True)
+    print(f"[{status}] {f.title}  {paint(_GLYPHS['sep'], 'muted')} {scope}")
     if not verbose:
         return
     for line in f.evidence:
-        print(f"          {paint('·', C.GRAY)} {line}")
+        print(f"          {paint(_GLYPHS['bullet'], 'muted')} {line}")
     if f.detail:
-        print(paint(f"          {f.detail}", C.DIM))
+        print(paint(f"          {f.detail}", dim=True))
     if f.recommendation:
-        print(paint(f"          fix: {f.recommendation}", C.CYAN))
+        print(paint(f"          fix: {f.recommendation}", "accent"))
 
 
-def print_findings(items: List[F.Finding]) -> None:
+_BLOCK_LABEL = ""
+
+
+def set_block_label(label: str) -> None:
+    """Label the next command block (set per executed command line)."""
+    global _BLOCK_LABEL
+    _BLOCK_LABEL = label
+
+
+def _frame_top(label: str, width: int, role: str = "tool") -> str:
+    corner = _GLYPHS.corner("┌", "+")
+    head = f"{corner}{_GLYPHS.h} {label} " if label else f"{corner}{_GLYPHS.h} "
+    dashes = max(1, width - len(INDENT) - len(head) - 1)
+    return INDENT + paint(head + _GLYPHS.h * dashes + _GLYPHS.corner("┐", "+"), role)
+
+
+def _frame_bottom(line_text: str, width: int, role: str = "tool",
+                  visible_len: Optional[int] = None) -> str:
+    """Close a frame; `visible_len` is the plain length when text is painted."""
+    shown = len(line_text) if visible_len is None else visible_len
+    corner = _GLYPHS.corner("┘", "+")
+    if not shown:  # empty footer: a plain closing rule
+        lead = _GLYPHS.corner("└", "+") + _GLYPHS.h
+        dashes = max(1, width - len(INDENT) - len(lead) - 1)
+        return INDENT + paint(lead + _GLYPHS.h * dashes + corner, role)
+    lead = _GLYPHS.corner("└", "+") + _GLYPHS.h + " "
+    used = len(INDENT) + len(lead) + shown + 1 + 1
+    dashes = max(1, width - used)
+    return (INDENT + paint(lead, role) + line_text
+            + paint(" " + _GLYPHS.h * dashes + corner, role))
+
+
+def _print_row(f: F.Finding, verbose: bool, width: int, check_width: int) -> None:
+    role = _STATUS_ROLE.get(f.status, "")
+    bar = paint(_GLYPHS.vert, "tool")
+    glyph = paint(_status_glyph(f.status), role, bold=True)
+    status = paint(f"{f.status:<10}", role, bold=True)
+    check = paint(f"{f.check:<{check_width}}", "muted")
+    prefix = f"{_status_glyph(f.status)} {f.status:<10} {f.check:<{check_width}}"
+    head = f"{INDENT}{bar} {glyph} {status} {check}"
+    available = width - len(INDENT) - 2 - len(prefix)
+    if available >= 20:
+        title_lines = _wrap(f.title, available)
+        print(head + title_lines[0])
+        pad = " " * (len(INDENT) + 2 + len(prefix))
+        for extra in title_lines[1:]:
+            print(pad + extra)
+    else:
+        # narrow terminal: the title drops below the status row instead of
+        # wrapping one word per line next to it
+        print(f"{INDENT}{bar} {glyph} {status} {paint(f.check, 'muted')}")
+        title_indent = f"{INDENT}{bar}   "
+        for chunk in _wrap(f.title, width - len(INDENT) - 5):
+            print(title_indent + chunk)
+    if not verbose:
+        return
+
+    sub = f"{INDENT}{bar}   "
+    body_width = width - len(INDENT) - 4
+    for line in f.evidence:
+        chunks = _wrap(line, body_width - 2)
+        print(f"{sub}{paint(_GLYPHS['bullet'], 'muted')} {chunks[0]}")
+        for chunk in chunks[1:]:
+            print(f"{sub}  {chunk}")
+    if f.detail:
+        for chunk in _wrap(f.detail, body_width):
+            print(sub + paint(chunk, dim=True))
+    if f.recommendation:
+        chunks = _wrap(f"fix: {f.recommendation}", body_width)
+        print(sub + paint(chunks[0], "accent"))
+        for chunk in chunks[1:]:
+            print(f"{sub}{paint(chunk, 'accent')}")
+
+
+def print_findings(items: List[F.Finding], verbose: bool = True) -> None:
+    """Print a command's findings: framed rows on a terminal, plain otherwise."""
+    if not items:
+        return
+    if _MODE == ColorMode.PLAIN:
+        for f in items:
+            print_finding(f, verbose)
+        print(paint("\n" + _counts_text(items, " - "), "muted", dim=True))
+        return
+
+    width = block_width(_BLOCK_LABEL)
+    check_width = min(max(len(f.check) for f in items) + 2, 24)
+    print(_frame_top(_BLOCK_LABEL, width))
     for f in items:
-        print_finding(f)
-    if items:
-        c = {s: sum(1 for f in items if f.status == s) for s in _STATUS_COLOR}
-        print(paint(
-            f"\n{c[F.PASS]} passed · {c[F.FAIL]} failed · {c[F.WARNING]} warnings · "
-            f"{c[F.NOT_TESTED]} not tested", C.GRAY))
+        _print_row(f, verbose, width, check_width)
+    print(_frame_bottom(_counts_line(items), width,
+                        visible_len=len(_counts_text(items, " · "))))
 
 
-def _status_line(status: str) -> str:
-    return paint(f"[{status}]", _STATUS_COLOR.get(status, ""), C.BOLD)
+def _status_line_status(status: str) -> str:
+    return paint(f"[{status}]", _STATUS_ROLE.get(status, ""), bold=True)
 
 
 # ------------------------------------------------------------------- CLI
@@ -141,17 +496,62 @@ class SSLDoctorCLI:
         print(text)
 
     def error(self, text: str) -> None:
-        print(paint(f"error: {text}", C.RED))
+        print(paint(f"error: {text}", "error"))
 
     def note(self, text: str) -> None:
-        print(paint(text, C.GRAY))
+        print(paint(text, "muted"))
+
+    # ---- frames -------------------------------------------------------
+    def _rule(self) -> str:
+        return paint(dashed_rule(block_width()), "muted")
+
+    def status_line(self) -> str:
+        """One muted line: what is in scope, what was found, what is open."""
+        target = ""
+        if self.remote_facts.get("host"):
+            target = f"{self.remote_facts['host']}:{self.remote_facts.get('port', 443)}"
+        elif self.server and self.server.connected:
+            cfg = self.server.cfg
+            target = f"{cfg.tls_host or cfg.host}:{cfg.tls_port}"
+        parts = [target] if target else []
+        items = self.store.all()
+        counts = _counts(items)
+        if items:
+            parts.append(f"{len(items)} findings")
+            if counts[F.FAIL]:
+                parts.append(f"{counts[F.FAIL]} fail")
+        parts.append(f"timeout {self.net_timeout:g}s")
+        parts.append("ssh " + ("on" if (self.server and self.server.connected) else "off"))
+        return paint(" · ".join(parts), "muted", dim=True)
+
+    def _question_frame(self, label: str, hints: str, default: str) -> str:
+        """Lavender frame for a question that is waiting on the operator."""
+        width = block_width(label)
+        bar = _GLYPHS.vert
+        body = paint(hints, "foreground") if hints else ""
+        if default:
+            body += paint(f"   default: {default}", "muted", dim=True)
+        self.out(_frame_top(label, width, "accent"))
+        if body:
+            self.out(f"{INDENT}{paint(bar, 'accent')}  {body}")
+        return f"{INDENT}{paint(bar, 'accent')}  {paint(_GLYPHS['run'], 'accent', bold=True)} "
 
     def prompt(self, label: str, default: str = "") -> str:
-        suffix = paint(f" [{default}]", C.GRAY) if default else ""
+        if _MODE == ColorMode.PLAIN:
+            suffix = f" [{default}]" if default else ""
+            try:
+                val = input(f"{label}{suffix}: ").strip()
+            except EOFError:
+                return default
+            return val or default
+        cursor = self._question_frame(label, _answer_hints(label, default), default)
+        width = block_width(label)
         try:
-            val = input(f"{paint(label, C.CYAN)}{suffix}: ").strip()
+            val = input(cursor).strip()
         except EOFError:
-            return default
+            print()
+            val = ""
+        self.out(_frame_bottom("", width, "accent"))
         return val or default
 
     def _meta(self) -> Dict:
@@ -184,6 +584,7 @@ class SSLDoctorCLI:
         if not args:
             return True
         cmd, rest = args[0].lower(), args[1:]
+        set_block_label(line)
         handler = getattr(self, f"cmd_{cmd}", None)
         if handler is None:
             self.error(f"unknown command /{cmd}. Try /help")
@@ -224,9 +625,9 @@ class SSLDoctorCLI:
             ("/version", "show version"),
             ("/exit", "leave ssl-doctor"),
         ]
-        self.out(paint(f"{APP_NAME} commands:", C.BOLD))
+        self.out(paint(f"{APP_NAME} commands:", "primary", bold=True))
         for c, d in rows:
-            self.out(f"  {paint(c, C.CYAN):<44} {d}")
+            self.out(f"  {paint(f'{c:<44}', 'primary')} {paint(d, 'muted')}")
 
     def cmd_version(self, args: List[str]) -> None:
         self.out(f"{APP_NAME} v{__version__}")
@@ -327,7 +728,7 @@ class SSLDoctorCLI:
             self.error(err)
             return
         self._gather_remote(host, port, self._sni_arg(args))
-        self.note(paint("next: /diagnose or /report html", C.GRAY))
+        self.out(paint("next: /diagnose or /report html", "muted", dim=True))
 
     cmd_remote = cmd_tls           # type: ignore[assignment]
 
@@ -366,7 +767,8 @@ class SSLDoctorCLI:
         def head(title: str) -> None:
             nonlocal step
             step += 1
-            self.out(paint(f"\n== Step {step}/{steps_total}: {title}", C.BOLD))
+            self.out(paint(f"\n{_GLYPHS['run']} Step {step}/{steps_total}: {title}",
+                           "primary", bold=True))
 
         if mode in ("client", "combined"):
             head(f"domain identification + network checks for {host}:{port}")
@@ -499,7 +901,7 @@ class SSLDoctorCLI:
 
     def _server_connect(self) -> None:
         self.out(paint("SSH connection setup (credentials are never displayed "
-                       "or written to disk):", C.BOLD))
+                       "or written to disk):", "primary", bold=True))
         host = self.prompt("SSH hostname or IP")
         if not host:
             self.error("hostname required")
@@ -545,7 +947,7 @@ class SSLDoctorCLI:
         if key.status == "changed":
             self.error("HOST KEY CHANGED - possible MITM. Refusing to connect.")
             for fp in key.fingerprints:
-                self.out("  " + paint(fp, C.RED))
+                self.out("  " + paint(fp, "error"))
             self.note("Verify with the server admin out-of-band, then remove the stale "
                       "entry from ~/.ssl-doctor/known_hosts before retrying.")
             self.store.add(F.Finding(
@@ -553,7 +955,7 @@ class SSLDoctorCLI:
                 [key.detail, *key.fingerprints], target=f"{host}:{ssh_port_s}"))
             return
         if key.status == "unknown":
-            self.out(paint("The host key is not in the ssl-doctor trust store:", C.YELLOW))
+            self.out(paint("The host key is not in the ssl-doctor trust store:", "warning"))
             for fp in key.fingerprints:
                 self.out("  " + fp)
             ans = self.prompt("Trust this key and save it for future sessions? (yes/no)",
@@ -583,8 +985,8 @@ class SSLDoctorCLI:
             if tls_host and tls_host != host:
                 self.note(f"TLS target recorded as {tls_host}:{tls_port} (differs from "
                           f"SSH endpoint)")
-            self.note(paint("next: /server overview, /server cert <path> [key], "
-                            "/server compare", C.GRAY))
+            self.out(paint("next: /server overview, /server cert <path> [key], "
+                           "/server compare", "muted", dim=True))
 
     # ---------------- /diagnose ----------------
     def cmd_diagnose(self, args: List[str]) -> None:
@@ -595,22 +997,22 @@ class SSLDoctorCLI:
             return
         ctx = {"cert": self.remote_facts.get("cert")}
         self._diagnosis = diagnose(items, ctx)
-        self.out(paint("Diagnosis", C.BOLD,
-                       C.GREEN if self._diagnosis.overall == "PASS" else
-                       C.RED if self._diagnosis.overall == "FAIL" else C.YELLOW))
+        overall = self._diagnosis.overall
+        self.out(paint("Diagnosis", "primary", bold=True) + "  " +
+                 paint(overall, "success" if overall == F.PASS else
+                       "error" if overall == F.FAIL else "warning", bold=True))
         if not self._diagnosis.causes:
             self.out("  no confirmed or probable root causes identified")
         for i, c in enumerate(self._diagnosis.causes, 1):
-            mark = {"confirmed": C.RED, "probable": C.YELLOW,
-                    "possible": C.GRAY}[c.certainty]
-            self.out(f"  {i}. [{paint(c.certainty.upper(), mark)} · {c.origin}] "
-                     f"{c.summary}")
+            mark = _CERTAINTY_ROLE.get(c.certainty, "muted")
+            self.out(f"{INDENT}{i}. [{paint(c.certainty.upper(), mark, bold=True)}"
+                     f" {paint(_GLYPHS['sep'], 'muted')} {c.origin}] {c.summary}")
             for e in c.evidence[:4]:
-                self.out(paint(f"       evidence: {e}", C.DIM))
+                self.out(paint(f"       evidence: {e}", dim=True))
             if c.recommendation:
-                self.out(paint(f"       fix: {c.recommendation}", C.CYAN))
+                self.out(paint(f"       fix: {c.recommendation}", "accent"))
         for n in self._diagnosis.notes:
-            self.out(paint(f"  note: {n}", C.GRAY))
+            self.out(paint(f"  note: {n}", "muted", dim=True))
         self.note("\ngenerate a report with /report html")
 
     # ---------------- /report ----------------
@@ -647,22 +1049,37 @@ class SSLDoctorCLI:
             reportmod.write_html(p, items, diag, meta, secrets, facts)
             written.append(p)
         for p in written:
-            self.out(f"report written: {paint(os.path.abspath(p), C.CYAN)}")
+            self.out(f"report written: {paint(os.path.abspath(p), 'accent')}")
 
     # ---------------- REPL ----------------
     def banner(self) -> None:
-        self.out(paint(f"{APP_NAME} v{__version__}", C.BOLD, C.CYAN))
+        self.out(paint(f"{APP_NAME} v{__version__}", "primary", bold=True))
         self.out("Offline SSL/TLS diagnostic tool. Type /help for commands.")
-        self.note("all checks are read-only; credentials are never logged\n")
+        self.out(paint("all checks are read-only; credentials are never logged",
+                       "muted", dim=True))
+        self.out("")
 
     def repl(self) -> int:
         self.banner()
+        framed = _MODE != ColorMode.PLAIN
         while self._running:
+            if framed:
+                self.out(self.status_line())
+                self.out(self._rule())
+                prompt_text = paint("| > ", "primary", bold=True)
+            else:
+                prompt_text = "ssl-doctor> "
             try:
-                line = input(paint("ssl-doctor> ", C.GREEN, C.BOLD))
+                line = input(prompt_text)
             except (EOFError, KeyboardInterrupt):
+                if framed:
+                    self.out("\r" + self._rule())
                 self.out("")
                 break
+            if framed:
+                # close the input box before any output; the leading CR keeps
+                # the frame tidy when the terminal never echoed a newline
+                self.out("\r" + self._rule())
             if line.strip().lower() in ("/exit", "/quit", "exit", "quit"):
                 self.cmd_exit([])
                 break
@@ -682,7 +1099,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             return agent.main(argv[1:])
         except agent.AgentError as exc:
-            print(paint(f"error: {exc}", C.RED))
+            print(paint(f"error: {exc}", "error"))
             return 1
     cli = SSLDoctorCLI()
 
@@ -711,7 +1128,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if batch:
         cli.banner()
         for line in batch:
-            print(paint(f"ssl-doctor> {line}", C.GREEN, C.BOLD))
+            print(paint(f"ssl-doctor> {line}", "primary", bold=True))
             if not cli.execute(line):
                 break
         diag = cli._diagnosis
