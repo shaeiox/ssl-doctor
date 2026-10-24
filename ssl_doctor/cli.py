@@ -26,7 +26,26 @@ from . import netchecks
 from . import report as reportmod
 from . import server as servermod
 
-# ------------------------------------------------------------------- colors
+_TW_ENABLED = False
+_TW_CPS = 40.0
+_TW_BATCH = False
+
+
+def _tw_type(text: str) -> None:
+    """Print text, using the typewriter effect when active."""
+    global _TW_ENABLED, _TW_CPS, _TW_BATCH
+    active = (_TW_ENABLED and not _TW_BATCH
+              and bool(getattr(sys.stdout, "isatty", lambda: False)()))
+    if not active:
+        print(text)
+        return
+    cps = _TW_CPS if _TW_CPS >= 1 else 1.0
+    for ch in str(text):
+        sys.stdout.write(ch)
+        sys.stdout.flush()
+        time.sleep(1.0 / cps)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
 
 _USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 if sys.platform.startswith("win"):  # enable ANSI on modern Windows consoles
@@ -98,15 +117,15 @@ class Spinner:
 def print_finding(f: F.Finding, verbose: bool = True) -> None:
     color = _STATUS_COLOR.get(f.status, "")
     scope = paint(_SCOPE_LABEL.get(f.scope, f.scope), C.DIM)
-    print(f"[{paint(f.status, color, C.BOLD):>9}] {f.title}  {paint('·', C.GRAY)} {scope}")
+    _tw_type(f"[{paint(f.status, color, C.BOLD):>9}] {f.title}  {paint('·', C.GRAY)} {scope}")
     if not verbose:
         return
     for line in f.evidence:
-        print(f"          {paint('·', C.GRAY)} {line}")
+        _tw_type(f"          {paint('·', C.GRAY)} {line}")
     if f.detail:
-        print(paint(f"          {f.detail}", C.DIM))
+        _tw_type(paint(f"          {f.detail}", C.DIM))
     if f.recommendation:
-        print(paint(f"          fix: {f.recommendation}", C.CYAN))
+        _tw_type(paint(f"          fix: {f.recommendation}", C.CYAN))
 
 
 def print_findings(items: List[F.Finding]) -> None:
@@ -114,7 +133,7 @@ def print_findings(items: List[F.Finding]) -> None:
         print_finding(f)
     if items:
         c = {s: sum(1 for f in items if f.status == s) for s in _STATUS_COLOR}
-        print(paint(
+        _tw_type(paint(
             f"\n{c[F.PASS]} passed · {c[F.FAIL]} failed · {c[F.WARNING]} warnings · "
             f"{c[F.NOT_TESTED]} not tested", C.GRAY))
 
@@ -136,6 +155,14 @@ class SSLDoctorCLI:
         self._diagnosis = None
         self._running = True
         self._BATCH_MODE = False
+        # typewriter state
+        self._typewriter_enabled = False
+        self._typewriter_cps = 40.0
+        # sync module globals
+        global _TW_ENABLED, _TW_CPS, _TW_BATCH
+        _TW_ENABLED = False
+        _TW_CPS = 40.0
+        _TW_BATCH = False
 
     @property
     def _STREAM_OUTPUT(self) -> bool:
@@ -146,14 +173,30 @@ class SSLDoctorCLI:
     def _batch_mode(self) -> bool:
         return getattr(self, "_BATCH_MODE", False)
 
+    @property
+    def _typewriter_active(self) -> bool:
+        if not getattr(self, "_typewriter_enabled", False):
+            return False
+        if getattr(self, "_BATCH_MODE", False):
+            return False
+        return bool(getattr(sys.stdout, "isatty", lambda: False)())
+
+    def _write(self, text: str = "") -> None:
+        global _TW_ENABLED, _TW_CPS, _TW_BATCH
+        _TW_ENABLED = getattr(self, "_typewriter_enabled", False)
+        _TW_CPS = getattr(self, "_typewriter_cps", 40.0)
+        _TW_BATCH = getattr(self, "_BATCH_MODE", False)
+        # route through module-level typewriter printer
+        _tw_type(text)
+
     def out(self, text: str = "") -> None:
-        print(text)
+        self._write(text)
 
     def error(self, text: str) -> None:
-        print(paint(f"error: {text}", C.RED))
+        self._write(paint(f"error: {text}", C.RED))
 
     def note(self, text: str) -> None:
-        print(paint(text, C.GRAY))
+        self._write(paint(text, C.GRAY))
 
     def prompt(self, label: str, default: str = "") -> str:
         suffix = paint(f" [{default}]", C.GRAY) if default else ""
@@ -282,7 +325,7 @@ class SSLDoctorCLI:
             ("/diagnose", "correlate all findings into prioritized root causes"),
             ("/findings", "list everything recorded this session"),
             ("/report [html|json|both] [path]", "write a report (default: html)"),
-            ("/timeout [seconds]", "show/set network timeout (default 8s)"),
+            ("/typewriter [on|off|speed <n>]", "toggle typewriter output effect (tty only)"),
             ("/clear", "discard recorded findings"),
             ("/version", "show version"),
             ("/exit", "leave ssl-doctor"),
@@ -320,7 +363,37 @@ class SSLDoctorCLI:
         except ValueError:
             self.error("usage: /timeout <net_s> [cmd_s]")
 
-    def cmd_findings(self, args: List[str]) -> None:
+    def cmd_typewriter(self, args: List[str]) -> None:
+        sub = args[0].lower() if args else "status"
+        if sub in ("on", "off", "status"):
+            if sub == "on":
+                if not self._typewriter_active and not (sys.stdout.isatty() if hasattr(sys.stdout, "isatty") else False):
+                    self.error("typewriter mode requires an interactive terminal")
+                    return
+                self._typewriter_enabled = (sub == "on")
+            elif sub == "off":
+                self._typewriter_enabled = False
+            # status
+            self.out(f"typewriter: {'on' if self._typewriter_enabled else 'off'} "
+                     f"· speed {self._typewriter_cps:g} cps "
+                     f"· active {self._typewriter_active}")
+            return
+        if sub == "speed":
+            if len(args) < 2:
+                self.error("usage: /typewriter speed <chars-per-second>")
+                return
+            try:
+                cps = float(args[1])
+            except ValueError:
+                self.error("speed must be a number")
+                return
+            if cps < 1:
+                self.error("speed must be >= 1")
+                return
+            self._typewriter_cps = cps
+            self.out(f"typewriter speed set to {cps:g} cps")
+            return
+        self.error("usage: /typewriter [on|off|speed <cps>]")
         scope = args[0] if args else ""
         items = self.store.by_scope(scope) if scope else self.store.all()
         if not items:
@@ -819,10 +892,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             except ValueError:
                 pass
             i += 2
-        elif argv[i] in ("-h", "--help"):
-            cli.banner()
-            cli.cmd_help([])
-            return 0
+        elif argv[i] == "--typewriter":
+            cli._typewriter_enabled = True
+            i += 1
+        elif argv[i] == "--typewriter-speed" and i + 1 < len(argv):
+            try:
+                cli._typewriter_cps = float(argv[i + 1])
+            except ValueError:
+                pass
+            i += 2
         elif argv[i].startswith("/"):
             batch.append(" ".join(argv[i:]))
             break
