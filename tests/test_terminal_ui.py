@@ -371,7 +371,7 @@ class StartupBanner(unittest.TestCase):
         self.assertIn("nginx", text)
         self.assertIn(cli.BANNER_NOTE, text)
         self.assertIn("creator: eleven", text)
-        self.assertIn("v0.3.0", text)
+        self.assertIn("v0.5.0", text)
         self.assertEqual(plain[0], "═" * len(plain[0]))
         self.assertEqual(plain[-1], "═" * len(plain[-1]))
         self.assertEqual(plain[0], plain[-1])
@@ -385,7 +385,7 @@ class StartupBanner(unittest.TestCase):
         self.assertIn("SSL DOCTOR", text)
         self.assertIn("offline ssl/tls diagnostics", text)
         self.assertIn("creator: eleven", text)
-        self.assertIn("v0.3.0", text)
+        self.assertIn("v0.5.0", text)
 
     def test_no_line_is_wider_than_the_terminal(self):
         for columns in (30, 40, 60, 72, 80, 100, 120):
