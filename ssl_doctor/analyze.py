@@ -43,9 +43,32 @@ class Cause:
 
 
 @dataclass
+class Unresolved:
+    """A finding that stays a warning although no root cause is justified.
+
+    `observed` is what the probe saw, `conclusion` the most the evidence
+    supports, `uncertainty` why the question stays open.
+    """
+    check: str
+    status: str
+    observation: str
+    observed: str
+    conclusion: str
+    uncertainty: List[str] = field(default_factory=list)
+    recommendation: str = ""
+
+    def to_dict(self) -> Dict:
+        return {"check": self.check, "status": self.status,
+                "observation": self.observation, "observed": self.observed,
+                "conclusion": self.conclusion, "uncertainty": self.uncertainty,
+                "recommendation": self.recommendation}
+
+
+@dataclass
 class Diagnosis:
     causes: List[Cause] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    unresolved: List[Unresolved] = field(default_factory=list)
 
     @property
     def overall(self) -> str:
@@ -58,7 +81,8 @@ class Diagnosis:
     def to_dict(self) -> Dict:
         return {"overall": self.overall,
                 "causes": [c.to_dict() for c in self.causes],
-                "notes": self.notes}
+                "notes": self.notes,
+                "unresolved": [u.to_dict() for u in self.unresolved]}
 
 
 def _by_check(items: List[F.Finding], check: str) -> List[F.Finding]:
@@ -379,13 +403,19 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
                          "(ALL:@SECLEVEL=0); an ordinary client cannot reach it"])
     elif matrix and matrix.observation == "legacy-accepted-unverified":
         # Only a lowered security level negotiated these versions.  That says
-        # nothing about ordinary clients, so it stays a test limitation.
-        note("Deprecated TLS may be enabled: " +
-             (matrix.detail or "the server answered only under a relaxed cipher "
-                               "policy") +
-             ". Ordinary-client compatibility was not established, so no "
-             "protocol-risk cause is raised - retest from a client that can offer "
-             "these versions under its default settings.")
+        # nothing about ordinary clients, so no cause is raised - but the
+        # warning stays visible as an unresolved finding.
+        d.unresolved.append(Unresolved(
+            matrix.check, matrix.status, matrix.observation,
+            observed=matrix.detail or "deprecated TLS completed a handshake only "
+                                      "under a relaxed cipher policy",
+            conclusion="Deprecated TLS may be enabled. The evidence supports only "
+                       "that the server's TLS stack can negotiate it when legacy "
+                       "cipher suites are offered; no protocol-risk cause is "
+                       "raised because ordinary-client compatibility was not "
+                       "established.",
+            uncertainty=list(matrix.uncertainty),
+            recommendation=matrix.recommendation))
     elif matrix and matrix.observation == "tls12-relaxed-only":
         add("possible", "server",
             "TLS 1.2 is reachable only with legacy cipher suites - a "
@@ -427,11 +457,17 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
 def _finish(d: Diagnosis, items: List[F.Finding]) -> Diagnosis:
     d.causes.sort(key=lambda c: (c.rank,))
     if not d.causes:
-        severe = _severe(items)
+        # Name what is still open instead of a generic "some checks warn";
+        # findings already explained as unresolved are not repeated.
+        explained = {u.check for u in d.unresolved}
+        severe = [f for f in _severe(items) if f.check not in explained]
         if severe:
-            d.notes.append(
-                "No specific root cause pattern matched, but some checks report "
-                "warnings/failures - review the findings below.")
+            listed = "; ".join(dict.fromkeys(f"{f.title} ({f.status})" for f in severe))
+            d.notes.append(f"No root cause pattern matched these findings: {listed} "
+                           f"- review their evidence below.")
+        elif d.unresolved:
+            d.notes.append("No root cause established; open warning(s): " +
+                           "; ".join(u.observed for u in d.unresolved))
         elif any(f.status == F.NOT_TESTED for f in items):
             d.notes.append(
                 "No root cause established: some checks could not be completed and "

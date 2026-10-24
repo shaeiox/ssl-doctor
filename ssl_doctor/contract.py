@@ -21,9 +21,11 @@ import re
 import urllib.parse
 from typing import Any, Dict, Iterable, List
 
-SCHEMA_VERSION = "1.4"   # 1.1: facts block; 1.2: failure classification;
+SCHEMA_VERSION = "1.5"   # 1.1: facts block; 1.2: failure classification;
                          # 1.3: cause limitations, observation classes, endpoint state;
-                         # 1.4: legacy-protocol acceptance classes
+                         # 1.4: legacy-protocol acceptance classes;
+                         # 1.5: finding uncertainty, unresolved diagnosis entries,
+                         #      default-probe states, endpoint address coverage
 SUPPORTED_MAJOR = 1
 
 # Machine-readable classification of a failed probe.  "What went wrong" is
@@ -130,6 +132,8 @@ _FAILURE_KINDS = [""] + list(FAILURE_KINDS)
 _OBSERVATIONS = [""] + list(OBSERVATIONS)
 _PROBE_SUPPORT = ["", "default", "relaxed-only", "relaxed-only-unverified",
                   "rejected", "inconclusive"]
+# Raw outcome of a default-policy probe; "client-limited" = never sent.
+_PROBE_STATES = ["accepted", "refused", "inconclusive", "unsupported", "client-limited"]
 
 SCHEMA: Dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -169,6 +173,21 @@ SCHEMA: Dict[str, Any] = {
                     },
                 }},
                 "notes": {"type": "array", "items": {"type": "string"}},
+                # 1.5: warnings that stay open because no cause is justified
+                "unresolved": {"type": "array", "items": {
+                    "type": "object",
+                    "required": ["check", "status", "observed", "conclusion",
+                                 "uncertainty"],
+                    "properties": {
+                        "check": {"type": "string", "pattern": _CHECK_RE},
+                        "status": {"type": "string", "enum": _STATUS},
+                        "observation": {"type": "string", "enum": _OBSERVATIONS},
+                        "observed": {"type": "string"},
+                        "conclusion": {"type": "string"},
+                        "uncertainty": {"type": "array", "items": {"type": "string"}},
+                        "recommendation": {"type": "string"},
+                    },
+                }},
             },
         },
         "findings": {"type": "array", "items": {
@@ -189,6 +208,8 @@ SCHEMA: Dict[str, Any] = {
                 "failure_kind": {"type": "string", "enum": _FAILURE_KINDS},
                 # 1.3: what was observed, when the check reports an observation
                 "observation": {"type": "string", "enum": _OBSERVATIONS},
+                # 1.5: why the evidence cannot settle the check's question
+                "uncertainty": {"type": "array", "items": {"type": "string"}},
             },
         }},
         "disclaimer": {"type": "string"},
@@ -221,6 +242,8 @@ SCHEMA: Dict[str, Any] = {
                 "endpoint_comparison": {"type": ["object", "null"], "properties": {
                     "probed": {"type": "integer"},
                     "comparable": {"type": "integer"},
+                    # 1.5: addresses DNS returned; comparable < addresses = partial
+                    "addresses": {"type": "integer"},
                     "difference": {"type": "boolean"},
                     "attribute": {"type": "string"},
                 }},
@@ -236,6 +259,10 @@ SCHEMA: Dict[str, Any] = {
                     }},
                     "confirmed_legacy": {"type": "array", "items": {"type": "string"}},
                     "unverified_legacy": {"type": "array", "items": {"type": "string"}},
+                    # 1.5: default-policy probe outcome per re-probed version
+                    "default_probe": {"type": "object", "properties": {
+                        v: {"type": "string", "enum": _PROBE_STATES}
+                        for v in ("TLS 1.0", "TLS 1.1", "TLS 1.2")}},
                 }},
             },
         },

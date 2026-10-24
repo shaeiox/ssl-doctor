@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased — legacy-TLS diagnosis semantics
+
+On a `google.com:443` scan TLS 1.0/1.1 completed a handshake only under
+`ALL:@SECLEVEL=0` and their default-policy probes failed locally with
+`NO_PROTOCOLS_AVAILABLE`. The classification was already correct, but the
+remediation said to "treat legacy TLS as enabled until proven otherwise", the
+open warning was reduced to a free-text note plus the generic "some checks report
+warnings/failures", and a match among 4 of 7 DNS addresses read as "all 4
+comparable endpoints". Findings contract **1.5** (additive; 1.0–1.4 stay published).
+
+### Root causes fixed
+
+- The default-policy re-probe outcome was folded into `relaxed-only-unverified`
+  without recording *why*: a client that never sent the probe (`client-limited`)
+  and a probe without an answer read the same. It is now kept per version in
+  `facts.probe_policy.default_probe`, and the evidence row says when nothing was
+  sent to the server.
+- Findings had no place for "why the evidence cannot settle this", so it lived in
+  prose. `Finding.uncertainty` now carries it, separate from `evidence`.
+- A warning with no justified cause had no structured home in the diagnosis.
+  `diagnosis.unresolved` keeps `observed` / `conclusion` / `uncertainty` /
+  `recommendation` apart; the generic note now names the unexplained findings.
+- The endpoint comparison had no address count, so a partial match could not say
+  it was partial. `endpoint_comparison.addresses` and an explicit coverage caveat
+  were added.
+
+### Changed verdicts by check id
+
+| Check id | Before | Now |
+|---|---|---|
+| `tls.protocols` (unverified legacy) | "Treat legacy TLS as enabled until proven otherwise … then disable them if accepted" | "Not confirmed - verify before changing anything", with a controlled `openssl s_client -tls1` / `-tls1_1` test and its limitations; the server's configuration is named as authoritative |
+| `tls.multiip` | "all 4 comparable endpoint(s) present the same certificate facts" | "the 4 comparable endpoint(s) present the same certificate facts; 3 of 7 DNS address(es) were not compared", plus an uncertainty entry |
+| diagnosis | note "Deprecated TLS may be enabled …" + "some checks report warnings/failures" | `unresolved` entry for `tls.protocols`; `overall` stays cause-derived |
+
 ## Unreleased — legacy-protocol evidence
 
 A single warning on `tls.protocols` could claim that "deprecated TLS 1.0/1.1 are

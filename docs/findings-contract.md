@@ -1,9 +1,10 @@
 # Findings contract (`findings/1.x`)
 
 Every JSON report, agent upload and service export is a findings document.
-Current schema: [`schemas/findings-1.4.schema.json`](../schemas/findings-1.4.schema.json)
+Current schema: [`schemas/findings-1.5.schema.json`](../schemas/findings-1.5.schema.json)
 (source of truth: `ssl_doctor/contract.py`). Earlier minor versions stay
-published: [`findings-1.3`](../schemas/findings-1.3.schema.json),
+published: [`findings-1.4`](../schemas/findings-1.4.schema.json),
+[`findings-1.3`](../schemas/findings-1.3.schema.json),
 [`findings-1.2`](../schemas/findings-1.2.schema.json),
 [`findings-1.1`](../schemas/findings-1.1.schema.json),
 [`findings-1.0`](../schemas/findings-1.0.schema.json).
@@ -15,6 +16,7 @@ published: [`findings-1.3`](../schemas/findings-1.3.schema.json),
 | 1.2 | Optional `failure_kind` on every finding, and `handshake_ip` / `handshake_failure` in `facts`. Separates *what went wrong* from the finding status, so a stall is never read as a protocol/cipher rejection |
 | 1.3 | Optional `observation` on findings (what was *seen*, not a failure), `limitations` on every cause (where its evidence is incomplete), and `endpoints` / `endpoint_comparison` / `probe_policy` in `facts`. Lets the diagnosis separate observations from defects and state its confidence honestly |
 | 1.4 | Per-version probe classes in `facts.probe_policy.support` (`default`, `relaxed-only`, `relaxed-only-unverified`, `rejected`, `inconclusive`) plus `confirmed_legacy` / `unverified_legacy`, and three new observations that say which policy actually proved deprecated-TLS acceptance. A relaxed-policy handshake can no longer be reported as ordinary-client support |
+| 1.5 | Optional `uncertainty` on findings (why the evidence cannot settle the question), `diagnosis.unresolved` (warnings kept visible without a root cause), `facts.probe_policy.default_probe` (raw default-policy probe state, `client-limited` = never sent) and `facts.endpoint_comparison.addresses` (DNS addresses, so partial coverage is explicit) |
 
 ## Versioning
 
@@ -78,11 +80,21 @@ direct, complete measurement.
 | `support` | per version (`TLS 1.0` … `TLS 1.3`): `default`, `relaxed-only`, `relaxed-only-unverified`, `rejected`, `inconclusive` |
 | `confirmed_legacy` | deprecated versions accepted under the default policy (`default` only) |
 | `unverified_legacy` | deprecated versions accepted under the relaxed policy whose default-policy probe gave no result |
+| `default_probe` | per re-probed version: `accepted`, `refused` (the peer answered no), `client-limited` (this client could not offer the version, nothing was sent), `inconclusive`, `unsupported` |
 
 `default` is the only class that establishes ordinary-client interoperability. A
 version the primary handshake negotiated is never reported as `rejected`. A probe
 the local client could not perform (no applicable protocol or cipher in the
 default context) is `relaxed-only-unverified` or `inconclusive`, never `rejected`.
+
+## Unresolved findings (`diagnosis.unresolved`)
+
+A warning whose evidence justifies no root cause stays visible here instead of
+disappearing into a generic note. Each entry keeps three things apart:
+`observed` (what the probe saw), `conclusion` (the most the evidence supports)
+and `uncertainty` (why the probes cannot settle the question), plus the
+`recommendation` for a controlled verification. `overall` is still derived from
+causes only.
 
 ## Endpoint states (`facts.endpoints`)
 
@@ -93,6 +105,10 @@ default context) is `relaxed-only-unverified` or `inconclusive`, never `rejected
 | `tcp-unreachable` | the address could not be reached | no |
 | `timed-out` | connect or negotiation exceeded the deadline | no |
 | `probe-unavailable` | handshake completed without a readable certificate | no |
+
+`endpoint_comparison` reports `addresses` (unique DNS addresses), `probed` and
+`comparable`. A match covers the `comparable` endpoints only; when it is lower
+than `addresses` the finding says how many were not compared.
 
 ## Secrets
 

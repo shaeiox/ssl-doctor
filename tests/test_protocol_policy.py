@@ -72,8 +72,9 @@ class LegacyRelaxedOnlyTests(unittest.TestCase):
         d = diagnose([f])
         self.assertFalse([c for c in d.causes if "protocol" in c.summary.lower()],
                          f"unexpected cause: {[c.summary for c in d.causes]}")
-        self.assertTrue(any("ordinary-client compatibility" in n.lower()
-                            or "may be enabled" in n.lower() for n in d.notes), d.notes)
+        # the open question is carried as an unresolved entry, not a free-text note
+        self.assertEqual([u.check for u in d.unresolved], ["tls.protocols"])
+        self.assertIn("may be enabled", d.unresolved[0].conclusion.lower())
 
     def test_unverified_legacy_is_still_visible_as_a_warning(self):
         f, _ = matrix({("TLS 1.0", "relaxed"): [OK10], ("TLS 1.1", "relaxed"): [OK11],

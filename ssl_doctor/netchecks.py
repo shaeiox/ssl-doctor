@@ -697,6 +697,10 @@ def check_protocol_matrix(host: str, port: int, sni: Optional[str],
     refused_versions: List[str] = []
     inconclusive_versions: List[str] = []
     limited_versions: List[str] = []
+    # Outcome of the default-policy re-probe per version.  Kept as a state, not
+    # prose: "client-limited" (this client never offered it) and "refused" (the
+    # peer answered and said no) lead to opposite conclusions.
+    default_probe: Dict[str, str] = {}
     attempts = 0
 
     def attempts_left() -> bool:
@@ -758,6 +762,7 @@ def check_protocol_matrix(host: str, port: int, sni: Optional[str],
 
         # ---- 2. can an ordinary, default-configured client negotiate it? -----
         d_state, d_detail, d_retried = attempt(label, version, False)
+        default_probe[label] = d_state
         if d_state == ACCEPTED:
             support[label] = SUPPORT_DEFAULT
             rows.append(f"{label}: also accepted with the default cipher policy "
@@ -767,11 +772,16 @@ def check_protocol_matrix(host: str, port: int, sni: Optional[str],
             support[label] = SUPPORT_RELAXED_ONLY
             rows.append(f"{label}: accepted only under the relaxed cipher policy - "
                         f"the server refuses a default-configured client ({d_detail})")
+        elif d_state == CLIENT_LIMITED:
+            support[label] = SUPPORT_UNVERIFIED
+            rows.append(f"{label}: default-policy probe cannot establish ordinary-client "
+                        f"compatibility - this client could not offer {label} under "
+                        f"its default security settings ({d_detail}); nothing was "
+                        f"sent to the server, so this is not a server rejection")
         else:
             support[label] = SUPPORT_UNVERIFIED
             rows.append(f"{label}: default-policy probe cannot establish ordinary-client "
-                        f"compatibility ({d_detail}) - acceptance shown only when "
-                        f"legacy cipher suites were offered")
+                        f"compatibility - no definite answer ({d_detail})")
 
     legacy_confirmed = [v for v in _LEGACY_VERSIONS
                         if support.get(v) in (SUPPORT_DEFAULT, SUPPORT_RELAXED_ONLY)]
@@ -786,6 +796,7 @@ def check_protocol_matrix(host: str, port: int, sni: Optional[str],
         "support": support,
         "confirmed_legacy": legacy_confirmed,
         "unverified_legacy": legacy_unverified,
+        "default_probe": default_probe,
     }
 
     status, notes = F.PASS, []
@@ -811,9 +822,32 @@ def check_protocol_matrix(host: str, port: int, sni: Optional[str],
                          f"client is refused (security/policy risk)")
     elif legacy_unverified:
         status = F.WARNING
-        notes.append(f"deprecated {', '.join(legacy_unverified)} answered a handshake "
-                     f"only when legacy cipher suites were offered; whether ordinary "
-                     f"clients can negotiate them was NOT established by this probe")
+        notes.append(f"deprecated {', '.join(legacy_unverified)} completed a handshake "
+                     f"only under the relaxed cipher policy {_RELAXED_CIPHER_POLICY}; "
+                     f"whether ordinary clients can negotiate them was NOT established "
+                     f"by this probe")
+
+    # Why the probes cannot settle ordinary-client compatibility, kept apart from
+    # the evidence rows (what was observed) and the diagnosis (what follows).
+    uncertainty: List[str] = []
+    if legacy_unverified:
+        uncertainty.append(
+            f"a handshake under {_RELAXED_CIPHER_POLICY} shows only that the server "
+            f"can negotiate {', '.join(legacy_unverified)} when legacy cipher suites "
+            f"are offered at a lowered security level; ordinary clients do not offer "
+            f"those suites")
+        limited = [v for v in legacy_unverified if default_probe.get(v) == CLIENT_LIMITED]
+        unanswered = [v for v in legacy_unverified if v not in limited]
+        if limited:
+            uncertainty.append(
+                f"the default-policy probe for {', '.join(limited)} was never sent: "
+                f"this client cannot offer the version under its default security "
+                f"settings, so no server answer exists to tell acceptance from "
+                f"rejection")
+        if unanswered:
+            uncertainty.append(
+                f"the default-policy probe for {', '.join(unanswered)} produced no "
+                f"definite answer (timeout or local error)")
 
     if support.get("TLS 1.2") == SUPPORT_RELAXED_ONLY:
         status = F.WARNING
@@ -858,9 +892,20 @@ def check_protocol_matrix(host: str, port: int, sni: Optional[str],
         recommendation = ("Disable TLS 1.0/1.1 (and legacy cipher suites) and serve "
                           "TLS 1.2 and 1.3 only.")
     elif legacy_unverified:
-        recommendation = ("Treat legacy TLS as enabled until proven otherwise: probe "
-                          "the endpoint from a client whose default policy can still "
-                          "offer TLS 1.0/1.1, then disable them if accepted.")
+        # Unconfirmed: ask for a controlled verification, and say what it can and
+        # cannot prove, instead of presuming the versions are enabled.
+        name = sni or host
+        recommendation = (
+            f"Not confirmed - verify before changing anything. Run a controlled test "
+            f"from a client that can still offer {', '.join(legacy_unverified)}, e.g. "
+            f"`openssl s_client -connect {host}:{port} -servername {name} -tls1` "
+            f"(and `-tls1_1`); on OpenSSL 3.x add `-cipher 'DEFAULT:@SECLEVEL=0'`, "
+            f"or use a client configured like the legacy clients you must support or "
+            f"exclude. Limitations: a success shows only that the server negotiates "
+            f"the version with a client offering those cipher suites, not that your "
+            f"real clients can; a refusal covers only the suites that client offered. "
+            f"The server's own protocol configuration (e.g. nginx `ssl_protocols`) is "
+            f"authoritative - if policy forbids TLS 1.0/1.1, disable them there.")
     elif support.get("TLS 1.2") == SUPPORT_RELAXED_ONLY:
         recommendation = ("Configure TLS 1.2 to accept modern cipher suites under the "
                           "default policy so ordinary clients can connect, then remove "
@@ -872,7 +917,8 @@ def check_protocol_matrix(host: str, port: int, sni: Optional[str],
     return F.Finding(
         "tls.protocols", "TLS protocol version support", status, F.SCOPE_REMOTE_NET,
         rows, detail="; ".join(notes), recommendation=recommendation,
-        target=target, failure_kind=failure_kind, observation=observation)
+        target=target, failure_kind=failure_kind, observation=observation,
+        uncertainty=uncertainty)
 
 
 def _sni_cert(host: str, port: int, server_name: Optional[str],
@@ -1075,9 +1121,14 @@ def check_multi_ip(host: str, port: int, ips: List[str], timeout: float,
                   if r["state"] == EP_NEGOTIATED and r.get("sni") == server_name]
     facts["endpoints"] = records
     facts["endpoint_comparison"] = {"probed": len(records), "comparable": len(comparable),
+                                    "addresses": len(uniq),
                                     "difference": False, "attribute": ""}
     scope = (f"probed {len(records)} of {len(uniq)} address(es), server name "
              f"'{server_name or '-'}', timeout {timeout:.0f}s")
+    # A match is a statement about the comparable endpoints only.
+    unchecked = len(uniq) - len(comparable)
+    coverage = (f"; {unchecked} of {len(uniq)} DNS address(es) were not compared "
+                f"(not probed or no comparable certificate)" if unchecked else "")
 
     if len(comparable) < 2:
         only = [r for r in records if r["state"] != EP_NEGOTIATED]
@@ -1119,8 +1170,10 @@ def check_multi_ip(host: str, port: int, ips: List[str], timeout: float,
         facts["endpoint_comparison"].update({"comparable": len(comparable)})
         return F.Finding(
             "tls.multiip", "Multiple endpoint comparison", F.PASS, F.SCOPE_REMOTE_NET,
-            [f"all {len(comparable)} comparable endpoint(s) present the same "
-             f"certificate facts", f"{scope}", *rows],
+            [f"the {len(comparable)} comparable endpoint(s) present the same "
+             f"certificate facts{coverage}", f"{scope}", *rows],
+            uncertainty=([f"consistency is established for {len(comparable)} of "
+                          f"{len(uniq)} DNS addresses only"] if unchecked else []),
             target=target)
 
     facts["endpoint_comparison"].update({"difference": True,

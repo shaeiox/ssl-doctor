@@ -615,6 +615,13 @@ class SSLDoctorCLI:
                 self.out(paint(f"       limit: {lim}", C.DIM))
             if c.recommendation:
                 self.out(paint(f"       fix: {c.recommendation}", C.CYAN))
+        for u in self._diagnosis.unresolved:
+            self.out(f"  [{paint('UNRESOLVED', C.YELLOW)} · {u.check}] {u.observed}")
+            self.out(paint(f"       conclusion: {u.conclusion}", C.DIM))
+            for unc in u.uncertainty:
+                self.out(paint(f"       uncertain: {unc}", C.DIM))
+            if u.recommendation:
+                self.out(paint(f"       next: {u.recommendation}", C.CYAN))
         for n in self._diagnosis.notes:
             self.out(paint(f"  note: {n}", C.GRAY))
         self.note("\ngenerate a report with /report html")
