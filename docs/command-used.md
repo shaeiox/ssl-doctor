@@ -57,6 +57,10 @@ the server (if authorized) → correlate → report**.
 
 Targets accept `host`, `host:port`, or a URL (`https://example.com/path`).
 
+At the server step every interactive `/scan` asks which server to use: the open
+session, a remembered server (domain matches first) or `n` for a new one; Enter
+takes the most likely choice.
+
 ### Remote TLS/HTTPS suite
 
 ```text

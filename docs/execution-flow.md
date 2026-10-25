@@ -331,7 +331,14 @@ It then calls `_gather_remote()`:
      - if no presented certificate is known yet, measures the public endpoint
        with `netchecks.check_dns()` and `netchecks.check_tls_basic()`, adds a
        domain profile, and updates `remote_facts`
-     - if not connected, runs the interactive `_server_connect()`
+     - interactive: `_choose_scan_server(host)` asks which server to use —
+       the current session, remembered servers (domain matches first), or
+       `n` = new — with Enter on the most likely one; nothing to choose from
+       goes straight to `_server_connect()`, an unrecognised answer skips the
+       server step
+     - batch: uses the open session, else runs `_server_connect()`
+     - a new connection replaces the current session only once it is up; if it
+       fails, the server step stops (the old session stays open)
      - `ServerSession.overview()` + `webserver_detection()`
      - `ServerSession.nginx_scan(domain, port)`
      - `ServerSession.compare_configured_vs_presented(presented_sha256)`
@@ -353,7 +360,7 @@ host key is trusted:
 1. **Settings** — `/server connect <name>` takes the remembered profile
    (`ssl_doctor/profiles.py`, `~/.ssl-doctor/profiles.json`); without a name and
    with profiles present it offers the recent servers (`n` = new); `/scan`
-   offers the profile whose TLS target or host matches. Otherwise it prompts
+   passes the server chosen in `_choose_scan_server()`. Otherwise it prompts
    for host, port (`22`), user (`getpass.getuser()`), auth method
    (`1=password`, `2=private key`), key path, TLS target host and port, with
    defaults pre-filled from a profile for the same host.

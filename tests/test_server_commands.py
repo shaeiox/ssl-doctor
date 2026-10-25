@@ -71,29 +71,88 @@ class ConnectByName(Harness):
         self.assertEqual(FakeSession.instances[-1].cfg.host, "files.example.com")
 
 
-class ScanOffersProfile(Harness):
+class ScanAsksWhichServer(Harness):
+    """Every interactive /scan asks which server to use (current, remembered, new)."""
 
-    def scan(self, answers):
-        self.answers = answers
+    def scan(self, answers, domain="files.example.com"):
+        self.answers = list(answers)
+        self.asked.clear()
         with mock.patch.object(cli.netchecks, "check_dns", return_value=(None, [])), \
                 mock.patch.object(cli.netchecks, "check_tls_basic", return_value=(None, {})), \
                 mock.patch.object(cli.netchecks, "domain_profile", return_value=None), \
-                mock.patch.object(cli.SSLDoctorCLI, "_run_server_checks", create=True), \
                 mock.patch.object(self.app.store, "extend"), \
                 mock.patch.object(cli, "print_findings"):
-            return self.run_cli("/scan files.example.com --server-only")
+            return self.run_cli(f"/scan {domain} --server-only")
 
-    def test_an_accepted_profile_connects_without_prompts(self):
+    def connect_files(self):
         self.remember()
-        self.scan(["yes"])
-        self.assertTrue(self.asked[0].startswith("Use remembered server files"))
+        self.run_cli("/server connect files")
+        self.assertTrue(self.app.server.connected)
+        return len(FakeSession.instances)
+
+    def test_a_second_scan_of_another_domain_asks_instead_of_reusing(self):
+        self.connect_files()
+        output = self.scan(["n", ""], domain="www.example.org")    # new server, then give up
+        self.assertTrue(self.asked[0].startswith("server for this scan"))
+        self.assertIn("current session", output)
+        self.assertEqual(self.asked[1], "SSH hostname or IP")
+
+    def test_the_matching_remembered_server_is_the_default(self):
+        self.remember()
+        self.remember(saved=False, name="web", host="10.0.0.5", tls_host="www.example.org",
+                      last_used="2026-10-30T00:00:00+00:00")
+        self.scan([None])                                          # Enter
         self.assertEqual(len(self.asked), 1)
         self.assertEqual(FakeSession.instances[-1].cfg.host, "files.example.com")
 
-    def test_a_declined_profile_falls_back_to_the_prompts(self):
+    def test_keeping_the_current_session_does_not_reconnect(self):
+        sessions = self.connect_files()
+        output = self.scan([None])                                 # default: current session
+        self.assertEqual(len(FakeSession.instances), sessions)
+        self.assertIn("using the current session", output)
+
+    def test_a_remembered_server_can_be_chosen_by_name(self):
         self.remember()
-        self.scan(["no", ""])                              # decline, then empty hostname
-        self.assertEqual(self.asked[1], "SSH hostname or IP")
+        self.remember(name="web", host="10.0.0.5", tls_host="www.example.org")
+        self.scan(["web"])
+        self.assertEqual(FakeSession.instances[-1].cfg.host, "10.0.0.5")
+
+    def test_a_new_server_replaces_the_session_once_it_connects(self):
+        self.connect_files()
+        old = self.app.server
+        self.passwords = ["right"]
+        self.scan(["n", "other.example.com", "22", "eleven", "1", "", "443", "n"])
+        self.assertIsNot(self.app.server, old)
+        self.assertFalse(old.connected)
+        self.assertEqual(self.app.server.cfg.host, "other.example.com")
+
+    def test_a_failed_new_server_keeps_the_session_and_stops_the_scan(self):
+        self.connect_files()
+        old = self.app.server
+        self.passwords = ["wrong"]
+        with mock.patch.object(FakeSession, "overview", create=True,
+                               side_effect=AssertionError("server checks ran")) as checks:
+            self.scan(["n", "other.example.com", "22", "eleven", "1", "", "443"])
+        self.assertIs(self.app.server, old)
+        self.assertTrue(old.connected)
+        checks.assert_not_called()
+
+    def test_nothing_to_choose_from_goes_straight_to_the_prompts(self):
+        self.scan([""])                                            # empty hostname: stop
+        self.assertEqual(self.asked, ["SSH hostname or IP"])
+
+    def test_an_unrecognised_answer_skips_the_server_step(self):
+        self.remember()
+        output = self.scan(["7"])
+        self.assertIn("not a listed server", output)
+        self.assertEqual(FakeSession.instances, [])
+
+    def test_batch_scans_never_ask(self):
+        sessions = self.connect_files()
+        self.app._BATCH_MODE = True
+        self.scan([])
+        self.assertEqual(self.asked, [])
+        self.assertEqual(len(FakeSession.instances), sessions)
 
 
 class Forget(Harness):
