@@ -227,10 +227,21 @@ def _http_level_directives(nodes) -> Dict[str, List[List[str]]]:
 
 # ---------------------------------------------------------------- host keys
 
-def _scan_host_keys(host: str, port: int, timeout: float) -> Tuple[List[str], str]:
+# ssh-keyscan offers OpenSSH's compiled-in default KEX list unfiltered, so a
+# build without sntrup761x25519 (the first default) fails against a server that
+# picks it, while ssh itself only offers what the binary implements.
+_KEX_FAILURES = ("unsupported KEX method", "no matching key exchange")
+# one probe per host key family; RSA keys are stored as ssh-rsa whichever
+# signature algorithm negotiated them
+_PROBE_HOST_KEY_ALGS = ("ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
+                        "ecdsa-sha2-nistp521", "rsa-sha2-512,rsa-sha2-256,ssh-rsa")
+
+
+def _scan_host_keys(host: str, port: int, timeout: float,
+                    username: str = "") -> Tuple[List[str], str]:
     """Return ('host keytype base64' lines, error)."""
     if not shutil.which("ssh-keyscan"):
-        return [], "ssh-keyscan not available"
+        return _scan_host_keys_ssh(host, port, timeout, username, "ssh-keyscan not available")
     try:
         proc = subprocess.run(
             ["ssh-keyscan", "-T", str(int(timeout)), "-p", str(port), host],
@@ -241,17 +252,83 @@ def _scan_host_keys(host: str, port: int, timeout: float) -> Tuple[List[str], st
              if ln.strip() and not ln.startswith("#")]
     if not lines:
         err = proc.stderr.strip().splitlines()
-        return [], err[-1] if err else "no host keys retrieved (SSH service reachable?)"
+        reason = err[-1] if err else "no host keys retrieved (SSH service reachable?)"
+        if any(marker in proc.stderr for marker in _KEX_FAILURES):
+            return _scan_host_keys_ssh(host, port, timeout, username, reason)
+        return [], reason
     return lines, ""
 
 
-def host_key_status(host: str, port: int, timeout: float = 8.0) -> HostKeyInfo:
+def _scan_host_keys_ssh(host: str, port: int, timeout: float, username: str,
+                        keyscan_error: str) -> Tuple[List[str], str]:
+    """Read the host keys through ssh, which negotiates like the real session.
+
+    Each probe accepts the presented key into a scratch known_hosts file and then
+    stops: every authentication method is off, so it can never log in. Lines
+    come back in ssh-keyscan's form (`host keytype base64`, `[host]:port` off
+    port 22) whatever HashKnownHosts says.
+    """
+    if not shutil.which("ssh"):
+        return [], f"{keyscan_error}; ssh client not found"
+    name = host if port == 22 else f"[{host}]:{port}"
+    lines: List[str] = []
+    seen = set()
+    last_error = ""
+    scratch = os.path.join(_ensure_state_dir(), ".probe_known_hosts")
+    for algs in _PROBE_HOST_KEY_ALGS:
+        if os.path.exists(scratch):
+            os.unlink(scratch)
+        argv = ["ssh", "-p", str(port), "-T",
+                "-o", f"ConnectTimeout={int(timeout)}",
+                "-o", f"UserKnownHostsFile={scratch}",
+                "-o", "GlobalKnownHostsFile=/dev/null",
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "HashKnownHosts=no",
+                "-o", f"HostKeyAlgorithms={algs}",
+                "-o", "BatchMode=yes",
+                "-o", "PubkeyAuthentication=no",
+                "-o", "PasswordAuthentication=no",
+                "-o", "KbdInteractiveAuthentication=no",
+                "-o", "GSSAPIAuthentication=no",
+                "-o", "HostbasedAuthentication=no",
+                "-o", "ControlPath=none",
+                "-o", "LogLevel=ERROR"]
+        if username:
+            argv += ["-l", username]
+        argv += [host, "--", "true"]
+        try:
+            proc = subprocess.run(argv, capture_output=True, timeout=timeout + 5,
+                                  text=True, stdin=subprocess.DEVNULL,
+                                  start_new_session=True)
+        except subprocess.TimeoutExpired:
+            last_error = f"host key probe timed out after {timeout:.0f}s"
+            continue
+        except FileNotFoundError:
+            return [], f"{keyscan_error}; ssh client not found"
+        if os.path.exists(scratch):
+            with open(scratch) as fh:
+                for row in fh:
+                    parts = row.split()
+                    if len(parts) >= 3 and (parts[1], parts[2]) not in seen:
+                        seen.add((parts[1], parts[2]))
+                        lines.append(f"{name} {parts[1]} {parts[2]}")
+            os.unlink(scratch)
+        err = proc.stderr.strip().splitlines()
+        if err:
+            last_error = err[-1]
+    if lines:
+        return lines, ""
+    return [], f"{keyscan_error}; ssh: {last_error or 'no host keys retrieved'}"
+
+
+def host_key_status(host: str, port: int, timeout: float = 8.0,
+                    username: str = "") -> HostKeyInfo:
     kh_path = os.path.join(_ensure_state_dir(), "known_hosts")
     if not os.path.exists(kh_path):
         open(kh_path, "a").close()
         os.chmod(kh_path, 0o600)
 
-    scan, err = _scan_host_keys(host, port, timeout)
+    scan, err = _scan_host_keys(host, port, timeout, username)
     if not scan:
         return HostKeyInfo("unreachable", [], err)
 
@@ -300,9 +377,10 @@ def host_key_status(host: str, port: int, timeout: float = 8.0) -> HostKeyInfo:
                        "host presents key types not yet in the trust store")
 
 
-def store_host_key(host: str, port: int, timeout: float = 8.0) -> Tuple[bool, str]:
+def store_host_key(host: str, port: int, timeout: float = 8.0,
+                   username: str = "") -> Tuple[bool, str]:
     """Persist the currently presented host key. Requires prior user consent."""
-    scan, err = _scan_host_keys(host, port, timeout)
+    scan, err = _scan_host_keys(host, port, timeout, username)
     if not scan:
         return False, err
     kh_path = os.path.join(_ensure_state_dir(), "known_hosts")
@@ -388,7 +466,7 @@ class ServerSession:
         out: List[F.Finding] = []
         target = f"{self.cfg.host}:{self.cfg.port}"
         key = host_key_status(self.cfg.host, self.cfg.port,
-                              self.cfg.connect_timeout)
+                              self.cfg.connect_timeout, self.cfg.username)
         if key.status == "unreachable":
             out.append(F.Finding(
                 "ssh.hostkey", "SSH host key verification", F.FAIL, F.SCOPE_SERVER,

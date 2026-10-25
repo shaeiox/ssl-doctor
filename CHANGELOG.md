@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`/server connect` failed with "choose_kex: unsupported KEX method
+  sntrup761x25519-sha512@openssh.com" while `ssh user@host` worked.**
+  `ssh-keyscan` proposes OpenSSH's compiled-in default key exchange list
+  unfiltered, and that list always starts with sntrup761x25519; an OpenSSH
+  build without it cannot run it once a modern server agrees to it. `ssh`
+  filters the same defaults down to what the binary implements. When
+  `ssh-keyscan` fails to negotiate a key exchange (or is missing), the host key
+  is now read through `ssh` itself: one probe per key type that records the
+  key in a scratch file and cannot log in (every authentication method is
+  off). Trust checks, change detection and the trust prompt are unchanged.
+
 ## v0.8.2 — result frames straight at every window size
 
 Result frames in the full-screen shell are redrawn to the window on every

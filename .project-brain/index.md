@@ -6,11 +6,11 @@
 
 - (no topics yet)
 
-> resume 2026-10-25 · done: v0.8.2 responsive result frames (reflow at layout + cell widths), merged to master, tagged & pushed · next: user checks resize + CJK hosts on Windows/Linux · blocker: none
+> resume 2026-10-25 · done: ssh-keyscan KEX fallback via ssh probes on branch fix/ssh-hostkey-kex, not merged · next: user retries /server connect files.cloudavid.com, shares `ssh -V`; check Windows password askpass (askpass.sh) · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md
-- server-ssh-nginx → Read-only SSH, nginx vhost resolution, chain linkage, configured-vs-presented   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/server-ssh-nginx.md
+- server-ssh-nginx → Read-only SSH, nginx vhost resolution, chain linkage, configured-vs-presented   [✓ done 2026-10-25 · v2] → projects/ssl-doctor/server-ssh-nginx.md
 - commands-reference → Actual executed commands documented (local/remote, traced to source)   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/commands-reference.md
 - evidence-based-probes → Endpoint states, comparable-only comparison, SNI observations, probe reconciliation, cause limitations   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/evidence-based-probes.md
 - protocol-policy-evidence → Relaxed vs default cipher policy, per-version support classes, client-limited probes, contract 1.4   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/protocol-policy-evidence.md
