@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-25 · done: v0.10.0 pushed; archived 10 completed OpenSpec changes, 11 new main specs, terminal-interface reconciled (RECONCILED.md per change) · next: widen terminal-interface Purpose by hand; remembered-servers needs Windows CI + manual vault checks; fix-tls-handshake-timeout-attribution 37/38, fix-chain-diagnosis-saas-enterprise 46/52 · blocker: none
+> resume 2026-10-25 · done: Windows wheel fix + terminal profiles on branch fix/terminal-profiles, not merged · next: user verifies wheel in cmd, PowerShell, Git Bash; merge/release · blocker: no Windows to test here
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-25 · v2] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md
@@ -18,6 +18,6 @@
 - tls-handshake-attribution → failure_kind classification, stall retry, probe address pinning, network-vs-server attribution   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/tls-handshake-attribution.md
 - agent-report → /report agent: AI-ready md+json from the redacted contract doc, verbatim prompt, atomic write   [✓ done 2026-10-24 · v1] → projects/ssl-doctor/agent-report.md
 - copy-to-clipboard → drag-to-copy, /copy, Ctrl-Y; native Win32/X11 clipboard, tools, OSC 52; Windows ReadConsoleInputW mouse   [✓ done 2026-10-25 · v3] → projects/ssl-doctor/copy-to-clipboard.md
-- ui-design-system → Theme, full-screen shell, result frames, streaming into frames, centred banner, chat composer   [✓ done 2026-10-25 · v7] → projects/ssl-doctor/ui-design-system.md
+- ui-design-system → Theme, full-screen shell, result frames, streaming into frames, centred banner, chat composer   [✓ done 2026-10-25 · v8] → projects/ssl-doctor/ui-design-system.md
 - remembered-servers → SSH server profiles + passwords in OS vault (Win Credential Manager / Secret Service), host-key bound; ADR-001 Accepted, implemented   [⚠ in-progress 2026-10-25 · v4] → projects/ssl-doctor/remembered-servers.md
 - _decisions → One-line decision log: colours, frames, static input, report pills   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/_decisions.md

@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Mouse-wheel scrolling in cmd, PowerShell and Git Bash.** The full-screen
+  shell scrolls its transcript itself (the alternate screen has no scrollback),
+  but the classic Windows console starts with Quick Edit on, which takes the
+  mouse for its own selection, and winpty (Git Bash's `python` alias) forwards
+  the mouse only when the program asks for mouse input with Quick Edit off —
+  so the wheel never reached the shell there. While it waits for a key the shell
+  now switches Quick Edit off and mouse input on, and restores the console's
+  mode afterwards.
+- **Windows consoles without VT processing** (legacy console mode, old builds)
+  no longer get the alternate screen they cannot draw: they use line mode,
+  where the console's own scrollback works, with a note saying why.
+
+### Added
+
+- `ssl_doctor/termcaps.py` decides, per terminal, between the full-screen shell
+  and line mode and whether the mouse is captured; `SSL_DOCTOR_MOUSE=off` keeps
+  the shell without mouse capture. README lists the supported terminals.
+
 ## v0.10.0 — nginx certificate paths, per-server settings
 
 Certificate and key paths are resolved the way nginx resolves them and checked

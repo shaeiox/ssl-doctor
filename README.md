@@ -27,8 +27,9 @@ python3 ssldoctor.py -c "/scan example.com --with-server" -c "/report both out"
 | `-h`, `--help` | banner and command list |
 
 Environment: `NO_COLOR` / `SSL_DOCTOR_COLOR=never|always` control colour,
-`SSL_DOCTOR_TUI=0` disables the full-screen shell, `SSL_DOCTOR_REMEMBER=off`
-disables remembered servers.
+`SSL_DOCTOR_TUI=0` disables the full-screen shell, `SSL_DOCTOR_MOUSE=off` keeps
+the shell but leaves the mouse to the terminal (scroll with PgUp/PgDn),
+`SSL_DOCTOR_REMEMBER=off` disables remembered servers.
 
 ### Development
 
@@ -141,8 +142,7 @@ border stays straight at any size.
 Mouse reporting (wheel, press, drag, release) is switched on only while the
 composer is reading, so mouse bytes can never end up inside a running check;
 on Windows the shell reads console input records directly (VT mouse reports
-and native mouse events alike), so wheel, drag-select and copy work in
-Windows Terminal as on Linux;
+and native mouse events alike);
 during a check, and with Shift+drag at any time, the terminal's own selection
 works as usual. Copies need no extra software: on Windows they use the Win32
 clipboard, on Linux/X11 (including XWayland) SSL Doctor owns the X clipboard
@@ -161,6 +161,26 @@ runs), `TERM=dumb`, or a platform without a key reader. That mode prints the
 centred wordmark, then the same framed blocks as the session scrolls, with the
 same rounded composer around its prompt; piped and `NO_COLOR` output stays plain
 `[   + PASS]` rows.
+
+### Terminal support
+
+The full-screen shell draws on the alternate screen, which has no scrollback of
+its own, so the transcript scrolls inside the shell — mouse wheel, PgUp/PgDn.
+Where that cannot work, SSL Doctor uses line mode, and the terminal's own
+scrollback and wheel do the scrolling. Which one a terminal gets is decided in
+`ssl_doctor/termcaps.py`:
+
+| Terminal | Presentation | Wheel / selection |
+|---|---|---|
+| Linux/macOS terminals, Windows Terminal, VS Code, ConEmu | full-screen shell | VT mouse reports |
+| cmd / PowerShell (classic Windows console) | full-screen shell | console mouse events; Quick Edit is switched off only while the shell waits for input |
+| Git Bash / MSYS2 running Python through `winpty` (the default `python` alias) | full-screen shell | winpty forwards the mouse because the console asks for it (mouse input on, Quick Edit off) |
+| Git Bash without `winpty` (`python.exe` directly, pipes), redirected output, `TERM=dumb` | line mode | the terminal's own |
+| Windows console without VT processing (legacy console mode, old builds) | line mode, with a note saying why | the console's own |
+
+`SSL_DOCTOR_MOUSE=off` keeps the full-screen shell but never captures the mouse
+(PgUp/PgDn scroll; the terminal keeps its own selection). `--no-tui` /
+`SSL_DOCTOR_TUI=0` always selects line mode.
 
 ### Inside the frame
 

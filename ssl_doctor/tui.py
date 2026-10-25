@@ -31,7 +31,7 @@ import threading
 import time
 from typing import Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
-from . import textcells
+from . import termcaps, textcells
 
 MIN_WIDTH = 40
 MAX_WIDTH = 120          # beyond this a diagnostic sentence is hard to follow
@@ -67,6 +67,34 @@ HISTORY_LIMIT = 200
 # Windows console input (ReadConsoleInputW)
 _ENABLE_VT_INPUT = 0x0200
 _CONSOLE_COOKED = 0x0001 | 0x0002 | 0x0004   # processed, line, echo input
+_ENABLE_MOUSE_INPUT = 0x0010
+_ENABLE_QUICK_EDIT = 0x0040
+_ENABLE_EXTENDED_FLAGS = 0x0080
+
+
+def console_read_mode(original: int, mouse: bool) -> int:
+    """The console input mode while the shell waits for a key.
+
+    Raw (no line editing, echo or Ctrl-C processing) with VT input, so keys and
+    Windows Terminal's mouse reports arrive as escape sequences. With `mouse`,
+    Quick Edit is switched off and mouse input on (Quick Edit can only be
+    switched off together with ENABLE_EXTENDED_FLAGS): the classic console then
+    delivers wheel and button events instead of starting its own selection, and
+    winpty (Git Bash) turns the terminal's mouse on only for exactly that
+    combination. Without `mouse`, mouse input is off and the console keeps
+    its own selection (Quick Edit untouched).
+    """
+    mode = (original & ~_CONSOLE_COOKED) | _ENABLE_VT_INPUT
+    if mouse:
+        return (mode & ~_ENABLE_QUICK_EDIT) | _ENABLE_MOUSE_INPUT | _ENABLE_EXTENDED_FLAGS
+    return mode & ~_ENABLE_MOUSE_INPUT      # no stray mouse records; selection stays
+
+
+def console_restore_mode(original: int) -> int:
+    """The mode to put back: Quick Edit, if it was on, needs EXTENDED_FLAGS to return."""
+    if original & _ENABLE_QUICK_EDIT:
+        return original | _ENABLE_EXTENDED_FLAGS
+    return original
 _KEY_EVENT = 0x0001
 _MOUSE_EVENT = 0x0002
 _MOUSE_MOVED = 0x0001
@@ -125,23 +153,27 @@ def keys_available() -> bool:
     return _posix_keys_available() or _windows_keys_available()
 
 
-def enabled(stream=None, stdin=None, env=None) -> bool:
-    """True when the full-screen shell can and should be used."""
+def profile(stream=None, stdin=None, env=None, windows: Optional[bool] = None,
+            vt_ok: Optional[bool] = None) -> termcaps.TerminalProfile:
+    """This terminal's presentation: full-screen shell or line REPL, mouse or not."""
     env = os.environ if env is None else env
     stream = sys.stdout if stream is None else stream
     stdin = sys.stdin if stdin is None else stdin
-    setting = (env.get("SSL_DOCTOR_TUI") or "").strip().lower()
-    if setting in ("0", "false", "no", "off", "plain"):
-        return False
-    try:
-        if not (stream.isatty() and stdin.isatty()):
+    windows = (os.name == "nt") if windows is None else windows
+
+    def tty(s) -> bool:
+        try:
+            return bool(s.isatty())
+        except Exception:
             return False
-    except Exception:
-        return False
-    term = (env.get("TERM") or "").strip().lower()
-    if term == "dumb":
-        return False
-    return keys_available()
+    if vt_ok is None:
+        vt_ok = termcaps.vt_output_available() if windows else True
+    return termcaps.detect(env, windows, tty(stdin), tty(stream), keys_available(), vt_ok)
+
+
+def enabled(stream=None, stdin=None, env=None) -> bool:
+    """True when the full-screen shell can and should be used."""
+    return profile(stream, stdin, env).fullscreen
 
 
 # ------------------------------------------------------------------ transcript
@@ -736,8 +768,9 @@ class Screen:
 class KeyReader:
     """Decode key presses from a raw terminal (POSIX or Windows)."""
 
-    def __init__(self, stream=None) -> None:
+    def __init__(self, stream=None, mouse: bool = True) -> None:
         self.stream = sys.stdin if stream is None else stream
+        self.mouse = mouse               # Windows: ask the console for mouse events
         self._fd = None
         try:
             self._fd = self.stream.fileno()
@@ -899,10 +932,9 @@ class KeyReader:
                 if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                     return
                 self._console_mode = mode.value
-                kernel32.SetConsoleMode(
-                    handle, (mode.value & ~_CONSOLE_COOKED) | _ENABLE_VT_INPUT)
+                kernel32.SetConsoleMode(handle, console_read_mode(mode.value, self.mouse))
             elif self._console_mode is not None:
-                kernel32.SetConsoleMode(handle, self._console_mode)
+                kernel32.SetConsoleMode(handle, console_restore_mode(self._console_mode))
                 self._console_mode = None
         except Exception:
             self._console_mode = None                     # never strand the console
@@ -1024,11 +1056,13 @@ class TuiSession:
                  stream=None, keys: Optional[KeyReader] = None,
                  completer: Optional[Callable[[str], Sequence[Tuple[str, str]]]] = None,
                  on_copy: Optional[Callable[[str], str]] = None,
-                 last_response: Optional[Callable[[], Optional[str]]] = None) -> None:
+                 last_response: Optional[Callable[[], Optional[str]]] = None,
+                 mouse: bool = True) -> None:
         self.screen = Screen(stream)
         self.transcript = Transcript()
         self.renderer = renderer
-        self.keys = keys or KeyReader()
+        self.mouse = mouse               # off: the terminal keeps its own selection
+        self.keys = keys or KeyReader(mouse=mouse)
         self.completer = completer
         self.menu: List[Tuple[str, str]] = []
         self.menu_index = 0
@@ -1168,7 +1202,8 @@ class TuiSession:
         self.menu_index = 0
         history_index = len(self.history)
         draft = ""
-        self.screen.mouse(True)
+        if self.mouse:
+            self.screen.mouse(True)
         try:
             while True:
                 self.render()
@@ -1256,7 +1291,8 @@ class TuiSession:
             self.menu_index = 0
             self.masked = self.masked and secret
             self._dragging = False
-            self.screen.mouse(False)
+            if self.mouse:
+                self.screen.mouse(False)
 
     # -- completion ------------------------------------------------------
     def refresh_menu(self) -> None:

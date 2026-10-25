@@ -171,10 +171,17 @@ automatically produce a non-zero exit code; the diagnosis does.
 
 ## 5. REPL mode — the command loop
 
-On an interactive terminal `repl()` first starts the **full-screen shell**
-(`SSLDoctorCLI._repl_tui()`, presentation in `ssl_doctor/tui.py`) unless
-`--no-tui`, `SSL_DOCTOR_TUI=0`, `TERM=dumb` or a missing key reader rules it
-out; any error there falls back to the line loop below.
+`repl()` asks `tui.profile()` (`ssl_doctor/termcaps.py`: `detect()` over the
+environment, TTYs, key reader and — on Windows — VT output support) for the
+terminal's presentation. The **full-screen shell** (`SSLDoctorCLI._repl_tui()`,
+presentation in `ssl_doctor/tui.py`) runs unless `--no-tui`,
+`SSL_DOCTOR_TUI=0`, a non-terminal stdin/stdout, `TERM=dumb`, a missing key
+reader or a Windows console without VT processing rules it out (the last ones
+with a one-line note); any error there falls back to the line loop below.
+`SSL_DOCTOR_MOUSE=off` keeps the shell without mouse capture. On Windows the
+key reader sets `tui.console_read_mode()` while it waits for a key — raw VT
+input, Quick Edit off, mouse input and extended flags on, so the classic
+console and winpty deliver the wheel — and `console_restore_mode()` after it.
 
 - The shell enters the alternate screen and redraws one frame per event:
   centred banner, the transcript (each command's captured, colourless output),

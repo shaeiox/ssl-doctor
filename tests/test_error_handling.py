@@ -237,8 +237,11 @@ class ProfileFailures(Harness):
 
     def test_an_unusable_state_directory_still_allows_connecting(self):
         self.app._profile_store = None
-        with mock.patch.object(server, "_ensure_state_dir",
-                               side_effect=PermissionError(13, "Permission denied")):
+        # never the real ~/.ssl-doctor: a leftover profile there changed this test
+        unusable = os.path.join(self.dir, "no-such-state-dir")
+        with mock.patch.object(server, "STATE_DIR", unusable), \
+                mock.patch.object(server, "_ensure_state_dir",
+                                  side_effect=PermissionError(13, "Permission denied")):
             self.answers = self.NEW_SERVER + ["p"]
             self.passwords = ["right"]
             output = self.run_cli("/server connect")
