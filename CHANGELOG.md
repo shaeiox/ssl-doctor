@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Documentation
+
+- Brought the reference docs up to v0.9.0: `docs/command-used.md` (version,
+  start options, host-key fallback, remembered servers, current test count),
+  `docs/execution-flow.md` (version, imported modules, constructor state,
+  start options, askpass helper mode, file map with `tui`, `textcells`,
+  `clipboard`, `profiles`, `vault` and schemas 1.0–1.5), and the README layout.
+
 ## v0.9.0 — remembered servers
 
 Reconnect to a server you have used before with `/server connect <name>`: SSL
