@@ -32,6 +32,7 @@
 - [x] 4.3 Make `/scan <domain>` offer `match_domain(domain)` at its server step before the prompts; verify with a scripted `/scan` test that an accepted profile connects without connection prompts and a declined one falls back to them
 - [x] 4.4 Add `/server forget <name>`, `/server forget --all` (explicit confirmation) and `/server forget-password <name>`, always calling `vault.delete`; verify with tests that both profile and vault entry are removed and that an unconfirmed `--all` deletes nothing
 - [x] 4.5 Add the new commands to `COMMANDS`, `/help` and the completion menu (profile names after `/server connect ` and `/server forget `); verify with `command_completions()` tests
+- [x] 4.6 Ask at every interactive `/scan` server step which server to use (current session, remembered servers with domain matches first, `n` = new; Enter = the most likely choice; nothing to choose → prompts directly; never in batch); verify with scripted `/scan` tests for each scenario of "Every `/scan` asks which server to use" and "Batch scans never ask which server to use"
 
 ## 5. Security regression and documentation
 

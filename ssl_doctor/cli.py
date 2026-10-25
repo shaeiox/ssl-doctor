@@ -1462,14 +1462,18 @@ class SSLDoctorCLI:
             self.store.extend(extras)
             self.remote_facts.update(hs_facts)
             print_findings(extras)
-        if not (self.server and self.server.connected):
-            match = self._profiles().match_domain(host) if not self._batch_mode else None
-            if match is not None and self.prompt(
-                    f"Use remembered server {match.name} ({match.endpoint})? (yes/no)",
-                    "yes").lower() in ("yes", "y"):
-                self._server_connect(profile=match)
-            else:
-                self._server_connect(offer_recent=match is None)
+        if self._batch_mode:
+            if not (self.server and self.server.connected) and not self._server_connect():
+                return
+        else:
+            choice = self._choose_scan_server(host)
+            if choice is None:
+                return
+            if choice == "new" and not self._server_connect(offer_recent=False):
+                return
+            if isinstance(choice, profilesmod.Profile) and not self._server_connect(
+                    profile=choice):
+                return
         if not (self.server and self.server.connected):
             return
         srv = self.server
@@ -1679,21 +1683,79 @@ class SSLDoctorCLI:
         except vaultmod.VaultError as exc:
             self.note(f"could not delete the saved password for {profile.name}: {exc}")
 
+    def _choose_scan_server(self, domain: str):
+        """Ask which server this scan uses: "current", a Profile, "new" or None.
+
+        Every interactive scan asks, so a session left open by an earlier scan
+        is never reused for another domain without the operator saying so.
+        Enter picks the most likely choice: the current session when it serves
+        the domain, else a remembered server that matches it, else the current
+        session, else the most recently used server.
+        """
+        current = self.server if (self.server and self.server.connected) else None
+        store = self._profiles()
+        domain_l = domain.lower()
+
+        def serves(host: str, tls_host: str) -> bool:
+            return domain_l in (host.lower(), (tls_host or host).lower())
+
+        current_key = None
+        if current is not None:
+            c = current.cfg
+            current_key = (c.username, c.host.lower(), c.port)
+        profiles = [p for p in store.recent(len(store.all()))
+                    if (p.username, p.host.lower(), p.port) != current_key]
+        profiles.sort(key=lambda p: not serves(p.host, p.tls_host))   # matches first, stable
+        if current is None and not profiles:
+            return "new"
+        entries = []
+        if current is not None:
+            c = current.cfg
+            entries.append(("current", "current session",
+                            f"{c.username}@{c.host}:{c.port}", serves(c.host, c.tls_host)))
+        entries += [(p, p.name, p.endpoint, serves(p.host, p.tls_host)) for p in profiles]
+        default = next((i for i, e in enumerate(entries) if e[0] == "current" and e[3]),
+                       next((i for i, e in enumerate(entries) if e[3]), 0))
+        self.out(paint(f"Server for this scan of {domain}:", "primary", bold=True))
+        for index, (_, label, endpoint, match) in enumerate(entries, 1):
+            note = f"  serves {domain}" if match else ""
+            self.out(f"  {index}  {label:<16} {endpoint}{note}")
+        self.out("  n  a new server")
+        answer = self.prompt(f"server for this scan: 1-{len(entries)}, a name, or n=new",
+                             str(default + 1)).strip()
+        if answer.lower() in ("n", "new"):
+            return "new"
+        if answer.isdigit() and 1 <= int(answer) <= len(entries):
+            chosen = entries[int(answer) - 1][0]
+        else:
+            chosen = store.get(answer)
+            if chosen is None:
+                self.error(f"{answer!r} is not a listed server; server-side checks skipped "
+                           "(run /scan again to choose)")
+                return None
+            if (chosen.username, chosen.host.lower(), chosen.port) == current_key:
+                chosen = "current"
+        if chosen == "current":
+            self.note(f"using the current session {current.cfg.username}@{current.cfg.host}")
+        return chosen
+
     # ---------------- /server connect ----------------
     def _server_connect(self, name: str = "",
                         profile: Optional[profilesmod.Profile] = None,
-                        offer_recent: bool = True) -> None:
+                        offer_recent: bool = True) -> bool:
         """settings -> host key -> secret -> session -> outcome (ADR-001).
+
+        Returns whether a session is now connected for these settings.
 
         The password is asked for, or read from the vault, only once the host
         key is trusted, so no secret is ever collected for a refused host.
         """
         settings = self._connect_settings(name, profile, offer_recent)
         if settings is None:
-            return
+            return False
         key = self._verify_host_key(settings)
         if key is None:
-            return
+            return False
         fingerprints = servermod.sha256_fingerprints(key.fingerprints)
         password, source = "", ""
         if settings.auth == "password":
@@ -1701,17 +1763,18 @@ class SSLDoctorCLI:
             if not password:
                 password = self._ask_password()
                 if password is None:
-                    return
+                    return False
         connected, auth_failed = self._open_session(settings, password)
         if not connected and auth_failed and source:
             self._forget_password(settings.profile, "the server rejected the saved password")
             password = self._ask_password()
             if password is None:
-                return
+                return False
             source = ""
             connected, _ = self._open_session(settings, password)
         if connected:
             self._after_connect(settings, fingerprints, password, source)
+        return connected
 
     def _connect_settings(self, name: str, profile,
                           offer_recent: bool = True) -> Optional["_ConnectSettings"]:
@@ -1876,15 +1939,20 @@ class SSLDoctorCLI:
             auth=settings.auth, key_path=settings.key_path,
             connect_timeout=self.net_timeout, command_timeout=self.command_timeout,
             tls_host=settings.tls_host, tls_port=settings.tls_port)
-        if self.server:
-            self.server.disconnect()
-        self.server = servermod.ServerSession(cfg, password=password)
+        session = servermod.ServerSession(cfg, password=password)
         with Spinner(f"connecting to {settings.username}@{settings.host}"):
-            items = self.server.connect()
+            items = session.connect()
         self.store.extend(items)
         print_findings(items)
         auth_failed = any(f.check == "ssh.auth" and f.status == F.FAIL for f in items)
-        return bool(self.server.connected), auth_failed
+        if not session.connected:
+            session.disconnect()               # wipe the password; keep any working session
+            return False, auth_failed
+        # the previous session closes only once the new one is up
+        if self.server and self.server is not session:
+            self.server.disconnect()
+        self.server = session
+        return True, auth_failed
 
     def _forget_password(self, profile, why: str) -> None:
         try:

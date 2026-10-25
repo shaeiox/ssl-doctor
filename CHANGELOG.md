@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Changed
+
+- **Every `/scan` asks which server to use.** When the server step starts and
+  an SSH session is open or servers are remembered, the scan lists the current
+  session, the remembered servers (those serving the scanned domain first) and
+  `n` for a new one; Enter picks the most likely choice. A session left open by
+  an earlier scan is no longer reused silently for another domain. With nothing
+  to choose from the connection prompts start directly; batch runs (`-c`)
+  never ask.
+- A new SSH connection replaces the current session only once it has
+  connected: a failed attempt keeps the working session, and `/scan` then
+  skips its server step instead of falling back to the old server.
+
 ### Documentation
 
 - Brought the reference docs up to v0.9.0: `docs/command-used.md` (version,

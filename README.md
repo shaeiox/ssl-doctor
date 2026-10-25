@@ -213,6 +213,11 @@ SSH authorization — the server side. Scope flags pin the scan to one side:
 
 Targets accept `host`, `host:port`, or a full URL (`https://example.com/path`).
 
+When the server step starts, every interactive `/scan` asks which server to
+use — the open SSH session, a remembered server (those serving the scanned
+domain are listed first) or `n` for a new one — and Enter takes the most likely
+choice. Batch runs (`-c`) never ask; they use the open session.
+
 ### What the domain identification shows
 
 The *Domain profile* finding ties together: DNS answers, the certificate's

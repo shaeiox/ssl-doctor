@@ -107,14 +107,44 @@ server SHALL run today's prompts.
 - **WHEN** profiles exist and the operator runs `/server connect`
 - **THEN** the recent profiles are offered and choosing one connects as `/server connect <name>` would
 
-### Requirement: `/scan` offers a matching profile
-When `/scan <domain>` reaches its server step without an SSH session, it SHALL
-offer the profile whose TLS target or host matches the domain, if one exists,
-before falling back to today's prompts.
+### Requirement: Every `/scan` asks which server to use
+When an interactive `/scan` reaches its server step and an SSH session is open
+or servers are remembered, it SHALL ask which server to use: the current
+session (if any), each remembered server (those matching the scanned domain
+first), or a new one. Enter SHALL pick the most likely choice. With no session
+and nothing remembered, the connection prompts SHALL start directly.
 
-#### Scenario: Matching profile
-- **WHEN** a profile's TLS target is `files.example.com` and the operator runs `/scan files.example.com`
-- **THEN** the server step offers that profile and, if accepted, connects without the connection prompts
+#### Scenario: Second scan of another domain
+- **WHEN** a session to `files.example.com` is open and the operator runs `/scan www.example.org`
+- **THEN** the server step asks whether to use the current session, a remembered server, or a new one, instead of silently reusing the session
+
+#### Scenario: Matching remembered server is the default
+- **WHEN** no session is open, a remembered server's TLS target is `files.example.com`, and the operator runs `/scan files.example.com` and presses Enter
+- **THEN** that server is connected without the connection prompts
+
+#### Scenario: Keep the current session
+- **WHEN** the operator chooses the current session
+- **THEN** the scan uses it without reconnecting
+
+#### Scenario: New server
+- **WHEN** the operator chooses `n`
+- **THEN** the connection prompts start, and the previous session is closed once the new one connects
+
+#### Scenario: Nothing to choose from
+- **WHEN** no session is open and no server is remembered
+- **THEN** the connection prompts start without a question
+
+#### Scenario: Unrecognised answer
+- **WHEN** the operator answers with something that is neither a listed number, a remembered name nor `n`
+- **THEN** the server step is skipped with a message and no connection is attempted
+
+### Requirement: Batch scans never ask which server to use
+`/scan` in batch mode (`-c`) SHALL NOT ask which server to use: it SHALL use an
+open session when there is one and otherwise run the server step as before.
+
+#### Scenario: Batch scan with a session
+- **WHEN** a batch run has connected with `/server connect files` and then runs `/scan files.example.com --server-only`
+- **THEN** the scan uses that session without a question
 
 ### Requirement: Prompts are pre-filled from a profile
 When the operator enters a host that has a profile, the remaining prompts SHALL be

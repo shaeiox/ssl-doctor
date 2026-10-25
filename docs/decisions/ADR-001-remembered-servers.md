@@ -117,8 +117,10 @@ Recorded while implementing; none changes the decision.
   the binding.
 - Profile values that `ssh` would read as an option (a leading `-` in host,
   user or key path) are rejected on load, in addition to the field allowlist.
-- `/scan` asks *Use remembered server …?* before falling back to the prompts;
-  declining skips the recent-servers list.
+- Every interactive `/scan` asks which server to use (current session,
+  remembered servers with domain matches first, or new; Enter = most likely),
+  so an open session is never reused silently for another domain. A new
+  connection replaces the current session only once it is up.
 - Windows passwords longer than 2560 bytes (the Credential Manager limit) are
   not saved; the operator is told and still connects.
 
