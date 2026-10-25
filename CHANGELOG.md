@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## v0.9.3 — nginx configuration of the running instance
+
+Server-side nginx analysis starts from the running nginx and says how sure it
+is of the configuration it analysed; a working HTTPS endpoint is no longer
+contradicted by a configuration that was merely found on disk. Check ids and
+the findings contract (1.5) are unchanged.
 
 ### Fixed
 

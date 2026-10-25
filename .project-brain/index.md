@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-25 · done: v0.9.2 pushed; fix-nginx-config-discovery implemented (26/26 tasks) on branch feat/nginx-config-discovery, not merged · next: review, merge/release, archive the change; remembered-servers still needs Windows CI (6.1) + manual vault checks (6.2) · blocker: none
+> resume 2026-10-25 · done: v0.9.3 (nginx config discovery from the running master) merged to master, tagged & pushed · next: archive fix-nginx-config-discovery; user re-runs /scan on the /opt/pvm server; remembered-servers still needs Windows CI (6.1) + manual vault checks (6.2) · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-25 · v2] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md
