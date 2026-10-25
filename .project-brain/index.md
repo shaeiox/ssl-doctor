@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-25 · done: v0.9.0 remembered servers + docs refresh merged to master, tagged v0.9.0 (push pending: GitHub returned 403 earlier) · next: push master + tags, check windows-latest CI (task 6.1), manual vault checks (6.2), then /openspec-archive-change remembered-servers · blocker: GitHub credential on this machine
+> resume 2026-10-25 · done: v0.9.0 remembered servers + docs refresh merged to master, master and tags pushed · next: check windows-latest CI (real Credential Manager, task 6.1), manual vault checks (6.2), then /openspec-archive-change remembered-servers · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-25 · v2] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md
