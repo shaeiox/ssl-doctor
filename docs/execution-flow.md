@@ -168,6 +168,10 @@ out; any error there falls back to the line loop below.
 - Mouse reporting (`?1002h ?1006h`) is on only while the composer reads:
   the wheel scrolls, a drag selects transcript text and the release copies it;
   `Ctrl-Y` copies the previous response.
+- Result frames are captured as text, but `Transcript.wrapped(width)` redraws
+  each one (`tui.reflow_frame`) at `width - FRAME_MARGIN` every time the screen
+  is laid out, so a resize never breaks a border. Widths are terminal cells
+  (`ssl_doctor/textcells.py`): CJK and emoji count two, combining marks zero.
 - On Windows, `KeyReader` reads `ReadConsoleInputW` records under its own raw
   VT input mode for one key, then restores the mode. It decodes VT mouse
   reports and native `MOUSE_EVENT` records. `msvcrt.getwch()` is not used: the

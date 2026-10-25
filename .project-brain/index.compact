@@ -10,7 +10,7 @@
 @src index.md  @gen 2026-10-25  @updated 2026-10-25
 
 P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
-  ~ 2026-10-25 next: user verifies wheel/drag/copy in Windows Terminal + conhost · blocker: none
+  ~ 2026-10-25 next: user checks resize + CJK hosts, then merge/release · blocker: none
   architecture-and-scope ✓v 2026-10-24 v1
   chain-diagnosis ✓v 2026-10-24 v1
   server-ssh-nginx ✓v 2026-10-24 v1
@@ -21,5 +21,5 @@ P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
   tls-handshake-attribution ✓v 2026-10-24 v1
   agent-report ✓d 2026-10-24 v1
   copy-to-clipboard ✓d 2026-10-25 v3
-  ui-design-system ✓d 2026-10-24 v6
+  ui-design-system ✓d 2026-10-25 v7
   _decisions ✓v 2026-10-24 v1

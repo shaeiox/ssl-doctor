@@ -27,14 +27,16 @@ import re
 import select
 import shutil
 import sys
-import textwrap
 import threading
 import time
 from typing import Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
+from . import textcells
+
 MIN_WIDTH = 40
 MAX_WIDTH = 120          # beyond this a diagnostic sentence is hard to follow
 GUTTER = 2               # every row starts here
+FRAME_MARGIN = 2         # a result frame stops this many cells short of the column
 ALT_SCREEN_ON = "\033[?1049h"
 ALT_SCREEN_OFF = "\033[?1049l"
 CURSOR_HIDE = "\033[?25l"
@@ -149,7 +151,8 @@ def strip_ansi(text: str) -> str:
 
 
 def visible_len(text: str) -> int:
-    return len(strip_ansi(text))
+    """Terminal cells, not code points: a CJK character or emoji takes two."""
+    return textcells.width(strip_ansi(text))
 
 
 def wrap_line(line: str, width: int) -> List[str]:
@@ -162,15 +165,125 @@ def wrap_line(line: str, width: int) -> List[str]:
     indent = min(indent, max(0, width - 8))
     body = line[indent:]
     if not body:
-        return [line[:width]]
-    if len(line) <= width:
+        return [textcells.clip(line, width)]
+    if textcells.width(line) <= width:
         return [line]
-    chunks = textwrap.wrap(body, width=max(4, width - indent),
-                           break_long_words=True, break_on_hyphens=False,
-                           replace_whitespace=False, drop_whitespace=True)
-    if not chunks:
-        return [line[:width]]
-    return [(" " * indent) + chunks[0]] + [(" " * indent) + c for c in chunks[1:]]
+    lead = " " * indent
+    return textcells.wrap(body.strip(), max(4, width), lead, lead)
+
+
+# ------------------------------------------------------------ result frames
+#
+# Result frames reach the transcript as text drawn at the width the command ran
+# with. A frame is redrawn at the current width whenever the transcript is laid
+# out, so a resized window never re-wraps (and breaks) its border rows.
+
+_FRAME_TOP = re.compile(r"^( *)([╭┌+])([─-])(?: (.*?) )?\3+([╮┐+])$")
+_FRAME_BOTTOM = re.compile(r"^( *)([╰└+])([─-])(?: (.*?) )?\3+([╯┘+])$")
+_FRAME_PAIRS = {"╭": "╮", "┌": "┐", "+": "+", "╰": "╯", "└": "┘"}
+# a finding's first row: glyph, status, check id, title (continuations hang
+# under the title; evidence continuations hang past their bullet)
+_FRAME_STATUS = re.compile(r"^(\S\s+(?:PASS|FAIL|WARNING|NOT TESTED)\s+\S+\s+)\S")
+
+
+def _frame_border(match, line: str) -> bool:
+    return bool(match) and _FRAME_PAIRS.get(match.group(2)) == match.group(5)
+
+
+def _frame_row(line: str, indent: str, bar: str) -> Optional[str]:
+    """The content of an interior row (`│ content │`), or None."""
+    head = indent + bar + " "
+    if len(line) >= len(head) + 2 and line.startswith(head) and line.endswith(" " + bar):
+        return line[len(head):-2]
+    return None
+
+
+def _frame_span(lines: Sequence[str], start: int) -> int:
+    """End index of the frame whose top border is lines[start], or 0."""
+    top = _FRAME_TOP.match(lines[start])
+    if not _frame_border(top, lines[start]):
+        return 0
+    indent, h = top.group(1), top.group(3)
+    bar = "│" if h == "─" else "|"
+    end = start + 1
+    while end < len(lines) and _frame_row(lines[end], indent, bar) is not None:
+        end += 1
+    if end < len(lines):
+        bottom = _FRAME_BOTTOM.match(lines[end])
+        if (_frame_border(bottom, lines[end]) and bottom.group(1) == indent
+                and bottom.group(3) == h):
+            return end + 1
+    return end if end > start + 1 else 0          # a frame still streaming
+
+
+def _fit_label(text: str, room: int, ellipsis: str) -> str:
+    if textcells.width(text) <= room:
+        return text
+    if room <= textcells.width(ellipsis):
+        return textcells.clip(text, room)
+    return textcells.clip(text, room - textcells.width(ellipsis)) + ellipsis
+
+
+def _fit_counts(text: str, room: int) -> str:
+    """Counters for a narrower base: drop the zero counts, then cut."""
+    if textcells.width(text) <= room:
+        return text
+    sep = " · " if " · " in text else " - "
+    kept = [part for part in text.split(sep) if not part.startswith("0 ")]
+    text = sep.join(kept) or text
+    return textcells.clip(text, room)
+
+
+def reflow_frame(lines: Sequence[str], width: int) -> List[str]:
+    """Redraw a result frame so every row is exactly `width` cells.
+
+    Borders are rebuilt to the width, interior rows re-padded, and a row too
+    long for the new width is word-wrapped inside the frame (a finding's title
+    hangs under itself). A frame that already fits is returned as it is.
+    """
+    if all(textcells.width(line) == width for line in lines):
+        return list(lines)
+    top = _FRAME_TOP.match(lines[0])
+    indent, tl, h, title, tr = top.groups()
+    unicode = h == "─"
+    bar = "│" if unicode else "|"
+    ellipsis = "…" if unicode else "..."
+    if width - len(indent) < 12:
+        indent = ""                               # a very narrow column keeps the box
+    inner = max(1, width - len(indent) - 4)
+    span = max(2, width - len(indent))           # corner to corner
+    out: List[str] = []
+
+    def border(left: str, right: str, label: str) -> str:
+        if label and span - 6 >= 1:
+            fill = span - 5 - textcells.width(label)
+            return f"{indent}{left}{h} {label} {h * fill}{right}"
+        return f"{indent}{left}{h * (span - 2)}{right}"
+
+    out.append(border(tl, tr, _fit_label(title or "", span - 6, ellipsis)))
+    end = len(lines)
+    bottom = _FRAME_BOTTOM.match(lines[-1])
+    closed = len(lines) > 1 and _frame_border(bottom, lines[-1])
+    if closed:
+        end -= 1
+    for line in lines[1:end]:
+        content = _frame_row(line, top.group(1), bar).rstrip()
+        if textcells.width(content) <= inner:
+            rows = [content]
+        else:
+            lead = len(content) - len(content.lstrip(" "))
+            status = _FRAME_STATUS.match(content)
+            hang = len(status.group(1)) if status else lead
+            if content.lstrip(" ")[:2] in ("• ", "- "):   # evidence: hang past the bullet
+                hang = lead + 2
+            if inner - hang < 20:                 # too narrow to hang: start flush
+                hang = min(lead, inner // 2)
+            rows = textcells.wrap(content.lstrip(" "), inner, " " * lead, " " * hang)
+        out.extend(f"{indent}{bar} {textcells.pad(row, inner)} {bar}" for row in rows)
+    if closed:
+        bl, footer, br = bottom.group(2), bottom.group(4) or "", bottom.group(5)
+        out.append(border(bl, br, _fit_counts(footer, span - 6)))
+    return out
 
 
 class Transcript:
@@ -206,9 +319,18 @@ class Transcript:
             self._partial = ""
 
     def wrapped(self, width: int) -> List[str]:
+        """The rows drawn at `width`; result frames are redrawn to fit it."""
         out: List[str] = []
-        for line in self.lines:
-            out.extend(wrap_line(line, width))
+        lines, index = self.lines, 0
+        frame_width = max(1, width - FRAME_MARGIN)
+        while index < len(lines):
+            end = _frame_span(lines, index) if lines[index][-1:] in "╮┐+" else 0
+            if end:
+                out.extend(reflow_frame(lines[index:end], frame_width))
+                index = end
+                continue
+            out.extend(wrap_line(lines[index], width))
+            index += 1
         return out
 
     def window(self, width: int, height: int, scroll: int = 0) -> Tuple[int, List[str]]:
@@ -268,11 +390,12 @@ def truncate_spans(spans: Sequence[Span], width: int) -> List[Span]:
     for text, role, bold in spans:
         if room <= 0:
             break
-        if len(text) > room:
-            out.append((text[:room], role, bold))
+        size = textcells.width(text)
+        if size > room:
+            out.append((textcells.clip(text, room), role, bold))
             break
         out.append((text, role, bold))
-        room -= len(text)
+        room -= size
     return out
 
 
@@ -284,13 +407,15 @@ def _reverse(spans: Sequence[Span], start: int, end: int) -> List[Span]:
     out: List[Span] = []
     column = 0
     for text, role, bold in spans:
-        cut_a = max(0, min(len(text), start - column))
-        cut_b = max(0, min(len(text), end - column))
-        for piece, inside in ((text[:cut_a], False), (text[cut_a:cut_b], True),
-                              (text[cut_b:], False)):
+        size = textcells.width(text)
+        cut_a = max(0, min(size, start - column))
+        cut_b = max(0, min(size, end - column))
+        for piece, inside in ((textcells.slice(text, 0, cut_a), False),
+                              (textcells.slice(text, cut_a, cut_b), True),
+                              (textcells.slice(text, cut_b, size), False)):
             if piece:
                 out.append((piece, f"{REVERSE}:{role}" if inside else role, bold))
-        column += len(text)
+        column += size
     return out
 
 
@@ -319,8 +444,8 @@ def composer_border(left: Sequence[Span], right: Sequence[Span], inner: int,
     open_, close = corners
     room = inner - 4                                  # the two corner pairs
     left = truncate_spans(left, max(0, room - 2))
-    used = len(spans_plain(left)) + 2 if left else 0  # " label "
-    right_used = len(spans_plain(right)) + 2 if right else 0
+    used = textcells.width(spans_plain(left)) + 2 if left else 0  # " label "
+    right_used = textcells.width(spans_plain(right)) + 2 if right else 0
     if used + right_used > room:
         right, right_used = [], 0
     spans: List[Span] = [(open_ + h, role, False)]
@@ -371,7 +496,7 @@ def build_frame(*, columns: int, rows: int, header: Sequence[Sequence[Span]],
     def pad(spans: Sequence[Span], fill: str = " ", align: str = "left") -> str:
         spans = truncate_spans(spans, width)
         text = spans_plain(spans)
-        room = max(0, width - len(text))
+        room = max(0, width - textcells.width(text))
         lead = room // 2 if align == "center" else 0
         trail = room - lead
         body_text = fill * lead + _paint_spans(spans, painter) + fill * trail
@@ -388,7 +513,7 @@ def build_frame(*, columns: int, rows: int, header: Sequence[Sequence[Span]],
         lines.append(pad(span_line, align="center"))
     lines.append("")  # breathing room under the banner
 
-    visible = [line[:inner] for line in list(body)[:limit]]
+    visible = [textcells.clip(line, inner) for line in list(body)[:limit]]
     if layout is not None:
         layout.update(body_top=len(lines) + 1, body_rows=len(visible),
                       left=gutter + 1, width=inner)
@@ -412,13 +537,16 @@ def build_frame(*, columns: int, rows: int, header: Sequence[Sequence[Span]],
                              (glyphs.corner("╭", "+"), glyphs.corner("╮", "+")),
                              h, role)))
     field = max(1, inner - 4 - len(mark))          # "│ ❯ " + text + " │"
-    start = max(0, cursor - field + 1) if cursor >= field else 0
-    shown = prompt_text[start:start + field]
+    # scroll so the cursor cell stays inside the field (measured in cells)
+    start = 0
+    while start < cursor and textcells.width(prompt_text[start:cursor + 1]) > field:
+        start += 1
+    shown = textcells.clip(prompt_text[start:], field)
     if shown:
         content: List[Span] = [(shown, "", False)]
     else:
-        content = [(placeholder[:field], "muted", False)]
-    gap = field - len(spans_plain(content))
+        content = [(textcells.clip(placeholder, field), "muted", False)]
+    gap = field - textcells.width(spans_plain(content))
     input_index = len(lines)
     lines.append(row([(bar, role, False), (" ", "", False),
                       (mark, COMPOSER_ROLES["ready"] if state == "ready" else role,
@@ -432,7 +560,8 @@ def build_frame(*, columns: int, rows: int, header: Sequence[Sequence[Span]],
         lines.append(" " * columns)
     # pad on *visible* width: painted spans carry escape sequences
     padded = [line + " " * max(0, columns - visible_len(line)) for line in lines[:rows]]
-    cursor_col = gutter + 2 + len(mark) + max(0, min(cursor - start, len(shown)))
+    cursor_col = gutter + 2 + len(mark) + textcells.width(
+        shown[:max(0, min(cursor - start, len(shown)))])
     return padded, (input_index + 1, cursor_col + 1)
 
 
@@ -1199,10 +1328,11 @@ class TuiSession:
         if r1 >= len(rows):
             return ""
         r2 = min(r2, len(rows) - 1)
+        cut = textcells.slice
         if r1 == r2:
-            parts = [rows[r1][c1:c2 + 1]]
+            parts = [cut(rows[r1], c1, c2 + 1)]
         else:
-            parts = [rows[r1][c1:], *rows[r1 + 1:r2], rows[r2][:c2 + 1]]
+            parts = [cut(rows[r1], c1, 1 << 30), *rows[r1 + 1:r2], cut(rows[r2], 0, c2 + 1)]
         return "\n".join(part.rstrip() for part in parts)
 
     def highlight(self, start: int, count: int, width: int) -> Dict[int, Tuple[int, int]]:

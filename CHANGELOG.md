@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Result frames stay straight at every window size.** Two causes. A frame
+  reached the shell's transcript as text drawn at the width the command ran
+  with, so narrowing the window re-wrapped its border rows (the right edge
+  broke onto the next row) and widening left it short. Every width was also
+  counted in code points, so a CJK character or emoji (an IDN host, a
+  certificate subject) pushed the right border one cell out. The transcript
+  now redraws each frame at the current width when it is laid out (borders
+  rebuilt, rows re-padded, long rows wrapped inside the frame), and all
+  measuring, cutting and wrapping is done in terminal cells
+  (`ssl_doctor/textcells.py`), including the composer and mouse selection.
+
 ## v0.8.1 — Windows mouse wheel, selection and copy
 
 The full-screen shell's mouse wheel, drag-to-select and copy now work on
