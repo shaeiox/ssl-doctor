@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Empty passwords are never used.** An empty or whitespace-only password is
+  refused at the prompt and asked again (at most three times, then the
+  connection is cancelled); Ctrl-C at the prompt is reported as cancelled
+  instead of "empty password". `ServerSession` never runs `ssh` for a password
+  login without a usable password, no vault backend saves or returns an empty
+  one, and the askpass helpers (`askpass.sh`, `askpass.cmd`, the frozen exe)
+  exit non-zero instead of handing `ssh` an empty line.
+- **Errors are reported, not raised.** A missing `ssh-keygen` or `openssl`, an
+  unusable `~/.ssl-doctor` directory or trust store, an undecodable
+  `profiles.json`, a failed profile save (after a successful login), an
+  unwritable report path, a missing or corrupt agent state file
+  (`ssl-doctor agent run` used to end with a traceback) and Windows
+  Credential Manager OS errors now produce a clear message and the session
+  continues. An unexpected bug in a command is reported as an internal error
+  in that command, without ending the session.
+
 ## v0.9.1 — every scan asks which server to use
 
 `/scan` no longer reuses an open SSH session silently for another domain: the
