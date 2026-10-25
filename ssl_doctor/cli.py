@@ -1546,7 +1546,7 @@ class SSLDoctorCLI:
 
         timeout = self.net_timeout
         with Spinner(f"verifying host key of {host}"):
-            key = servermod.host_key_status(host, int(ssh_port_s), timeout)
+            key = servermod.host_key_status(host, int(ssh_port_s), timeout, user)
         if key.status == "unreachable":
             self.error(f"cannot reach the SSH service / host key: {key.detail}")
             self.store.add(F.Finding(
@@ -1572,7 +1572,7 @@ class SSLDoctorCLI:
             if ans not in ("yes", "y"):
                 self.note("connection aborted before authentication")
                 return
-            ok, msg = servermod.store_host_key(host, int(ssh_port_s), timeout)
+            ok, msg = servermod.store_host_key(host, int(ssh_port_s), timeout, user)
             if not ok:
                 self.error(msg)
                 return
@@ -1972,6 +1972,8 @@ class SSLDoctorCLI:
 
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if servermod.askpass_reply():          # started by ssh as its password helper
+        return 0
     if argv[:1] == ["agent"]:
         from . import agent
         try:

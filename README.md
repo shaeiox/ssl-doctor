@@ -336,7 +336,12 @@ for the optional service in [`service/`](service/); see
   refused** (MITM alarm) — never silently accepted.
 - SSH passwords never appear on the command line: an `SSH_ASKPASS` helper
   (0700, private state dir) answers in a detached session, and is deleted on
-  disconnect.
+  disconnect. On Windows the helper is a `.cmd` (or the `ssl-doctor.exe` build
+  itself), since Windows OpenSSH cannot run a shell script; it needs OpenSSH
+  8.4 or newer.
+- Host keys come from `ssh-keyscan`; if it cannot negotiate a key exchange
+  (some builds offer `sntrup761x25519` without implementing it), they are read
+  through `ssh` with every authentication method off.
 - No `sudo`, no service restarts, no config edits — when the account lacks
   rights, checks report `NOT TESTED` and say exactly what rights are needed.
 - Windows-only checks (stores, certutil, Schannel) activate solely on Windows.

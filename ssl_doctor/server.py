@@ -22,12 +22,16 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 from . import findings as F
 
 STATE_DIR = os.path.expanduser("~/.ssl-doctor")
+# Set in the environment of ssh when a frozen Windows build is its own
+# SSH_ASKPASS helper: the executable then prints the password and exits.
+ASKPASS_MODE_ENV = "SSL_DOCTOR_ASKPASS"
 
 
 def _ensure_state_dir() -> str:
@@ -227,10 +231,21 @@ def _http_level_directives(nodes) -> Dict[str, List[List[str]]]:
 
 # ---------------------------------------------------------------- host keys
 
-def _scan_host_keys(host: str, port: int, timeout: float) -> Tuple[List[str], str]:
+# ssh-keyscan offers OpenSSH's compiled-in default KEX list unfiltered, so a
+# build without sntrup761x25519 (the first default) fails against a server that
+# picks it, while ssh itself only offers what the binary implements.
+_KEX_FAILURES = ("unsupported KEX method", "no matching key exchange")
+# one probe per host key family; RSA keys are stored as ssh-rsa whichever
+# signature algorithm negotiated them
+_PROBE_HOST_KEY_ALGS = ("ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
+                        "ecdsa-sha2-nistp521", "rsa-sha2-512,rsa-sha2-256,ssh-rsa")
+
+
+def _scan_host_keys(host: str, port: int, timeout: float,
+                    username: str = "") -> Tuple[List[str], str]:
     """Return ('host keytype base64' lines, error)."""
     if not shutil.which("ssh-keyscan"):
-        return [], "ssh-keyscan not available"
+        return _scan_host_keys_ssh(host, port, timeout, username, "ssh-keyscan not available")
     try:
         proc = subprocess.run(
             ["ssh-keyscan", "-T", str(int(timeout)), "-p", str(port), host],
@@ -241,17 +256,83 @@ def _scan_host_keys(host: str, port: int, timeout: float) -> Tuple[List[str], st
              if ln.strip() and not ln.startswith("#")]
     if not lines:
         err = proc.stderr.strip().splitlines()
-        return [], err[-1] if err else "no host keys retrieved (SSH service reachable?)"
+        reason = err[-1] if err else "no host keys retrieved (SSH service reachable?)"
+        if any(marker in proc.stderr for marker in _KEX_FAILURES):
+            return _scan_host_keys_ssh(host, port, timeout, username, reason)
+        return [], reason
     return lines, ""
 
 
-def host_key_status(host: str, port: int, timeout: float = 8.0) -> HostKeyInfo:
+def _scan_host_keys_ssh(host: str, port: int, timeout: float, username: str,
+                        keyscan_error: str) -> Tuple[List[str], str]:
+    """Read the host keys through ssh, which negotiates like the real session.
+
+    Each probe accepts the presented key into a scratch known_hosts file and then
+    stops: every authentication method is off, so it can never log in. Lines
+    come back in ssh-keyscan's form (`host keytype base64`, `[host]:port` off
+    port 22) whatever HashKnownHosts says.
+    """
+    if not shutil.which("ssh"):
+        return [], f"{keyscan_error}; ssh client not found"
+    name = host if port == 22 else f"[{host}]:{port}"
+    lines: List[str] = []
+    seen = set()
+    last_error = ""
+    scratch = os.path.join(_ensure_state_dir(), ".probe_known_hosts")
+    for algs in _PROBE_HOST_KEY_ALGS:
+        if os.path.exists(scratch):
+            os.unlink(scratch)
+        argv = ["ssh", "-p", str(port), "-T",
+                "-o", f"ConnectTimeout={int(timeout)}",
+                "-o", f"UserKnownHostsFile={scratch}",
+                "-o", "GlobalKnownHostsFile=/dev/null",
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "HashKnownHosts=no",
+                "-o", f"HostKeyAlgorithms={algs}",
+                "-o", "BatchMode=yes",
+                "-o", "PubkeyAuthentication=no",
+                "-o", "PasswordAuthentication=no",
+                "-o", "KbdInteractiveAuthentication=no",
+                "-o", "GSSAPIAuthentication=no",
+                "-o", "HostbasedAuthentication=no",
+                "-o", "ControlPath=none",
+                "-o", "LogLevel=ERROR"]
+        if username:
+            argv += ["-l", username]
+        argv += [host, "--", "true"]
+        try:
+            proc = subprocess.run(argv, capture_output=True, timeout=timeout + 5,
+                                  text=True, stdin=subprocess.DEVNULL,
+                                  start_new_session=True)
+        except subprocess.TimeoutExpired:
+            last_error = f"host key probe timed out after {timeout:.0f}s"
+            continue
+        except FileNotFoundError:
+            return [], f"{keyscan_error}; ssh client not found"
+        if os.path.exists(scratch):
+            with open(scratch) as fh:
+                for row in fh:
+                    parts = row.split()
+                    if len(parts) >= 3 and (parts[1], parts[2]) not in seen:
+                        seen.add((parts[1], parts[2]))
+                        lines.append(f"{name} {parts[1]} {parts[2]}")
+            os.unlink(scratch)
+        err = proc.stderr.strip().splitlines()
+        if err:
+            last_error = err[-1]
+    if lines:
+        return lines, ""
+    return [], f"{keyscan_error}; ssh: {last_error or 'no host keys retrieved'}"
+
+
+def host_key_status(host: str, port: int, timeout: float = 8.0,
+                    username: str = "") -> HostKeyInfo:
     kh_path = os.path.join(_ensure_state_dir(), "known_hosts")
     if not os.path.exists(kh_path):
         open(kh_path, "a").close()
         os.chmod(kh_path, 0o600)
 
-    scan, err = _scan_host_keys(host, port, timeout)
+    scan, err = _scan_host_keys(host, port, timeout, username)
     if not scan:
         return HostKeyInfo("unreachable", [], err)
 
@@ -300,15 +381,34 @@ def host_key_status(host: str, port: int, timeout: float = 8.0) -> HostKeyInfo:
                        "host presents key types not yet in the trust store")
 
 
-def store_host_key(host: str, port: int, timeout: float = 8.0) -> Tuple[bool, str]:
+def store_host_key(host: str, port: int, timeout: float = 8.0,
+                   username: str = "") -> Tuple[bool, str]:
     """Persist the currently presented host key. Requires prior user consent."""
-    scan, err = _scan_host_keys(host, port, timeout)
+    scan, err = _scan_host_keys(host, port, timeout, username)
     if not scan:
         return False, err
     kh_path = os.path.join(_ensure_state_dir(), "known_hosts")
     with open(kh_path, "a") as fh:
         fh.write("\n".join(scan) + "\n")
     return True, "host key stored in " + kh_path
+
+
+def askpass_reply() -> bool:
+    """Act as the SSH_ASKPASS helper when ssh started this executable for it.
+
+    Prints the password from the environment (UTF-8, one line) and returns
+    True; returns False when the process was not started as the helper.
+    """
+    if os.environ.get(ASKPASS_MODE_ENV) != "1":
+        return False
+    secret = os.environ.get("SSL_DOCTOR_PW", "")
+    stream = getattr(sys.stdout, "buffer", None)
+    if stream is not None:
+        stream.write(secret.encode("utf-8") + b"\n")
+    else:
+        sys.stdout.write(secret + "\n")
+    sys.stdout.flush()
+    return True
 
 
 # ---------------------------------------------------------------- SSH session
@@ -351,14 +451,40 @@ class ServerSession:
         argv.append(f"{cfg.username}@{cfg.host}")
         return argv
 
-    def _spawn_env(self) -> Dict[str, str]:
+    def _write_askpass(self, windows: bool, frozen: bool) -> str:
+        """The SSH_ASKPASS helper: it reads the password from the environment.
+
+        Win32-OpenSSH starts the helper with CreateProcessW, which runs an .exe
+        or a .cmd but not a shell script. A frozen build is its own helper (see
+        :func:`askpass_reply`); otherwise a .cmd runs this interpreter. The
+        secret is never written into the helper, so cmd.exe cannot expand or
+        split it.
+        """
+        if windows and frozen:
+            return sys.executable
+        if windows:
+            path = os.path.join(_ensure_state_dir(), "askpass.cmd")
+            code = ("import os,sys;sys.stdout.buffer.write("
+                    "os.environ.get('SSL_DOCTOR_PW','').encode('utf-8')+b'\\n')")
+            with open(path, "w", newline="") as fh:   # CRLF exactly once
+                fh.write(f'@echo off\r\n@"{sys.executable}" -I -c "{code}"\r\n')
+        else:
+            path = os.path.join(_ensure_state_dir(), "askpass.sh")
+            with open(path, "w") as fh:
+                fh.write("#!/bin/sh\nprintf '%s\\n' \"$SSL_DOCTOR_PW\"\n")
+        os.chmod(path, stat.S_IRWXU)
+        self._askpass_path = path
+        return path
+
+    def _spawn_env(self, windows: Optional[bool] = None,
+                   frozen: Optional[bool] = None) -> Dict[str, str]:
         env = dict(os.environ)
         if self.cfg.auth == "password" and self._password:
-            askpass = os.path.join(_ensure_state_dir(), "askpass.sh")
-            with open(askpass, "w") as fh:
-                fh.write("#!/bin/sh\nprintf '%s\\n' \"$SSL_DOCTOR_PW\"\n")
-            os.chmod(askpass, stat.S_IRWXU)
-            self._askpass_path = askpass
+            windows = os.name == "nt" if windows is None else windows
+            frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+            askpass = self._write_askpass(windows, frozen)
+            if windows and frozen:
+                env[ASKPASS_MODE_ENV] = "1"
             env.update({
                 "SSH_ASKPASS": askpass,
                 "SSH_ASKPASS_REQUIRE": "force",   # OpenSSH >= 8.4
@@ -388,7 +514,7 @@ class ServerSession:
         out: List[F.Finding] = []
         target = f"{self.cfg.host}:{self.cfg.port}"
         key = host_key_status(self.cfg.host, self.cfg.port,
-                              self.cfg.connect_timeout)
+                              self.cfg.connect_timeout, self.cfg.username)
         if key.status == "unreachable":
             out.append(F.Finding(
                 "ssh.hostkey", "SSH host key verification", F.FAIL, F.SCOPE_SERVER,
