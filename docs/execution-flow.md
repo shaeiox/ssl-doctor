@@ -359,8 +359,10 @@ about origin correctly.
 - a private known-hosts file at `~/.ssl-doctor/known_hosts`
 - public-key or password-only authentication as configured
 - a command timeout (`cmd_timeout`)
-- for passwords, a temporary `SSH_ASKPASS` script in the private state
-  directory, fed through an environment variable
+- for passwords, a temporary `SSH_ASKPASS` helper in the private state
+  directory, fed through an environment variable: `askpass.sh` on POSIX,
+  `askpass.cmd` (runs the interpreter) on Windows, or the frozen exe itself
+  (`SSL_DOCTOR_ASKPASS=1` makes `cli.main()` print the password and exit)
 
 The password is held only in memory, returned by `known_secrets()` solely for
 report redaction, and cleared by `disconnect()`.

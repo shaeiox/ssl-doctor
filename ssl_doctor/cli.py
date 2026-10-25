@@ -1972,6 +1972,8 @@ class SSLDoctorCLI:
 
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if servermod.askpass_reply():          # started by ssh as its password helper
+        return 0
     if argv[:1] == ["agent"]:
         from . import agent
         try:

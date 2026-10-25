@@ -22,12 +22,16 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 from . import findings as F
 
 STATE_DIR = os.path.expanduser("~/.ssl-doctor")
+# Set in the environment of ssh when a frozen Windows build is its own
+# SSH_ASKPASS helper: the executable then prints the password and exits.
+ASKPASS_MODE_ENV = "SSL_DOCTOR_ASKPASS"
 
 
 def _ensure_state_dir() -> str:
@@ -389,6 +393,24 @@ def store_host_key(host: str, port: int, timeout: float = 8.0,
     return True, "host key stored in " + kh_path
 
 
+def askpass_reply() -> bool:
+    """Act as the SSH_ASKPASS helper when ssh started this executable for it.
+
+    Prints the password from the environment (UTF-8, one line) and returns
+    True; returns False when the process was not started as the helper.
+    """
+    if os.environ.get(ASKPASS_MODE_ENV) != "1":
+        return False
+    secret = os.environ.get("SSL_DOCTOR_PW", "")
+    stream = getattr(sys.stdout, "buffer", None)
+    if stream is not None:
+        stream.write(secret.encode("utf-8") + b"\n")
+    else:
+        sys.stdout.write(secret + "\n")
+    sys.stdout.flush()
+    return True
+
+
 # ---------------------------------------------------------------- SSH session
 
 class ServerSession:
@@ -429,14 +451,40 @@ class ServerSession:
         argv.append(f"{cfg.username}@{cfg.host}")
         return argv
 
-    def _spawn_env(self) -> Dict[str, str]:
+    def _write_askpass(self, windows: bool, frozen: bool) -> str:
+        """The SSH_ASKPASS helper: it reads the password from the environment.
+
+        Win32-OpenSSH starts the helper with CreateProcessW, which runs an .exe
+        or a .cmd but not a shell script. A frozen build is its own helper (see
+        :func:`askpass_reply`); otherwise a .cmd runs this interpreter. The
+        secret is never written into the helper, so cmd.exe cannot expand or
+        split it.
+        """
+        if windows and frozen:
+            return sys.executable
+        if windows:
+            path = os.path.join(_ensure_state_dir(), "askpass.cmd")
+            code = ("import os,sys;sys.stdout.buffer.write("
+                    "os.environ.get('SSL_DOCTOR_PW','').encode('utf-8')+b'\\n')")
+            with open(path, "w", newline="") as fh:   # CRLF exactly once
+                fh.write(f'@echo off\r\n@"{sys.executable}" -I -c "{code}"\r\n')
+        else:
+            path = os.path.join(_ensure_state_dir(), "askpass.sh")
+            with open(path, "w") as fh:
+                fh.write("#!/bin/sh\nprintf '%s\\n' \"$SSL_DOCTOR_PW\"\n")
+        os.chmod(path, stat.S_IRWXU)
+        self._askpass_path = path
+        return path
+
+    def _spawn_env(self, windows: Optional[bool] = None,
+                   frozen: Optional[bool] = None) -> Dict[str, str]:
         env = dict(os.environ)
         if self.cfg.auth == "password" and self._password:
-            askpass = os.path.join(_ensure_state_dir(), "askpass.sh")
-            with open(askpass, "w") as fh:
-                fh.write("#!/bin/sh\nprintf '%s\\n' \"$SSL_DOCTOR_PW\"\n")
-            os.chmod(askpass, stat.S_IRWXU)
-            self._askpass_path = askpass
+            windows = os.name == "nt" if windows is None else windows
+            frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+            askpass = self._write_askpass(windows, frozen)
+            if windows and frozen:
+                env[ASKPASS_MODE_ENV] = "1"
             env.update({
                 "SSH_ASKPASS": askpass,
                 "SSH_ASKPASS_REQUIRE": "force",   # OpenSSH >= 8.4

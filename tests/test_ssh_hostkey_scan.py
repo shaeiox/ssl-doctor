@@ -154,3 +154,85 @@ class HostKeyScanFallback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WindowsAskpass(unittest.TestCase):
+    """Password auth on Windows: SSH_ASKPASS must be something CreateProcess runs.
+
+    Win32-OpenSSH starts SSH_ASKPASS through posix_spawnp -> CreateProcessW, which
+    runs an .exe or a .cmd but not the POSIX `askpass.sh` the tool used to write,
+    so password logins could never get their password on Windows.
+    """
+
+    PASSWORD = "p@ss w%rd&|^!\"é"
+
+    def setUp(self):
+        state = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, state, True)
+        patch = mock.patch.object(server, "STATE_DIR", state)
+        patch.start()
+        self.addCleanup(patch.stop)
+        cfg = server.SSHConfig(host="files.example.com", username="eleven", auth="password")
+        self.session = server.ServerSession(cfg, password=self.PASSWORD)
+
+    def test_windows_gets_a_cmd_helper_without_the_secret_in_it(self):
+        env = self.session._spawn_env(windows=True, frozen=False)
+        helper = env["SSH_ASKPASS"]
+        self.assertTrue(helper.endswith(".cmd"))
+        with open(helper) as fh:
+            text = fh.read()
+        self.assertNotIn("p@ss", text)
+        self.assertNotIn("%", text)                         # nothing for cmd to expand
+        self.assertEqual(env["SSL_DOCTOR_PW"], self.PASSWORD)
+        self.assertEqual(env["SSH_ASKPASS_REQUIRE"], "force")
+
+    def test_the_cmd_helper_replies_with_the_exact_password(self):
+        import shlex
+        import sys
+        env = self.session._spawn_env(windows=True, frozen=False)
+        with open(env["SSH_ASKPASS"]) as fh:
+            line = [ln for ln in fh.read().splitlines() if ln.startswith("@\"")][0]
+        argv = shlex.split(line[1:])                        # what cmd.exe would run
+        self.assertEqual(argv[0], sys.executable)
+        out = subprocess.run(argv + ["eleven@files.example.com's password: "],
+                             capture_output=True, env=env, timeout=20)
+        self.assertEqual(out.stdout.rstrip(b"\r\n"), self.PASSWORD.encode("utf-8"))
+
+    def test_a_frozen_build_is_its_own_helper(self):
+        with mock.patch.object(server.sys, "executable", r"C:\Tools\ssl-doctor.exe"):
+            env = self.session._spawn_env(windows=True, frozen=True)
+        self.assertEqual(env["SSH_ASKPASS"], r"C:\Tools\ssl-doctor.exe")
+        self.assertEqual(env[server.ASKPASS_MODE_ENV], "1")
+
+    def test_helper_mode_prints_the_password_and_nothing_else(self):
+        import io
+        out = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+        env = {server.ASKPASS_MODE_ENV: "1", "SSL_DOCTOR_PW": self.PASSWORD}
+        with mock.patch.dict(os.environ, env), mock.patch.object(server.sys, "stdout", out):
+            self.assertTrue(server.askpass_reply())
+        out.flush()
+        self.assertEqual(out.buffer.getvalue(), self.PASSWORD.encode("utf-8") + b"\n")
+
+    def test_helper_mode_is_off_by_default(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(server.ASKPASS_MODE_ENV, None)
+            self.assertFalse(server.askpass_reply())
+
+    def test_the_cli_entry_point_answers_as_the_helper(self):
+        import io
+        from ssl_doctor import cli
+        out = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+        env = {server.ASKPASS_MODE_ENV: "1", "SSL_DOCTOR_PW": "secret"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(server.sys, "stdout", out):
+            self.assertEqual(cli.main(["eleven@files.example.com's password: "]), 0)
+        out.flush()
+        self.assertEqual(out.buffer.getvalue(), b"secret\n")
+
+    def test_posix_keeps_the_shell_helper(self):
+        env = self.session._spawn_env(windows=False, frozen=False)
+        self.assertTrue(env["SSH_ASKPASS"].endswith("askpass.sh"))
+
+    def test_disconnect_removes_the_helper(self):
+        helper = self.session._spawn_env(windows=True, frozen=False)["SSH_ASKPASS"]
+        self.session.disconnect()
+        self.assertFalse(os.path.exists(helper))
