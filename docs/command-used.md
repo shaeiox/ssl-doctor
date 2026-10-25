@@ -115,6 +115,11 @@ incomplete, `local.rootca` reports `NOT TESTED` instead of blaming the client.
 
 ```text
 /server connect                         interactive SSH setup, verified host keys
+/server connect files                   connect to the remembered server "files"
+/servers                                list remembered servers (never passwords)
+/server forget files                    forget "files" and its saved password
+/server forget --all                    forget every remembered server (asks first)
+/server forget-password files           delete only the saved password
 /server status                          show SSH session state
 /server overview                        remote OS / web-server identification
 /server nginx example.com               vhost match, protocols, ciphers, cert/key

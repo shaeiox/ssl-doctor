@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Remembered servers.** After a successful `/server connect`, SSL Doctor asks
+  whether to remember the server: *profile only* (default), *save password
+  too*, or *no*. `/server connect <name>` then connects without the prompts,
+  `/server connect` offers the recent servers, and `/scan <domain>` offers the
+  matching one. `/servers` lists them; `/server forget <name>|--all` and
+  `/server forget-password <name>` delete. Profiles are non-secret
+  (`~/.ssl-doctor/profiles.json`, owner-only, atomic, validated on load).
+  Saved passwords live only in the OS credential vault — Windows Credential
+  Manager or the Linux Secret Service — and are released only after the host
+  key is trusted and matches the fingerprint they were saved with; a rejected
+  password is deleted, unused ones expire after 90 days, and without a vault
+  nothing is saved. `--no-remember` / `SSL_DOCTOR_REMEMBER=off` turn it off;
+  batch runs, agents and the service never remember
+  ([ADR-001](docs/decisions/ADR-001-remembered-servers.md)).
+
+### Changed
+
+- `/server connect` asks for the password after the host key is verified,
+  so no password is collected for a host that will be refused.
+
 ## v0.8.4 — server-side checks run again
 
 `/scan` and `/server` checks over SSH get past "reading server identity"
