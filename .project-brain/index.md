@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-25 · done: v0.9.3 pushed; nginx-cert-path-resolution implemented (16/16) on branch feat/nginx-cert-paths, not merged · next: review, merge/release (contract 1.6), archive fix-nginx-config-discovery + nginx-cert-path-resolution; remembered-servers needs Windows CI + manual vault checks · blocker: none
+> resume 2026-10-25 · done: v0.10.0 (nginx cert path resolution + /server config show|set|clear, contract 1.6) merged to master, tagged & pushed · next: archive fix-nginx-config-discovery + nginx-cert-path-resolution; user verifies on the /opt/pvm server; remembered-servers needs Windows CI + manual vault checks · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-25 · v2] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md

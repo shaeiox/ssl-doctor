@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## v0.10.0 — nginx certificate paths, per-server settings
+
+Certificate and key paths are resolved the way nginx resolves them and checked
+for access before any certificate validation; each remembered server can keep
+its own nginx paths. Findings contract **1.6** (one added check id,
+`nginx.path_resolution`); 1.0–1.5 documents keep validating.
 
 ### Fixed
 
