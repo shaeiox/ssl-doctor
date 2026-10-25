@@ -4,7 +4,7 @@ Reference for the commands used in this project to diagnose TLS failures and to
 verify the project itself. Everything here is **read-only**: no `sudo`, no
 service restarts, no config edits, and no credentials in command lines.
 
-- Tool version: **SSL Doctor v0.9.0**
+- Tool version: **SSL Doctor v0.9.1**
 - Entry point: `ssldoctor.py` (also installed as the `ssl-doctor` console script)
 - Interactive: `python3 ssldoctor.py` (full-screen shell on a terminal; `--no-tui` for the line REPL)
 - One-shot: `python3 ssldoctor.py "/tls example.com"`
@@ -183,7 +183,7 @@ Regression suite (the primary check used during development):
 python3 -m unittest discover -s tests -v
 ```
 
-Result on this checkout (v0.9.0, Linux): **547 tests run, OK (22 skipped)**. The
+Result on this checkout (v0.9.1, Linux): **554 tests run, OK (22 skipped)**. The
 skipped tests are platform-bound: the real Windows Credential Manager contract
 runs only on Windows (the `windows-latest` CI job), the real Secret Service
 contract only with `SSL_DOCTOR_TEST_SECRET_SERVICE=1` on a desktop session, and

@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.9.1 — every scan asks which server to use
+
+`/scan` no longer reuses an open SSH session silently for another domain: the
+server step asks which server to use. No change to checks or the findings
+contract (still 1.5).
 
 ### Changed
 
