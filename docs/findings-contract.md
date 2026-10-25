@@ -1,9 +1,10 @@
 # Findings contract (`findings/1.x`)
 
 Every JSON report, agent upload and service export is a findings document.
-Current schema: [`schemas/findings-1.5.schema.json`](../schemas/findings-1.5.schema.json)
+Current schema: [`schemas/findings-1.6.schema.json`](../schemas/findings-1.6.schema.json)
 (source of truth: `ssl_doctor/contract.py`). Earlier minor versions stay
-published: [`findings-1.4`](../schemas/findings-1.4.schema.json),
+published: [`findings-1.5`](../schemas/findings-1.5.schema.json),
+[`findings-1.4`](../schemas/findings-1.4.schema.json),
 [`findings-1.3`](../schemas/findings-1.3.schema.json),
 [`findings-1.2`](../schemas/findings-1.2.schema.json),
 [`findings-1.1`](../schemas/findings-1.1.schema.json),
@@ -17,6 +18,7 @@ published: [`findings-1.4`](../schemas/findings-1.4.schema.json),
 | 1.3 | Optional `observation` on findings (what was *seen*, not a failure), `limitations` on every cause (where its evidence is incomplete), and `endpoints` / `endpoint_comparison` / `probe_policy` in `facts`. Lets the diagnosis separate observations from defects and state its confidence honestly |
 | 1.4 | Per-version probe classes in `facts.probe_policy.support` (`default`, `relaxed-only`, `relaxed-only-unverified`, `rejected`, `inconclusive`) plus `confirmed_legacy` / `unverified_legacy`, and three new observations that say which policy actually proved deprecated-TLS acceptance. A relaxed-policy handshake can no longer be reported as ordinary-client support |
 | 1.5 | Optional `uncertainty` on findings (why the evidence cannot settle the question), `diagnosis.unresolved` (warnings kept visible without a root cause), `facts.probe_policy.default_probe` (raw default-policy probe state, `client-limited` = never sent) and `facts.endpoint_comparison.addresses` (DNS addresses, so partial coverage is explicit) |
+| 1.6 | Check id `nginx.path_resolution`: how `ssl_certificate` / `ssl_certificate_key` were resolved (nginx's configuration-prefix rule or a saved manual setting) and whether the files can be opened, reported apart from certificate validation. No structural change |
 
 ## Versioning
 
@@ -181,6 +183,7 @@ forms) and any `PRIVATE KEY` PEM block, replacing them with `[REDACTED]`.
 | `nginx.protocols` | Nginx ssl_protocols of the selected block |
 | `nginx.ciphers` | Nginx ssl_ciphers of the selected block |
 | `nginx.certref` | Certificate and key referenced by the selected block |
+| `nginx.path_resolution` | Certificate and key file paths: resolution and access |
 | `nginx.chainfile` | Linkage of the ssl_certificate file |
 
 **Nginx configuration evidence.** `nginx.conf` says which configuration the

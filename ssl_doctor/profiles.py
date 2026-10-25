@@ -30,6 +30,22 @@ _NAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _HOST = re.compile(r"^[A-Za-z0-9._:\[\]-]{1,253}$")
 _FINGERPRINT = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
 _AUTH = ("password", "key")
+_NGINX_MODES = ("auto", "manual")
+_NGINX_PATH_FIELDS = ("nginx_cert", "nginx_key", "nginx_conf", "nginx_prefix")
+_MANUAL_PATH = re.compile(r"^/[A-Za-z0-9_./@%+=:,~-]*$")
+
+
+def manual_path_problem(value: str) -> Optional[str]:
+    """Why a saved nginx path cannot be used, or None ("" means not set)."""
+    if value == "":
+        return None
+    if not isinstance(value, str):
+        return "not text"
+    if not value.startswith("/"):
+        return "use an absolute path (starting with /)"
+    if len(value) > 4096 or not _MANUAL_PATH.match(value):
+        return "contains characters that are not allowed in a saved path"
+    return None
 
 
 def now_iso() -> str:
@@ -87,6 +103,12 @@ class Profile:
     hostkey_fingerprints: List[str] = field(default_factory=list)
     created: str = field(default_factory=now_iso)
     last_used: str = field(default_factory=now_iso)
+    # per-server nginx settings (/server config); never secrets
+    nginx_mode: str = "auto"
+    nginx_cert: str = ""
+    nginx_key: str = ""
+    nginx_conf: str = ""
+    nginx_prefix: str = ""
 
     def __post_init__(self) -> None:
         self.validate()
@@ -110,6 +132,14 @@ class Profile:
             raise ValueError("hostkey_fingerprints: invalid")
         _stamp(self.created, "created")
         _stamp(self.last_used, "last_used")
+        if self.nginx_mode not in _NGINX_MODES:
+            raise ValueError("nginx_mode: must be 'auto' or 'manual'")
+        for name in _NGINX_PATH_FIELDS:
+            problem = manual_path_problem(getattr(self, name))
+            if problem:
+                raise ValueError(f"{name}: {problem}")
+        if self.nginx_mode == "manual" and not (self.nginx_cert or self.nginx_key):
+            raise ValueError("nginx_mode: manual needs a certificate or key path")
 
     @property
     def endpoint(self) -> str:
@@ -119,12 +149,29 @@ class Profile:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "Profile":
-        """Build from untrusted data: unknown keys are dropped, values validated."""
+    def from_dict(cls, data: Dict, notes: Optional[List[str]] = None) -> "Profile":
+        """Build from untrusted data: unknown keys are dropped, values validated.
+
+        An invalid nginx setting is dropped (and noted) rather than discarding
+        the whole server: the connection settings are still good.
+        """
         if not isinstance(data, dict):
             raise ValueError("profile: not an object")
         known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in data.items() if k in known})
+        clean = {k: v for k, v in data.items() if k in known}
+        for name in _NGINX_PATH_FIELDS:
+            if name in clean and manual_path_problem(clean[name]):
+                if notes is not None:
+                    notes.append(f"{name} dropped: {manual_path_problem(clean[name])}")
+                clean[name] = ""
+        if clean.get("nginx_mode") not in (None, *_NGINX_MODES):
+            if notes is not None:
+                notes.append(f"nginx_mode {clean['nginx_mode']!r} dropped")
+            clean["nginx_mode"] = "auto"
+        if clean.get("nginx_mode") == "manual" and not (clean.get("nginx_cert")
+                                                         or clean.get("nginx_key")):
+            clean["nginx_mode"] = "auto"
+        return cls(**clean)
 
 
 def default_name(host: str, taken) -> str:
@@ -194,8 +241,12 @@ class ProfileStore:
             return {}, True
         found: Dict[str, Profile] = {}
         for entry in document["profiles"]:
+            notes: List[str] = []
             try:
-                profile = Profile.from_dict(entry)
+                profile = Profile.from_dict(entry, notes)
+                for note in notes:
+                    if report:
+                        self.warn(f"saved server {profile.name}: {note}")
             except (TypeError, ValueError) as exc:
                 if report:
                     label = entry.get("name") if isinstance(entry, dict) else "?"

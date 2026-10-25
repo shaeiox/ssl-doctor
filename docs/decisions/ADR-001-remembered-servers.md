@@ -124,3 +124,14 @@ Recorded while implementing; none changes the decision.
 - Windows passwords longer than 2560 bytes (the Credential Manager limit) are
   not saved; the operator is told and still connects.
 
+## Addendum (2026-10-25): per-server nginx settings
+
+Openspec change `nginx-cert-path-resolution` extends the profile with
+`nginx_mode` (`auto` | `manual`), `nginx_cert`, `nginx_key`, `nginx_conf` and
+`nginx_prefix` — paths only, validated as untrusted input (absolute, safe
+characters), never secrets. They live with the connection settings in
+`profiles.json` and follow the profile's lifecycle, not the password's: a
+saved password's expiry or `/server forget-password` leaves them in place;
+`/server forget` removes them with the profile. The decision itself is
+unchanged.
+

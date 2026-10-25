@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Certificate paths are resolved the way nginx does.** `ssl_certificate` /
+  `ssl_certificate_key` were used verbatim, so a relative value such as
+  `ssl/fullchain.pem` was looked up in the SSH account's home directory and
+  reported as `nginx.chainfile` / `srv.cert` FAIL. Relative values are now
+  resolved against nginx's configuration prefix — the directory of the main
+  configuration file, nginx's `conf_prefix` (`-p /opt/pvm/nginx/ -c
+  conf/nginx.conf` → `/opt/pvm/nginx/conf/ssl/fullchain.pem`) — with the file
+  and line each value came from. A file that exists only relative to `-p` is
+  reported as one nginx would not open. Values with variables or `data:` are
+  reported as not statically resolvable.
+- **Validation needs an opened file.** `nginx.chainfile`, `srv.cert` and
+  `srv.keymatch` run only on files that could be opened, otherwise NOT TESTED
+  with the reason (missing, not readable by this account, not reachable).
+  Content without PEM is its own FAIL, distinct from an incomplete chain; a
+  root-only key makes the pairing NOT TESTED instead of a warning.
+  `/server cert` checks access first, too.
+
+### Added
+
+- **`nginx.path_resolution`** finding (findings contract **1.6**, a new check
+  id only): configured value, source line, resolved path, method, file state,
+  automatic vs saved origin and any disagreement.
+- **Per-server nginx settings:** `/server config show|set|clear [name]`
+  (`--cert`, `--key`, `--conf`, `--prefix`) saves manual certificate/key paths
+  and main-configuration / prefix overrides in the remembered server's profile
+  and reuses them on every connection to that server; `clear` returns to
+  automatic discovery. Bare `/server config` is unchanged. Older SSL Doctor
+  versions ignore the new profile fields and drop them on their next save.
+
 ## v0.9.3 — nginx configuration of the running instance
 
 Server-side nginx analysis starts from the running nginx and says how sure it

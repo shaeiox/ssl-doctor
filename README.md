@@ -317,12 +317,25 @@ Via a read-only SSH session (`/server connect` or `/scan --server-only` /
    `ssl_certificate`/`ssl_certificate_key` inherited from `http{}` are resolved.
 4. **SSL settings of that vhost**: `ssl_protocols` (legacy TLS flagged),
    `ssl_ciphers` / `ssl_prefer_server_ciphers`.
-5. **Chain linkage of `ssl_certificate`**: the leaf comes first, and each
+5. **Certificate and key paths** (`nginx.path_resolution`): each
+   `ssl_certificate` / `ssl_certificate_key` value is shown with the file and
+   line it came from and resolved the way nginx does — an absolute path as is,
+   a relative one against nginx's *configuration prefix*, the directory of the
+   main configuration file (`-p /opt/pvm/nginx/ -c conf/nginx.conf` makes
+   `ssl/fullchain.pem` mean `/opt/pvm/nginx/conf/ssl/fullchain.pem`; nginx's
+   `conf_prefix`, not the `-p` prefix). The file is then checked: readable,
+   missing, not readable by this account, or not reachable. A file that exists
+   only relative to `-p` is pointed out as one nginx would not open. Values with
+   variables or `data:` are reported as not statically resolvable. The checks
+   below run only on files that could be opened; otherwise they are NOT TESTED
+   with the reason, so a path problem is never shown as a broken certificate.
+6. **Chain linkage of `ssl_certificate`**: the leaf comes first, and each
    certificate must be issued by the next one. A leaf-only file (intermediates
    not sent) or a wrong intermediate gives a WARNING naming the broken link.
-6. **Certificate details + key pairing** of the referenced files (digest-only
-   comparison, key bytes never read out).
-7. **Configured-vs-presented**: fingerprint of the nginx-configured cert vs
+7. **Certificate details + key pairing** of the referenced files (digest-only
+   comparison, key bytes never read out). A key the account may not read —
+   normal for root-only keys — makes the pairing NOT TESTED, not a warning.
+8. **Configured-vs-presented**: fingerprint of the nginx-configured cert vs
    the certificate the world actually receives — catching stale reloads, wrong
    vhosts, or TLS terminating elsewhere.
 8. **TLS-related service-log entries**, when readable.
@@ -337,6 +350,7 @@ Via a read-only SSH session (`/server connect` or `/scan --server-only` /
 | `/cert inspect <file> [host]` | Parse PEM/DER cert or chain file: dates, SANs, fingerprints, chain order |
 | `/cert match <cert> <key>` | Prove key belongs to cert (digest comparison only) |
 | `/server connect [name] · status · disconnect` | SSH setup with verified host keys; `name` connects to a remembered server without the prompts |
+| `/server config show\|set\|clear [name]` | Per-server nginx settings: `set --cert <path> --key <path> [--conf <path>] [--prefix <path>]` saves manual paths for the connected (or named) remembered server and uses them on every later connection; `clear` returns to automatic discovery; bare `/server config` is the TLS-configuration inventory |
 | `/servers` | Remembered servers: name, `user@host:port`, auth, whether a password is saved, last use (never the password) |
 | `/server forget <name>\|--all` · `/server forget-password <name>` | Forget a remembered server and its saved password, or only the password |
 | `/server overview · nginx · cert · config · logs · compare` | The read-only server-side checks listed above |
@@ -347,10 +361,10 @@ Via a read-only SSH session (`/server connect` or `/scan --server-only` /
 | `/typewriter [on\|off\|speed <n>]` | Gradual output on an interactive terminal |
 | `/timeout`, `/findings`, `/clear`, `/help`, `/version`, `/exit` | Session utilities |
 
-JSON reports follow the versioned **findings contract** (currently `1.5`;
+JSON reports follow the versioned **findings contract** (currently `1.6`;
 schemas in [`schemas/`](schemas/), reference in
 [`docs/findings-contract.md`](docs/findings-contract.md)). Minor versions only
-add fields, so 1.0–1.4 documents keep validating.
+add fields, so 1.0–1.5 documents keep validating.
 
 `ssldoctor.py agent enroll|run` runs SSL Doctor as an outbound-only scan agent
 for the optional service in [`service/`](service/); see
@@ -388,6 +402,12 @@ for the optional service in [`service/`](service/); see
   remember. Key logins remember only the key path — passphrases stay with
   `ssh-agent` / Pageant, the stronger choice for important servers. See
   [ADR-001](docs/decisions/ADR-001-remembered-servers.md).
+- **Per-server nginx settings** (`/server config set`) are stored in that
+  server's profile next to its connection settings — never a password — and
+  apply only to that server. They outlive a saved password's expiry. In manual
+  mode the saved paths are the ones validated; automatic discovery still runs
+  and a different file it finds is reported, never substituted. When
+  remembering is off (`--no-remember`, batch) they apply to the session only.
 - No `sudo`, no service restarts, no config edits — when the account lacks
   rights, checks report `NOT TESTED` and say exactly what rights are needed.
 - Windows-only checks (stores, certutil, Schannel) activate solely on Windows.
@@ -425,7 +445,7 @@ ssl_doctor/
   report.py             JSON + HTML report rendering
   contract.py           findings-contract schema, validation, redaction
   agent.py              outbound-only scan agent (`ssldoctor.py agent`)
-schemas/                published findings-contract JSON schemas (1.0-1.5)
+schemas/                published findings-contract JSON schemas (1.0-1.6)
 docs/                   contract, agents, executed commands, execution flow
 docs/decisions/         architecture decision records (ADRs)
 service/                optional multi-tenant service (separate package)

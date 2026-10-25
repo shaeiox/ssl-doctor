@@ -577,7 +577,7 @@ class ContractAndAgentReport(unittest.TestCase):
             self.assertLessEqual(nginx_ids, set(contract.CHECK_IDS))
             payload = report.build_payload(items, analyze.diagnose(items, {}),
                                            {"target": "files.example.com:443"}, [], {})
-            self.assertEqual(payload["schema_version"], "1.5")
+            self.assertEqual(payload["schema_version"], contract.SCHEMA_VERSION)
             self.assertEqual(contract.validate(payload), [])
 
     def test_agent_report_carries_level_and_unresolved_entry(self):

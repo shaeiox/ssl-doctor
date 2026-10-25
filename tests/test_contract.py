@@ -144,7 +144,7 @@ class FailureKindTests(unittest.TestCase):
                       ["properties"])
         self.assertIn("limitations", contract.SCHEMA["properties"]["diagnosis"]
                       ["properties"]["causes"]["items"]["properties"])
-        self.assertEqual(contract.SCHEMA_VERSION, "1.5")
+        self.assertEqual(contract.SCHEMA_VERSION, "1.6")
 
     def test_protocol_evidence_classes_are_declared(self):
         """1.4 declares which policy proved each version, and the legacy classes."""

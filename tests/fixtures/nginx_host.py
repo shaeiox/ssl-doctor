@@ -127,6 +127,23 @@ class NginxHost:
         self.calls.append(("mtimes", tuple(paths)))
         return {p: self.files[p].mtime for p in paths if p in self.files}
 
+    def file_states(self, paths):
+        """readable / denied / notfile / missing / unreachable / unsupported."""
+        self.calls.append(("file_states", tuple(paths)))
+        out = {}
+        for path in paths:
+            if not nd.SAFE_PATH.match(path):
+                out[path] = "unsupported"
+            elif path in self.files:
+                out[path] = "readable" if self.files[path].readable else "denied"
+            elif any(f.startswith(path.rstrip("/") + "/") for f in self.files):
+                out[path] = "notfile"
+            elif any(path.startswith(d.rstrip("/") + "/") for d in self.denied_dirs):
+                out[path] = "unreachable"
+            else:
+                out[path] = "missing"
+        return out
+
     def root_states(self, roots):
         self.calls.append(("roots", tuple(roots)))
         out = []
@@ -200,6 +217,16 @@ class HostSession(server.ServerSession):
                     if self.host.files[path].readable:
                         out.append(f"--- FILE: {path}\n{self.host.files[path].content}")
             return 0, "\n".join(out), "", ""
+        if remote_cmd.startswith("openssl x509 -noout -subject"):
+            # answered as openssl would for a readable PEM file
+            path = remote_cmd.rsplit(" -in ", 1)[1].split()[0].strip("'")
+            f = self.host.files.get(path)
+            if f and f.readable and "BEGIN CERTIFICATE" in f.content:
+                return 0, ("subject=CN = files.example.com\nissuer=CN = Test CA\n"
+                           "notBefore=Jan  1 00:00:00 2026 GMT\n"
+                           "notAfter=Jan  1 00:00:00 2027 GMT\n"
+                           "sha256 Fingerprint=AB:CD:EF\nrc=0\n"), "", ""
+            return 0, "Could not read certificate\nrc=1\n", "", ""
         if remote_cmd.startswith("cat "):
             path = remote_cmd.split()[1].strip("'")
             f = self.host.files.get(path)

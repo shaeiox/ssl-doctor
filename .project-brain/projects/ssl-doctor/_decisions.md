@@ -51,3 +51,7 @@ One line per settled choice: `YYYY-MM: chosen > rejected — why`.
 2026-10: "runtime-verified" = from the master's own args/defaults, complete graph, every mtime < master start > trusting `nginx -T` as proof — a dump shows what would load now, not what is loaded.
 2026-10: run executables from process titles only if root-owned and not group/world-writable > running whatever path a title names — any local user can spoof `nginx: master process /tmp/x`.
 2026-10: discovery result in the existing `nginx.conf` finding > new `nginx.discovery` check id — new ids need contract 1.6; "Nginx configuration source" already is that finding.
+2026-10: resolve relative ssl_certificate/_key against nginx's conf_prefix (main config's directory) > against the -p prefix (as requested) — nginx's own source does the former; validating a prefix-relative file would check a file nginx never opens. The prefix-relative file is still reported when it exists.
+2026-10: per-server nginx settings as fields of the existing remembered-server profile > a second diagnostics store keyed by host:port — one identity and lifecycle; passwords stay in the vault with their own expiry.
+2026-10: new check id nginx.path_resolution (contract 1.6) > folding resolution into nginx.certref — the defect is exactly that resolution and content were not separable.
+

@@ -193,3 +193,53 @@ class Lookups(Workspace):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NginxSettingsFields(Workspace):
+    """openspec change nginx-cert-path-resolution: per-server nginx settings."""
+
+    def test_round_trip_and_defaults(self):
+        self.assertEqual(sample().nginx_mode, "auto")
+        p = sample(nginx_mode="manual", nginx_cert="/opt/pvm/nginx/conf/ssl/fullchain.pem",
+                   nginx_key="/opt/pvm/nginx/conf/ssl/private.key",
+                   nginx_conf="/opt/pvm/nginx/conf/nginx.conf", nginx_prefix="/opt/pvm/nginx/")
+        self.assertEqual(profiles.Profile.from_dict(p.to_dict()), p)
+
+    def test_invalid_values_are_refused(self):
+        for field, value in (("nginx_cert", "ssl/fullchain.pem"), ("nginx_key", "/etc/$(id)"),
+                             ("nginx_conf", "-oops"), ("nginx_prefix", "relative/"),
+                             ("nginx_mode", "sometimes")):
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    sample(**{field: value})
+        with self.assertRaises(ValueError):
+            sample(nginx_mode="manual")                  # manual needs a cert or key path
+
+    def test_manual_path_problem_messages(self):
+        self.assertIn("absolute", profiles.manual_path_problem("ssl/fullchain.pem"))
+        self.assertIsNone(profiles.manual_path_problem("/opt/pvm/nginx/conf/ssl/fullchain.pem"))
+        self.assertIsNone(profiles.manual_path_problem(""))
+
+    def test_an_invalid_stored_value_is_dropped_and_the_profile_kept(self):
+        data = sample().to_dict()
+        data.update(nginx_mode="manual", nginx_cert="/etc/ssl/ok.pem", nginx_key="key; rm -rf /")
+        self.write_raw(json.dumps({"schema": 1, "profiles": [data]}))
+        store = self.store()
+        p = store.get("files")
+        self.assertIsNotNone(p)
+        self.assertEqual((p.nginx_mode, p.nginx_cert, p.nginx_key),
+                         ("manual", "/etc/ssl/ok.pem", ""))
+        self.assertTrue(any("nginx_key" in w for w in self.warnings))
+
+    def test_manual_without_paths_after_dropping_falls_back_to_auto(self):
+        data = sample().to_dict()
+        data.update(nginx_mode="manual", nginx_cert="relative.pem")
+        self.write_raw(json.dumps({"schema": 1, "profiles": [data]}))
+        self.assertEqual(self.store().get("files").nginx_mode, "auto")
+
+    def test_old_files_without_the_fields_load_as_auto(self):
+        data = sample().to_dict()
+        for key in [k for k in data if k.startswith("nginx_")]:
+            del data[key]
+        self.write_raw(json.dumps({"schema": 1, "profiles": [data]}))
+        self.assertEqual(self.store().get("files").nginx_mode, "auto")

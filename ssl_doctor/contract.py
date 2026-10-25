@@ -21,11 +21,12 @@ import re
 import urllib.parse
 from typing import Any, Dict, Iterable, List
 
-SCHEMA_VERSION = "1.5"   # 1.1: facts block; 1.2: failure classification;
+SCHEMA_VERSION = "1.6"   # 1.1: facts block; 1.2: failure classification;
                          # 1.3: cause limitations, observation classes, endpoint state;
                          # 1.4: legacy-protocol acceptance classes;
                          # 1.5: finding uncertainty, unresolved diagnosis entries,
-                         #      default-probe states, endpoint address coverage
+                         #      default-probe states, endpoint address coverage;
+                         # 1.6: check id nginx.path_resolution
 SUPPORTED_MAJOR = 1
 
 # Machine-readable classification of a failed probe.  "What went wrong" is
@@ -122,6 +123,7 @@ CHECK_IDS: Dict[str, str] = {
     "nginx.protocols": "Nginx ssl_protocols of the selected block",
     "nginx.ciphers": "Nginx ssl_ciphers of the selected block",
     "nginx.certref": "Certificate and key referenced by the selected block",
+    "nginx.path_resolution": "Certificate and key file paths: resolution and access",
     "nginx.chainfile": "Linkage of the ssl_certificate file",
 }
 

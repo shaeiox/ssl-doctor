@@ -5,7 +5,7 @@ tags: [ssh, profiles, credentials, vault, windows, linux, security, openspec]
 status: in-progress
 trust: ai-inferred
 last_done: 2026-10-25
-version: 3
+version: 4
 ---
 
 **Problem:** every `/server connect` (and `/scan` server step) re-asks host, port, user, auth, TLS target and password.
@@ -23,4 +23,6 @@ version: 3
 **Next:** confirm Windows CI job (real Credential Manager) + manual checks (task 6.2) → archive change → merge/release.
 
 **v3 (scan server choice):** `cli._choose_scan_server(domain)` runs at every interactive `/scan` server step → "current" | Profile | "new" | None; list = current session, then profiles (dedup vs current endpoint, domain matches first by tls_host/host); default = current if it serves the domain, else first match, else current, else most recent. Batch: open session or `_server_connect()`. `_server_connect` now returns bool; `_open_session` keeps the old session until the new one connects (failed attempt → old stays, scan stops). Spec: "Every `/scan` asks which server to use" + "Batch scans never ask" (task 4.6). Tests: `test_server_commands.py::ScanAsksWhichServer`.
+
+**v4 (per-server nginx settings):** Profile fields `nginx_mode` (auto|manual), `nginx_cert`, `nginx_key`, `nginx_conf`, `nginx_prefix` (absolute, safe chars; invalid stored value dropped with a warning, profile kept; manual w/o paths → auto). `/server config show|set|clear [name]` (`--cert --key --conf --prefix`, prompts otherwise); target = name, else connected server's profile (user,host,port), else recent pick; unremembered connected server → offer "remember (profile only)" else session-only; remembering off/batch → session-only or "nothing was saved". `_after_connect` applies the profile's settings (`_apply_nginx_settings`). Settings survive password expiry (expire touches only `password_saved`). Older versions drop the new fields on save.
 
