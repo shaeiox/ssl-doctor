@@ -10,7 +10,7 @@
 @src index.md  @gen 2026-10-25  @updated 2026-10-25
 
 P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
-  ~ 2026-10-25 next: user verifies wheel in cmd, PowerShell, Git Bash; merge/release · blocker: no Windows to test here
+  ~ 2026-10-25 next: user verifies wheel in cmd, PowerShell, Git Bash; widen terminal-interface Purpose; remembered-servers needs Windows CI + manual vault checks · blocker: no Windows to test here
   architecture-and-scope ✓v 2026-10-25 v2
   chain-diagnosis ✓v 2026-10-24 v1
   server-ssh-nginx ✓d 2026-10-25 v4

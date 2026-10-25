@@ -1,4 +1,4 @@
-# SSL Doctor v0.10.0
+# SSL Doctor v0.10.1
 
 Offline-capable SSL/TLS diagnostic tool for IT support engineers. It answers:
 *why does this TLS connection fail — the client machine, the nginx server, the
@@ -72,7 +72,7 @@ evidence line gets the full width of the window.
                       ██     ██ ██       ██  ██ ██  ██ ██       ██   ██  ██ ██  ██
                   ██████ ██████ ██████   █████  ██████ ██████   ██   ██████ ██  ██
                    offline ssl/tls diagnostics · client · server · chain · nginx
-                                     creator: eleven  ·  v0.10.0
+                                     creator: eleven  ·  v0.10.1
                 ════════════════════════════════════════════════════════════════════
 
   Welcome. SSL Doctor is read-only; credentials are never logged.
@@ -453,6 +453,7 @@ ssl_doctor/
   cli.py                REPL, theme/frames/spinner, banner, prompts, scan orchestration
   tui.py                full-screen shell: layout, transcript, composer, key reader
   textcells.py          width/clip/wrap in terminal cells (CJK, emoji, combining marks)
+  termcaps.py           per-terminal presentation: full-screen shell or line mode, mouse
   clipboard.py          copy to the clipboard (Win32, X11 helper, tools, OSC 52)
   profiles.py           remembered server profiles (non-secret, ~/.ssl-doctor/profiles.json)
   vault.py              saved passwords in the OS credential vault (or none)

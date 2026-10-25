@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-25 · done: Windows wheel fix + terminal profiles on branch fix/terminal-profiles, not merged · next: user verifies wheel in cmd, PowerShell, Git Bash; merge/release · blocker: no Windows to test here
+> resume 2026-10-25 · done: v0.10.1 (Windows wheel scrolling, terminal profiles) merged to master, tagged & pushed · next: user verifies wheel in cmd, PowerShell, Git Bash; widen terminal-interface Purpose; remembered-servers needs Windows CI + manual vault checks · blocker: no Windows to test here
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-25 · v2] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md

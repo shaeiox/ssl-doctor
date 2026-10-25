@@ -5,7 +5,7 @@ points, argument handling, the command loop, what each command does internally,
 how findings become a diagnosis and a report, and how the session shuts down.
 File names are included at every step.
 
-Version covered: `0.10.0` (`ssl_doctor/__init__.py`).
+Version covered: `0.10.1` (`ssl_doctor/__init__.py`).
 
 ---
 
@@ -67,6 +67,7 @@ ssl_doctor/cli.py :: main()
    - `ssl_doctor/profiles.py` — remembered server profiles
    - `ssl_doctor/vault.py` — saved passwords in the OS credential vault
    - `ssl_doctor/textcells.py` — text measured in terminal cells
+   - `ssl_doctor/termcaps.py` — which presentation this terminal gets
    (`ssl_doctor/tui.py` and `ssl_doctor/clipboard.py` are imported when the
    full-screen shell or a copy needs them.)
 2. Resolves one colour level (`resolve_color_mode()`: `NO_COLOR`,
@@ -725,9 +726,10 @@ User                cli.py                  netchecks/local/server      analyze 
 |---|---|
 | `ssldoctor.py` | Source entry point; calls `ssl_doctor.cli.main()` |
 | `pyproject.toml` | Declares the `ssl-doctor` console script and package |
-| `ssl_doctor/__init__.py` | Version (`0.10.0`) and application name |
+| `ssl_doctor/__init__.py` | Version (`0.10.1`) and application name |
 | `ssl_doctor/cli.py` | Argument parsing, batch mode, REPL, dispatch, all command handlers, spinner/colors, result frames, `/scan` orchestration, the `/server connect` pipeline and remembered-server commands |
 | `ssl_doctor/tui.py` | Full-screen shell: layout, transcript (frames redrawn per width), composer, completion menu, mouse selection, key reader (termios / Windows console records) |
+| `ssl_doctor/termcaps.py` | Per-terminal presentation: full-screen shell or line mode, mouse capture, the reason for a fallback; Windows VT-output check |
 | `ssl_doctor/textcells.py` | Width, clipping and wrapping in terminal cells (CJK/emoji = 2, combining = 0) |
 | `ssl_doctor/clipboard.py` | Copy to the clipboard: Win32, X11 helper, tools, OSC 52 |
 | `ssl_doctor/nginx_discovery.py` | Which configuration the running nginx uses: process/unit/`-V` parsing, nginx path semantics, include graph (expanded), evidence levels; pure, driven through a probe |

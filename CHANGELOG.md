@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.10.1 — mouse-wheel scrolling on Windows consoles
+
+The full-screen shell scrolls with the mouse wheel in cmd, PowerShell and Git
+Bash (winpty) too, and consoles that cannot draw it fall back to line mode with
+their own scrollback. No change to checks or the findings contract (1.6).
 
 ### Fixed
 
