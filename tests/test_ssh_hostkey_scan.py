@@ -209,14 +209,14 @@ class WindowsAskpass(unittest.TestCase):
         out = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
         env = {server.ASKPASS_MODE_ENV: "1", "SSL_DOCTOR_PW": self.PASSWORD}
         with mock.patch.dict(os.environ, env), mock.patch.object(server.sys, "stdout", out):
-            self.assertTrue(server.askpass_reply())
+            self.assertEqual(server.askpass_reply(), 0)
         out.flush()
         self.assertEqual(out.buffer.getvalue(), self.PASSWORD.encode("utf-8") + b"\n")
 
     def test_helper_mode_is_off_by_default(self):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(server.ASKPASS_MODE_ENV, None)
-            self.assertFalse(server.askpass_reply())
+            self.assertIsNone(server.askpass_reply())
 
     def test_the_cli_entry_point_answers_as_the_helper(self):
         import io

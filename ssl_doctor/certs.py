@@ -169,6 +169,21 @@ def _decode_with_stdlib(pem: bytes) -> CertInfo:
     return info
 
 
+def _openssl_raw(*args: str, input_data: bytes = b"",
+                 timeout: int = 10) -> Tuple[int, bytes, str]:
+    """`openssl <args>` with binary stdout; a missing binary or a hang is a result."""
+    try:
+        proc = subprocess.run(["openssl", *args], input=input_data,
+                              capture_output=True, timeout=timeout)
+    except FileNotFoundError:
+        return 127, b"", "openssl binary not found"
+    except subprocess.TimeoutExpired:
+        return 124, b"", "openssl timed out"
+    except OSError as exc:
+        return 126, b"", f"openssl could not run: {exc.strerror or exc}"
+    return proc.returncode, proc.stdout, proc.stderr.decode("utf-8", "replace")
+
+
 def _openssl(*args: str, input_data: bytes = b"", timeout: int = 10) -> Tuple[int, str, str]:
     try:
         proc = subprocess.run(
@@ -255,7 +270,7 @@ def load_cert_file(path: str) -> Tuple[List[CertInfo], Optional[str]]:
     try:
         certs.append(decode_der(data))
         return certs, None
-    except Exception:
+    except Exception:  # noqa: BLE001 - not DER either; reported as "not a certificate" below
         pass
 
     ext = os.path.splitext(path)[1].lower()
@@ -316,7 +331,7 @@ def _load_root_anchors(capath: Optional[str]) -> List[CertInfo]:
     for der in ders:
         try:
             info = decode_der(der, enrich=False)
-        except Exception:
+        except Exception:  # noqa: BLE001 - one unreadable store entry must not hide the rest
             continue
         if info.is_self_signed() and info.sha256 not in seen:
             seen.add(info.sha256)
@@ -511,12 +526,11 @@ def _public_key_sha256_from_pem_bytes(pem: bytes) -> Tuple[Optional[str], str]:
     pub_pem = _openssl("x509", "-noout", "-pubkey", input_data=pem)
     if pub_pem[0] != 0:
         return None, pub_pem[2].strip()
-    der_proc = subprocess.run(
-        ["openssl", "pkey", "-pubin", "-outform", "DER"],
-        input=pub_pem[1].encode(), capture_output=True, timeout=10)
-    if der_proc.returncode != 0:
-        return None, der_proc.stderr.decode("utf-8", "replace").strip()
-    return hashlib.sha256(der_proc.stdout).hexdigest(), ""
+    rc, der, err = _openssl_raw("pkey", "-pubin", "-outform", "DER",
+                                input_data=pub_pem[1].encode())
+    if rc != 0:
+        return None, err.strip()
+    return hashlib.sha256(der).hexdigest(), ""
 
 
 def match_cert_key(cert_path: str, key_path: str,
@@ -570,11 +584,10 @@ def match_cert_key(cert_path: str, key_path: str,
                            target=key_path))
         return out
 
-    key_pub = subprocess.run(
-        ["openssl", "pkey", "-pubout", "-outform", "DER"],
-        input=key_data, capture_output=True, timeout=10)
-    if key_pub.returncode != 0:
-        msg = key_pub.stderr.decode("utf-8", "replace").strip().splitlines()
+    key_rc, key_der, key_err = _openssl_raw("pkey", "-pubout", "-outform", "DER",
+                                            input_data=key_data)
+    if key_rc != 0:
+        msg = key_err.strip().splitlines()
         hint = msg[-1] if msg else "openssl could not read the key"
         _f = F.Finding("cert.keymatch", "Certificate/private-key match", F.FAIL,
                       F.SCOPE_LOCAL, [f"private key unreadable: {hint}"],
@@ -582,7 +595,7 @@ def match_cert_key(cert_path: str, key_path: str,
         if emit is not None:
             emit(_f)
         return out + [_f]
-    key_fp = hashlib.sha256(key_pub.stdout).hexdigest()
+    key_fp = hashlib.sha256(key_der).hexdigest()
 
     if cert_fp and cert_fp == key_fp:
         _add(F.Finding(

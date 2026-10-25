@@ -727,8 +727,8 @@ class Screen:
         try:
             self.stream.write(text)
             self.stream.flush()
-        except Exception:
-            pass
+        except (OSError, ValueError):
+            pass            # the terminal went away (closed pipe or stream); nothing to draw on
 
 
 # ------------------------------------------------------------------- keyboard
@@ -782,7 +782,7 @@ class KeyReader:
         import termios
         try:
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._saved)
-        except Exception:
+        except Exception:  # noqa: BLE001 - the tty is gone; there is no mode left to restore
             pass
         self._saved = None
 
@@ -1133,20 +1133,30 @@ class TuiSession:
 
     # -- questions -------------------------------------------------------
     def ask(self, label: str, default: str = "", secret: bool = False) -> str:
-        self.question = label
-        self.default = default
-        self.set_status([(f"{label}" + (f"  [{default}]" if default else ""),
-                          "accent", False)])
-        value = self.read_line(secret=secret)
-        self.question = ""
-        self.default = ""
-        self.status = []
+        value = self._question(label, default, secret)
         if value is None:
             return default
         return value or default
 
-    def read_secret(self, label: str = "password") -> str:
-        return self.ask(label, "", secret=True)
+    def read_secret(self, label: str = "password") -> Optional[str]:
+        """Masked input; None when cancelled (Ctrl-C, Ctrl-D, end of input).
+
+        Unlike `ask`, a cancel is not turned into an empty answer, so the
+        caller can tell "cancelled" from "pressed Enter".
+        """
+        return self._question(label, "", True)
+
+    def _question(self, label: str, default: str, secret: bool) -> Optional[str]:
+        self.question = label
+        self.default = default
+        self.set_status([(f"{label}" + (f"  [{default}]" if default else ""),
+                          "accent", False)])
+        try:
+            return self.read_line(secret=secret)
+        finally:
+            self.question = ""
+            self.default = ""
+            self.status = []
 
     # -- the command bar -------------------------------------------------
     def read_line(self, secret: bool = False) -> Optional[str]:

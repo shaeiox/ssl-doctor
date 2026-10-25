@@ -35,6 +35,26 @@ STATE_DIR = os.path.expanduser("~/.ssl-doctor")
 ASKPASS_MODE_ENV = "SSL_DOCTOR_ASKPASS"
 
 
+def password_problem(password: str) -> Optional[str]:
+    """Why `password` cannot be used, or None.
+
+    Empty and whitespace-only values are refused: an empty answer is almost
+    always a slip, and ssh would send it as a real login attempt. Line breaks
+    and NUL cannot pass through the one-line askpass reply.
+    """
+    if not password or not password.strip():
+        return "the password cannot be empty"
+    if any(c in password for c in "\r\n\0"):
+        return "the password cannot contain line breaks or NUL characters"
+    return None
+
+
+def _describe_os_error(exc: OSError) -> str:
+    where = exc.filename or ""
+    reason = exc.strerror or str(exc)
+    return f"{where}: {reason}" if where else reason
+
+
 def _ensure_state_dir() -> str:
     os.makedirs(STATE_DIR, exist_ok=True)
     try:
@@ -341,6 +361,29 @@ def sha256_fingerprints(lines: List[str]) -> List[str]:
 
 def host_key_status(host: str, port: int, timeout: float = 8.0,
                     username: str = "") -> HostKeyInfo:
+    """Compare the presented host keys with the trust store.
+
+    A trust store that cannot be used or a missing `ssh-keygen` is reported as
+    `unreachable` with the reason, never raised: the caller must stop before
+    authenticating either way.
+    """
+    try:
+        return _host_key_status(host, port, timeout, username)
+    except FileNotFoundError as exc:
+        if exc.filename in (None, "ssh-keygen") or "ssh-keygen" in str(exc):
+            return HostKeyInfo("unreachable", [],
+                               "ssh-keygen not found: install the OpenSSH client tools")
+        return HostKeyInfo("unreachable", [],
+                           f"host-key trust store unusable: {_describe_os_error(exc)}")
+    except OSError as exc:
+        return HostKeyInfo("unreachable", [],
+                           f"host-key trust store unusable: {_describe_os_error(exc)}")
+    except subprocess.TimeoutExpired:
+        return HostKeyInfo("unreachable", [], "ssh-keygen did not answer in time")
+
+
+def _host_key_status(host: str, port: int, timeout: float,
+                     username: str) -> HostKeyInfo:
     kh_path = os.path.join(_ensure_state_dir(), "known_hosts")
     if not os.path.exists(kh_path):
         open(kh_path, "a").close()
@@ -361,7 +404,10 @@ def host_key_status(host: str, port: int, timeout: float = 8.0,
                               capture_output=True, timeout=10, text=True)
         fps = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
     finally:
-        os.unlink(tmp)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass                           # a leftover scratch file holds public keys only
 
     scanned_keys: Dict[str, str] = {}
     for ln in scan:
@@ -398,31 +444,38 @@ def host_key_status(host: str, port: int, timeout: float = 8.0,
 def store_host_key(host: str, port: int, timeout: float = 8.0,
                    username: str = "") -> Tuple[bool, str]:
     """Persist the currently presented host key. Requires prior user consent."""
-    scan, err = _scan_host_keys(host, port, timeout, username)
-    if not scan:
-        return False, err
-    kh_path = os.path.join(_ensure_state_dir(), "known_hosts")
-    with open(kh_path, "a") as fh:
-        fh.write("\n".join(scan) + "\n")
+    try:
+        kh_path = os.path.join(_ensure_state_dir(), "known_hosts")
+        scan, err = _scan_host_keys(host, port, timeout, username)
+        if not scan:
+            return False, err
+        with open(kh_path, "a") as fh:
+            fh.write("\n".join(scan) + "\n")
+    except OSError as exc:
+        return False, f"could not store the host key: {_describe_os_error(exc)}"
     return True, "host key stored in " + kh_path
 
 
-def askpass_reply() -> bool:
+def askpass_reply() -> Optional[int]:
     """Act as the SSH_ASKPASS helper when ssh started this executable for it.
 
-    Prints the password from the environment (UTF-8, one line) and returns
-    True; returns False when the process was not started as the helper.
+    Returns None when the process was not started as the helper. Otherwise
+    prints the password from the environment (UTF-8, one line) and returns
+    0 -- or prints nothing and returns 1 when there is no usable password, so
+    ssh gives up instead of sending an empty one.
     """
     if os.environ.get(ASKPASS_MODE_ENV) != "1":
-        return False
+        return None
     secret = os.environ.get("SSL_DOCTOR_PW", "")
+    if password_problem(secret):
+        return 1
     stream = getattr(sys.stdout, "buffer", None)
     if stream is not None:
         stream.write(secret.encode("utf-8") + b"\n")
     else:
         sys.stdout.write(secret + "\n")
     sys.stdout.flush()
-    return True
+    return 0
 
 
 # ---------------------------------------------------------------- SSH session
@@ -478,14 +531,18 @@ class ServerSession:
             return sys.executable
         if windows:
             path = os.path.join(_ensure_state_dir(), "askpass.cmd")
-            code = ("import os,sys;sys.stdout.buffer.write("
-                    "os.environ.get('SSL_DOCTOR_PW','').encode('utf-8')+b'\\n')")
+            code = ("import os,sys;p=os.environ.get('SSL_DOCTOR_PW','');"
+                    "p.strip() or sys.exit(1);"
+                    "sys.stdout.buffer.write(p.encode('utf-8')+b'\\n')")
             with open(path, "w", newline="") as fh:   # CRLF exactly once
                 fh.write(f'@echo off\r\n@"{sys.executable}" -I -c "{code}"\r\n')
         else:
             path = os.path.join(_ensure_state_dir(), "askpass.sh")
             with open(path, "w") as fh:
-                fh.write("#!/bin/sh\nprintf '%s\\n' \"$SSL_DOCTOR_PW\"\n")
+                # an empty or blank password: fail, so ssh never sends it
+                fh.write("#!/bin/sh\n"
+                         "case \"$SSL_DOCTOR_PW\" in *[![:space:]]*) ;; *) exit 1 ;; esac\n"
+                         "printf '%s\\n' \"$SSL_DOCTOR_PW\"\n")
         os.chmod(path, stat.S_IRWXU)
         self._askpass_path = path
         return path
@@ -510,14 +567,21 @@ class ServerSession:
 
     def run(self, remote_cmd: str) -> Tuple[int, str, str, str]:
         """Run a read-only remote command. Returns (rc, out, err, fatal_note)."""
-        cmd = self._base_argv() + ["--", remote_cmd]
+        try:
+            cmd = self._base_argv() + ["--", remote_cmd]
+            env = self._spawn_env()
+        except OSError as exc:
+            return 126, "", "", ("cannot prepare the ssh call (askpass helper / state "
+                                 f"directory): {_describe_os_error(exc)}")
         try:
             proc = subprocess.run(
                 cmd, capture_output=True, timeout=self.cfg.command_timeout,
-                text=True, env=self._spawn_env(), stdin=subprocess.DEVNULL,
+                text=True, env=env, stdin=subprocess.DEVNULL,
                 start_new_session=True)
         except FileNotFoundError:
             return 127, "", "", "ssh client not found on this machine"
+        except OSError as exc:
+            return 126, "", "", f"ssh could not be started: {_describe_os_error(exc)}"
         except subprocess.TimeoutExpired:
             return 124, "", "", \
                 f"command timed out after {self.cfg.command_timeout:.0f}s"
@@ -527,6 +591,9 @@ class ServerSession:
     def connect(self) -> List[F.Finding]:
         out: List[F.Finding] = []
         target = f"{self.cfg.host}:{self.cfg.port}"
+        if self.cfg.auth == "password" and (problem := password_problem(self._password)):
+            return [F.Finding("ssh.auth", "SSH authentication", F.FAIL, F.SCOPE_SERVER,
+                              [f"not attempted: {problem}"], target=target)]
         key = host_key_status(self.cfg.host, self.cfg.port,
                               self.cfg.connect_timeout, self.cfg.username)
         if key.status == "unreachable":

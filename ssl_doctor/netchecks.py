@@ -1254,8 +1254,8 @@ def check_https(host: str, port: int, sni: Optional[str], timeout: float,
                 try:
                     from email.utils import parsedate_to_datetime
                     facts["server_time"] = parsedate_to_datetime(date_hdr)
-                except Exception:
-                    pass
+                except (TypeError, ValueError, IndexError):
+                    pass            # a malformed Date header: clock skew is simply not measured
             rows.append(
                 f"https://{current_host}:{current_port}/ -> "
                 f"{resp.status} {resp.reason} (Server: {server})")
