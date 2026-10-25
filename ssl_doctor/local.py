@@ -136,7 +136,7 @@ def check_issuer_in_windows_root(issuer_names: List[str],
             der = entry[0]
             try:
                 subjects.add(decode_der(der, enrich=False).subject)
-            except Exception:
+            except Exception:  # noqa: BLE001 - skip an unreadable store entry, keep the rest
                 continue
         missing = [n for n in issuer_names if n not in subjects]
         if not missing:

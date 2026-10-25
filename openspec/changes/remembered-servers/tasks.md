@@ -24,6 +24,7 @@
 - [x] 3.5 Pre-fill the prompts from a profile when the typed host matches one; verify with a scripted-prompt test that defaults equal the saved values
 - [x] 3.6 Add `remember_enabled()` (`--no-remember`, `SSL_DOCTOR_REMEMBER=off`, `-c`, agents, service) and wire it to `open_vault`; verify with tests that batch `-c "/server connect files"` neither asks to remember nor reads the vault
 - [x] 3.7 Show the password source ("password from Windows Credential Manager" / "… Secret Service") without value or length; verify with a transcript assertion
+- [x] 3.8 Refuse empty/whitespace-only passwords at the prompt (ask again, at most 3 times; Ctrl-C = cancelled), in `ServerSession.connect`, in every vault backend and in the askpass helpers (exit non-zero); verify with `tests/test_error_handling.py`
 
 ## 4. Commands, `/scan` and completion
 

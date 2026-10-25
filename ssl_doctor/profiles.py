@@ -149,12 +149,18 @@ class ProfileStore:
 
     def __init__(self, path: Optional[str] = None,
                  warn: Optional[Callable[[str], None]] = None) -> None:
-        if path is None:
-            from .server import _ensure_state_dir
-            path = os.path.join(_ensure_state_dir(), FILE_NAME)
-        self.path = path
         self.warn = warn or (lambda message: None)
         self.read_only = False                 # set when the file could not be parsed
+        if path is None:
+            from .server import STATE_DIR, _ensure_state_dir
+            try:
+                path = os.path.join(_ensure_state_dir(), FILE_NAME)
+            except OSError as exc:
+                # reading still works if the directory exists; saving will say why not
+                path = os.path.join(STATE_DIR, FILE_NAME)
+                self.warn(f"remembered servers are unavailable: the state directory "
+                          f"{STATE_DIR} cannot be used ({exc.strerror or exc})")
+        self.path = path
         self._profiles: Dict[str, Profile] = {}
 
     # -- reading ---------------------------------------------------------
@@ -168,6 +174,11 @@ class ProfileStore:
                 raw = fh.read()
         except FileNotFoundError:
             return {}, False
+        except UnicodeDecodeError:
+            if report:
+                self.warn(f"saved servers could not be read: {self.path} is not UTF-8 text "
+                          "(left untouched)")
+            return {}, True
         except OSError as exc:
             if report:
                 self.warn(f"saved servers could not be read: {exc.strerror or exc}")

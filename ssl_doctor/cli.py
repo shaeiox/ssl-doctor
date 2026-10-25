@@ -941,6 +941,10 @@ class _ResponseRecorder:
 # ------------------------------------------------------------------- CLI
 
 
+password_problem = servermod.password_problem
+PASSWORD_ATTEMPTS = 3
+
+
 def remember_enabled(env, batch: bool, interactive: bool, no_remember: bool = False) -> bool:
     """Whether this session may offer to remember servers and use saved passwords."""
     setting = (env.get("SSL_DOCTOR_REMEMBER") or "").strip().lower()
@@ -1145,8 +1149,11 @@ class SSLDoctorCLI:
             handler(rest)
         except KeyboardInterrupt:
             self.note("\ninterrupted")
-        except Exception as exc:  # never crash the session on a check bug
-            self.error(f"{type(exc).__name__}: {exc}")
+        except OSError as exc:      # a file or process problem the command did not expect
+            self.error(f"/{cmd}: {servermod._describe_os_error(exc)}")
+        except Exception as exc:    # a bug: say so, keep the session alive
+            self.error(f"internal error in /{cmd}: {type(exc).__name__}: {exc} "
+                       "(the session continues; please report this)")
         finally:
             if recorder is not None:
                 sys.stdout = recorder.inner
@@ -1594,10 +1601,30 @@ class SSLDoctorCLI:
         if self._profile_store is None:
             self._profile_store = profilesmod.ProfileStore(warn=self.note).load()
             if self._remembering():
-                for name in self._profile_store.expire(self._vault()):
+                try:
+                    expired = self._profile_store.expire(self._vault())
+                except OSError as exc:
+                    expired = []
+                    self.note(f"could not expire old saved passwords: "
+                              f"{servermod._describe_os_error(exc)}")
+                for name in expired:
                     self.note(f"saved password for {name} expired after "
                               f"{vaultmod.EXPIRY_DAYS} days unused and was deleted")
         return self._profile_store
+
+    def _persist(self, change) -> bool:
+        """Apply a profile-store change; a file error is reported, not raised.
+
+        Remembering is a convenience: failing to save must never undo a
+        connection or a command that already worked.
+        """
+        try:
+            change()
+            return True
+        except OSError as exc:
+            self.error(f"could not save remembered servers: "
+                       f"{servermod._describe_os_error(exc)}")
+            return False
 
     def _vault(self) -> vaultmod.SecretVault:
         if self._secret_vault is None:
@@ -1657,7 +1684,8 @@ class SSLDoctorCLI:
                 return
             for profile in everything:
                 self._delete_saved_password(profile)
-                store.forget(profile.name)
+                if not self._persist(lambda: store.forget(profile.name)):
+                    return
             self.note(f"forgot {len(everything)} remembered servers")
             return
         profile = store.get(args[0])
@@ -1669,11 +1697,10 @@ class SSLDoctorCLI:
         self._delete_saved_password(profile)
         if password_only:
             profile.password_saved = False
-            store.save(profile)
-            self.note(f"saved password for {profile.name} deleted; the server stays "
-                      "remembered")
-        else:
-            store.forget(profile.name)
+            if self._persist(lambda: store.save(profile)):
+                self.note(f"saved password for {profile.name} deleted; the server stays "
+                          "remembered")
+        elif self._persist(lambda: store.forget(profile.name)):
             self.note(f"forgot {profile.name} and any saved password")
 
     def _delete_saved_password(self, profile) -> None:
@@ -1919,18 +1946,32 @@ class SSLDoctorCLI:
         return secret, store.name
 
     def _ask_password(self) -> Optional[str]:
-        try:
-            if self._tui is not None:
-                password = self._tui.read_secret("SSH password (hidden)")
-            else:
-                password = getpass.getpass("SSH password (hidden): ")
-        except EOFError:
-            self.error("cannot read password in this terminal")
-            return None
-        if not password:
-            self.error("empty password")
-            return None
-        return password
+        """A usable password, or None (cancelled, unreadable, or empty 3 times).
+
+        An empty or blank answer is never sent: it is asked again, and after
+        PASSWORD_ATTEMPTS empty answers the connection is cancelled.
+        """
+        for attempt in range(1, PASSWORD_ATTEMPTS + 1):
+            try:
+                if self._tui is not None:
+                    password = self._tui.read_secret("SSH password (hidden)")
+                else:
+                    password = getpass.getpass("SSH password (hidden): ")
+            except EOFError:
+                self.error("cannot read a password in this terminal; connection cancelled")
+                return None
+            except KeyboardInterrupt:
+                password = None
+            if password is None:
+                self.note("password entry cancelled; nothing was sent")
+                return None
+            problem = password_problem(password)
+            if problem is None:
+                return password
+            if attempt < PASSWORD_ATTEMPTS:
+                self.error(f"{problem} - try again (Ctrl-C cancels)")
+        self.error("no password given; connection cancelled")
+        return None
 
     def _open_session(self, settings, password: str) -> tuple:
         """(connected, authentication failed)."""
@@ -1960,7 +2001,7 @@ class SSLDoctorCLI:
         except vaultmod.VaultError as exc:
             self.note(f"could not delete the saved password: {exc}")
         profile.password_saved = False
-        self._profiles().save(profile)
+        self._persist(lambda: self._profiles().save(profile))
         self.note(f"{why}; it was removed from {self._vault().name}")
 
     def _after_connect(self, settings, fingerprints, password: str, source: str) -> None:
@@ -1979,7 +2020,7 @@ class SSLDoctorCLI:
                                          f"{self._vault().name}? (yes/no)", "no").lower()
                     if answer in ("yes", "y"):
                         self._store_password(profile, password, fingerprints)
-                self._profiles().save(profile)
+                self._persist(lambda: self._profiles().save(profile))
         self.out(paint("next: /server overview, /server cert <path> [key], "
                        "/server compare", "muted", dim=True))
 
@@ -2002,8 +2043,12 @@ class SSLDoctorCLI:
             tls_port=settings.tls_port, hostkey_fingerprints=fingerprints[:8])
         if answer[0] == "s":
             self._store_password(profile, password, fingerprints)
-        store.save(profile)
-        self.note(f"remembered as {profile.name} - next time: /server connect {profile.name}")
+        if self._persist(lambda: store.save(profile)):
+            self.note(f"remembered as {profile.name} - next time: "
+                      f"/server connect {profile.name}")
+        elif profile.password_saved:
+            # the profile is not on disk, so the saved password would be orphaned
+            self._delete_saved_password(profile)
 
     def _store_password(self, profile, password: str, fingerprints) -> None:
         try:
@@ -2115,6 +2160,15 @@ class SSLDoctorCLI:
                   f"{counts[F.WARNING]} warning, {counts[F.NOT_TESTED]} not tested "
                   f"{_GLYPHS['sep']} give agent-report.md to the AI model of your choice")
 
+    def _write_report(self, kind: str, path: str, writer, *data) -> bool:
+        try:
+            writer(path, *data)
+            return True
+        except OSError as exc:
+            self.error(f"could not write the report ({kind}): "
+                       f"{exc.filename or path}: {exc.strerror or exc}")
+            return False
+
     def cmd_report(self, args: List[str]) -> None:
         fmt = "html"
         path = ""
@@ -2136,12 +2190,16 @@ class SSLDoctorCLI:
         if fmt in ("json", "both"):
             p = path if path.lower().endswith(".json") else \
                 (path + ".json" if path else f"ssl-doctor-report-{ts}.json")
-            reportmod.write_json(p, items, diag, meta, secrets, facts)
+            if not self._write_report("JSON", p, reportmod.write_json,
+                                      items, diag, meta, secrets, facts):
+                return
             written.append(p)
         if fmt in ("html", "both"):
             p = path if (path and path.lower().endswith(".html")) else \
                 (path + ".html" if path else f"ssl-doctor-report-{ts}.html")
-            reportmod.write_html(p, items, diag, meta, secrets, facts)
+            if not self._write_report("HTML", p, reportmod.write_html,
+                                      items, diag, meta, secrets, facts):
+                return
             written.append(p)
         for p in written:
             self.out(f"report written: {paint(os.path.abspath(p), 'accent')}")
@@ -2391,8 +2449,9 @@ class SSLDoctorCLI:
 
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if servermod.askpass_reply():          # started by ssh as its password helper
-        return 0
+    helper_status = servermod.askpass_reply()   # started by ssh as its password helper?
+    if helper_status is not None:
+        return helper_status
     if argv[:1] == ["agent"]:
         from . import agent
         try:

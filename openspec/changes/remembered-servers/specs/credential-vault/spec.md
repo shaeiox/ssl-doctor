@@ -95,3 +95,26 @@ value or its length.
 #### Scenario: Connect with a saved password
 - **WHEN** `/server connect files` uses the saved password
 - **THEN** the session notes the vault it came from and nothing about the value
+
+### Requirement: An empty password is never used
+An empty or whitespace-only password SHALL never be sent to a server, saved in
+a vault or returned from one. At the password prompt it SHALL be refused and
+asked again, up to three times, after which the connection is cancelled;
+cancelling the prompt SHALL be reported as cancelled, not as an empty password.
+
+#### Scenario: Enter at the password prompt
+- **WHEN** the operator presses Enter without typing a password
+- **THEN** the CLI says the password cannot be empty and asks again, and no connection is attempted with it
+
+#### Scenario: Three empty answers
+- **WHEN** the operator gives three empty answers
+- **THEN** the connection is cancelled without running ssh
+
+#### Scenario: Cancel the prompt
+- **WHEN** the operator presses Ctrl-C at the password prompt
+- **THEN** the CLI reports that password entry was cancelled and nothing was sent
+
+#### Scenario: Empty password reaches the askpass helper
+- **WHEN** ssh starts the askpass helper and no usable password is in its environment
+- **THEN** the helper prints nothing and exits with a non-zero status, so ssh does not send an empty password
+

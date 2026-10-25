@@ -30,6 +30,12 @@ class VaultError(Exception):
     """The vault refused or failed; the message never contains the secret."""
 
 
+def _require_secret(secret: str) -> None:
+    # an empty saved password would be replayed at every connect
+    if not isinstance(secret, str) or not secret.strip():
+        raise VaultError("refusing to save an empty password")
+
+
 def target_name(username: str, host: str, port: int) -> str:
     return f"{TARGET_PREFIX}{username}@{host}:{port}"
 
@@ -87,11 +93,12 @@ class MemoryVault(SecretVault):
 
     def get(self, target, fingerprints):
         item = self.items.get(target)
-        if item and set(item[1]) & set(fingerprints):
+        if item and item[0].strip() and set(item[1]) & set(fingerprints):
             return item[0]
         return None
 
     def put(self, target, secret, fingerprints):
+        _require_secret(secret)
         self.items[target] = (secret, tuple(fingerprints))
 
     def delete(self, target):
@@ -104,6 +111,21 @@ _CRED_TYPE_GENERIC = 1
 _CRED_PERSIST_LOCAL_MACHINE = 2       # per user, this machine; not roaming
 _CRED_MAX_BLOB = 5 * 512              # CRED_MAX_CREDENTIAL_BLOB_SIZE
 _ERROR_NOT_FOUND = 1168
+
+
+def _contained(action: str):
+    """Turn OS-level failures of a vault call into a VaultError for the caller."""
+    def wrap(method):
+        def call(self, *args, **kwargs):
+            try:
+                return method(self, *args, **kwargs)
+            except VaultError:
+                raise
+            except (OSError, ctypes.ArgumentError) as exc:
+                raise VaultError(f"{self.name} could not {action} ({exc})") from None
+        call.__name__, call.__doc__ = method.__name__, method.__doc__
+        return call
+    return wrap
 
 
 class _FILETIME(ctypes.Structure):
@@ -153,7 +175,9 @@ class WindowsCredentialVault(SecretVault):
         return VaultError(f"Windows Credential Manager could not {action} "
                           f"(error {self._last_error()})")
 
+    @_contained("save the password")
     def put(self, target, secret, fingerprints):
+        _require_secret(secret)
         blob = secret.encode("utf-8")
         if len(blob) > _CRED_MAX_BLOB:
             raise VaultError("the password is too long for Windows Credential Manager")
@@ -172,6 +196,7 @@ class WindowsCredentialVault(SecretVault):
         finally:
             ctypes.memset(buffer, 0, ctypes.sizeof(buffer))
 
+    @_contained("read the saved password")
     def get(self, target, fingerprints):
         found = ctypes.POINTER(_CREDENTIALW)()
         api = self._advapi()
@@ -185,12 +210,18 @@ class WindowsCredentialVault(SecretVault):
             if not set(fp for fp in saved if fp) & set(fingerprints):
                 return None
             size = cred.CredentialBlobSize
-            secret = ctypes.string_at(cred.CredentialBlob, size).decode("utf-8")
-            ctypes.memset(cred.CredentialBlob, 0, size)
-            return secret
+            try:
+                secret = ctypes.string_at(cred.CredentialBlob, size).decode("utf-8")
+            except UnicodeDecodeError:
+                raise VaultError("the saved password is not valid text; forget it and "
+                                 "save it again") from None
+            finally:
+                ctypes.memset(cred.CredentialBlob, 0, size)
+            return secret if secret.strip() else None
         finally:
             api.CredFree(found)
 
+    @_contained("delete the saved password")
     def delete(self, target):
         if not self._advapi().CredDeleteW(target, _CRED_TYPE_GENERIC, 0):
             if self._last_error() != _ERROR_NOT_FOUND:
@@ -249,6 +280,7 @@ class SecretServiceVault(SecretVault):
         return True, ""
 
     def put(self, target, secret, fingerprints):
+        _require_secret(secret)
         if not fingerprints:
             raise VaultError("no host-key fingerprint to bind the password to")
         self.delete(target)
@@ -264,7 +296,7 @@ class SecretServiceVault(SecretVault):
         for fp in fingerprints:
             proc = self._call(["lookup", "application", "ssl-doctor", "target", target,
                                "hostkey", fp])
-            if proc.returncode == 0 and proc.stdout:
+            if proc.returncode == 0 and proc.stdout.strip():
                 return proc.stdout[:-1] if proc.stdout.endswith("\n") else proc.stdout
             if proc.returncode != 0 and (proc.stderr or "").strip():
                 raise VaultError(f"the Secret Service could not be read: {self._summary(proc)}")

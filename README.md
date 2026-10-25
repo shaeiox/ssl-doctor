@@ -343,6 +343,8 @@ for the optional service in [`service/`](service/); see
 - Host keys are verified against `~/.ssl-doctor/known_hosts` before every SSH
   connection; **unknown keys require an explicit "yes", changed keys are
   refused** (MITM alarm) — never silently accepted.
+- An empty or whitespace-only SSH password is never sent or saved: the prompt
+  asks again (at most three times), and the askpass helper refuses it.
 - SSH passwords never appear on the command line: an `SSH_ASKPASS` helper
   (0700, private state dir) answers in a detached session, and is deleted on
   disconnect. On Windows the helper is a `.cmd` (or the `ssl-doctor.exe` build

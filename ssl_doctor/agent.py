@@ -140,15 +140,29 @@ def handle_job(client: AgentClient, role: str, job: Dict[str, Any]) -> str:
 # ------------------------------------------------------------------ state + CLI
 
 def save_state(path: str, state: Dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        json.dump(state, fh)
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump(state, fh)
+    except OSError as exc:
+        raise AgentError(f"cannot write agent state {path}: {exc.strerror or exc}") from None
 
 
 def load_state(path: str) -> Dict[str, Any]:
-    with open(path) as fh:
-        return json.load(fh)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            state = json.load(fh)
+    except FileNotFoundError:
+        raise AgentError(f"no agent state at {path}: run `ssl-doctor agent enroll "
+                         "<url> <token>` first (or pass --state FILE)") from None
+    except OSError as exc:
+        raise AgentError(f"cannot read agent state {path}: {exc.strerror or exc}") from None
+    except ValueError:
+        raise AgentError(f"agent state {path} is not valid JSON; enroll again") from None
+    if not isinstance(state, dict):
+        raise AgentError(f"agent state {path} is not an agent state document; enroll again")
+    return state
 
 
 def serve(state: Dict[str, Any], once: bool = False, wait: float = 20.0) -> int:
