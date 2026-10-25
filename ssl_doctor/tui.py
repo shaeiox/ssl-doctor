@@ -12,7 +12,8 @@ This module owns presentation only.  It never imports the check code: the CLI
 passes in a renderer, a capture stream and the command handler, which keeps the
 same ``execute()`` dispatch serving both presentations.
 
-Stdlib only: ``termios``/``select`` on POSIX, ``msvcrt`` on Windows.  When
+Stdlib only: ``termios``/``select`` on POSIX, console input records through
+``ctypes`` on Windows.  When
 neither is usable, :func:`enabled` returns ``False`` and the line-oriented REPL
 runs instead.
 """
@@ -20,6 +21,7 @@ runs instead.
 from __future__ import annotations
 
 import codecs
+import ctypes
 import os
 import re
 import select
@@ -58,6 +60,37 @@ COMPOSER_ROWS = 3
 # waiting for an answer, or running one (input is not accepted)
 COMPOSER_ROLES = {"ready": "primary", "ask": "accent", "busy": "muted"}
 HISTORY_LIMIT = 200
+
+
+# Windows console input (ReadConsoleInputW)
+_ENABLE_VT_INPUT = 0x0200
+_CONSOLE_COOKED = 0x0001 | 0x0002 | 0x0004   # processed, line, echo input
+_KEY_EVENT = 0x0001
+_MOUSE_EVENT = 0x0002
+_MOUSE_MOVED = 0x0001
+_MOUSE_WHEELED = 0x0004
+_WINDOWS_VKEYS = {0x26: "up", 0x28: "down", 0x27: "right", 0x25: "left",
+                  0x24: "home", 0x23: "end", 0x21: "pageup", 0x22: "pagedown"}
+
+
+class _KEY_EVENT_RECORD(ctypes.Structure):
+    _fields_ = [("bKeyDown", ctypes.c_int32), ("wRepeatCount", ctypes.c_uint16),
+                ("wVirtualKeyCode", ctypes.c_uint16), ("wVirtualScanCode", ctypes.c_uint16),
+                ("UnicodeChar", ctypes.c_uint16), ("dwControlKeyState", ctypes.c_uint32)]
+
+
+class _MOUSE_EVENT_RECORD(ctypes.Structure):
+    _fields_ = [("X", ctypes.c_int16), ("Y", ctypes.c_int16),
+                ("dwButtonState", ctypes.c_uint32), ("dwControlKeyState", ctypes.c_uint32),
+                ("dwEventFlags", ctypes.c_uint32)]
+
+
+class _INPUT_EVENT(ctypes.Union):
+    _fields_ = [("KeyEvent", _KEY_EVENT_RECORD), ("MouseEvent", _MOUSE_EVENT_RECORD)]
+
+
+class _INPUT_RECORD(ctypes.Structure):
+    _fields_ = [("EventType", ctypes.c_uint16), ("Event", _INPUT_EVENT)]
 
 
 class MouseEvent(NamedTuple):
@@ -586,8 +619,8 @@ class KeyReader:
         self._saved = None
         self._windows = False
         self._console_mode = None        # Windows: input mode to restore after a key
-        self.msvcrt = None               # Windows modules, injectable for tests
-        self.kernel32 = None
+        self._left_down = False          # Windows: left button state of MOUSE_EVENT records
+        self.kernel32 = None             # injectable for tests
         try:
             import termios  # noqa: F401
         except Exception:
@@ -721,57 +754,122 @@ class KeyReader:
         return "unknown"
 
     def _windows_vt_input(self, on: bool) -> None:
-        """Ask the console for VT input while one key is read, then restore it.
+        """Put the console in raw VT input for one key, then restore it.
 
-        Without ENABLE_VIRTUAL_TERMINAL_INPUT the console delivers mouse use as
-        input records that msvcrt never sees, so Windows Terminal's SGR mouse
-        reports (wheel, press, drag, release) would not reach the shell. The
-        previous mode comes back after every key, like the POSIX raw mode.
+        Raw means no line editing, no echo and no Ctrl-C processing (Ctrl-C is
+        read as a key, as `msvcrt.getwch` used to deliver it). VT input makes
+        Windows Terminal's SGR mouse reports (wheel, press, drag, release)
+        arrive as escape sequences. The previous mode comes back after every
+        key, like the POSIX raw mode.
         """
         try:
-            kernel32 = self.kernel32
-            if kernel32 is None:
-                import ctypes
-                kernel32 = self.kernel32 = ctypes.windll.kernel32
+            kernel32 = self._kernel32()
             handle = kernel32.GetStdHandle(-10)           # STD_INPUT_HANDLE
             if on:
-                import ctypes
                 mode = ctypes.c_uint32()
                 if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                     return
                 self._console_mode = mode.value
-                kernel32.SetConsoleMode(handle, mode.value | 0x0200)  # VT input
+                kernel32.SetConsoleMode(
+                    handle, (mode.value & ~_CONSOLE_COOKED) | _ENABLE_VT_INPUT)
             elif self._console_mode is not None:
                 kernel32.SetConsoleMode(handle, self._console_mode)
                 self._console_mode = None
         except Exception:
             self._console_mode = None                     # never strand the console
 
+    def _kernel32(self):
+        if self.kernel32 is None:
+            self.kernel32 = ctypes.windll.kernel32
+        return self.kernel32
+
     def _read_key_windows(self):
-        msvcrt = self.msvcrt
-        if msvcrt is None:
-            import msvcrt
-        char = msvcrt.getwch()
-        if char in ("\x00", "\xe0"):
-            code = msvcrt.getwch()
-            return {"H": "up", "P": "down", "M": "right", "K": "left",
-                    "G": "home", "O": "end", "I": "pageup", "Q": "pagedown",
-                    }.get(code, "unknown")
-        if char == "\x1b":
-            # with VT input, keys and mouse reports arrive as escape sequences;
-            # read the rest of one so it is never typed into the composer
-            sequence = ""
-            deadline = time.monotonic() + 0.05
-            while time.monotonic() < deadline:
-                if not msvcrt.kbhit():
-                    time.sleep(0.002)
-                    continue
-                part = msvcrt.getwch()
-                sequence += part
-                if part == "~" or (part.isalpha() and sequence not in ("[", "O")):
-                    break
-            return self._decode_escape(sequence.encode("utf-8", "replace"))
-        return self._decode_bytes(char.encode("utf-8", "replace"))
+        """Read console input records directly.
+
+        `msvcrt.getwch` cannot be used: the UCRT sets the input mode to 0 for
+        the duration of the call (dropping ENABLE_VIRTUAL_TERMINAL_INPUT) and
+        skips every non-key record, so no mouse report could ever arrive.
+        """
+        while True:
+            event = self._windows_event(None)
+            if event is None:
+                return "eof"
+            if event == "\x1b":
+                return self._windows_escape()
+            if event != "":
+                return event
+
+    def _windows_escape(self):
+        # with VT input, keys and mouse reports arrive as escape sequences;
+        # read the rest of one so it is never typed into the composer
+        sequence = ""
+        deadline = time.monotonic() + 0.05
+        while True:
+            part = self._windows_event(deadline)
+            if part is None:
+                break
+            if not isinstance(part, str) or len(part) != 1:
+                if part != "":
+                    self._pending.append(part)            # a whole key; keep it
+                continue
+            sequence += part
+            if part == "~" or (part.isalpha() and sequence not in ("[", "O")):
+                break
+        return self._decode_escape(sequence.encode("utf-8", "replace"))
+
+    def _windows_event(self, deadline: Optional[float]):
+        """One input record decoded: a character, a key name, a MouseEvent,
+        "" for a record to skip, or None (no console, or `deadline` passed)."""
+        kernel32 = self._kernel32()
+        handle = kernel32.GetStdHandle(-10)
+        if deadline is not None:
+            pending = ctypes.c_uint32()
+            if not kernel32.GetNumberOfConsoleInputEvents(handle, ctypes.byref(pending)):
+                return None
+            if not pending.value:
+                wait = int(max(0.0, deadline - time.monotonic()) * 1000)
+                if not wait or kernel32.WaitForSingleObject(handle, wait) != 0:
+                    return None
+        record = _INPUT_RECORD()
+        count = ctypes.c_uint32()
+        if not kernel32.ReadConsoleInputW(handle, ctypes.byref(record), 1,
+                                          ctypes.byref(count)) or not count.value:
+            return None
+        if record.EventType == _KEY_EVENT:
+            key = record.Event.KeyEvent
+            if not key.bKeyDown:
+                return ""
+            code = key.UnicodeChar
+            if not code:
+                return _WINDOWS_VKEYS.get(key.wVirtualKeyCode, "")
+            if 0xD800 <= code < 0xDC00:                   # high surrogate: one more record
+                low = self._windows_event(time.monotonic() + 0.05)
+                if isinstance(low, str) and len(low) == 1 and 0xDC00 <= ord(low) < 0xE000:
+                    return chr(0x10000 + ((code - 0xD800) << 10) + (ord(low) - 0xDC00))
+                return ""
+            char = chr(code)
+            if char == "\x1b" or 0xDC00 <= code < 0xE000:  # escape, or a pair's low half
+                return char
+            return self._decode_bytes(char.encode("utf-8", "replace"))
+        if record.EventType == _MOUSE_EVENT:
+            return self._windows_mouse(record.Event.MouseEvent)
+        return ""
+
+    def _windows_mouse(self, mouse):
+        """A native MOUSE_EVENT record (VT input was off when it arrived)."""
+        x, y = mouse.X + 1, mouse.Y + 1
+        if mouse.dwEventFlags & _MOUSE_WHEELED:
+            delta = (mouse.dwButtonState >> 16) & 0xFFFF
+            return "wheeldown" if delta & 0x8000 else "wheelup"
+        left = bool(mouse.dwButtonState & 0x1)
+        was_down, self._left_down = self._left_down, left
+        if left and not was_down:
+            return MouseEvent("press", x, y)
+        if left and mouse.dwEventFlags & _MOUSE_MOVED:
+            return MouseEvent("drag", x, y)
+        if was_down and not left:
+            return MouseEvent("release", x, y)
+        return ""
 
 
 # -------------------------------------------------------------------- session

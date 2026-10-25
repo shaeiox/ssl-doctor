@@ -4,8 +4,8 @@ topic: copy-to-clipboard
 tags: [tui, mouse, clipboard, osc52]
 status: done
 trust: ai-inferred
-last_done: 2026-10-24
-version: 2
+last_done: 2026-10-25
+version: 3
 ---
 
 **What:** (OpenSpec `add-copy-to-clipboard`) drag-to-copy over the full-screen transcript,
@@ -26,6 +26,14 @@ copied. Now native first: `clipboard.windows_copy` (Win32 API) and `clipboard.x1
 tools, OSC 52 always on a tty. Escape-only copies say "copy not confirmed" + Shift+drag hint.
 Windows `KeyReader` turns on ENABLE_VIRTUAL_TERMINAL_INPUT per key and reads ESC sequences whole.
 Verify with `SSL_DOCTOR_TEST_X11=1` (replaces the real clipboard). Tests must pass `native=[]`.
+
+**v3 (field bug, Windows):** wheel/drag/copy dead on Windows (Py 3.12). Root cause: UCRT
+`_getwch` saves the input mode, sets it to **0** during the read and keeps only KEY_EVENT records,
+so v2's per-key ENABLE_VIRTUAL_TERMINAL_INPUT was wiped; the terminal was in ?1002h mode (no native
+selection) and no report arrived. Now `KeyReader._windows_event` reads `ReadConsoleInputW` (ctypes
+`_INPUT_RECORD`) under `(mode & ~processed/line/echo) | VT_INPUT`, plus native MOUSE_EVENT records
+(wheel, left press/drag/release). Never go back to `msvcrt.getwch` for the shell. Test fake
+`WindowsConsoleInput.Kernel32` records the mode at each read.
 
 **Gotcha:** tests that call `_tui_run()` directly must `set_capture_width(0)` afterwards, or
 later plain-mode tests draw frames.

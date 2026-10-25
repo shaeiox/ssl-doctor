@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-24 · done: v0.8.0 released (/report agent, copy to clipboard, full-screen shell), merged to master, tagged & pushed · next: verify copy in Windows Terminal · blocker: none
+> resume 2026-10-25 · done: Windows mouse fix (getwch reset console mode to 0 → ReadConsoleInputW), uncommitted · next: user verifies wheel/drag/copy in Windows Terminal + conhost · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md
@@ -17,6 +17,6 @@
 - legacy-tls-diagnosis-semantics → default_probe states, Finding.uncertainty, diagnosis.unresolved, verify-first remediation, endpoint coverage, contract 1.5   [✓ done 2026-10-24 · v1] → projects/ssl-doctor/legacy-tls-diagnosis-semantics.md
 - tls-handshake-attribution → failure_kind classification, stall retry, probe address pinning, network-vs-server attribution   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/tls-handshake-attribution.md
 - agent-report → /report agent: AI-ready md+json from the redacted contract doc, verbatim prompt, atomic write   [✓ done 2026-10-24 · v1] → projects/ssl-doctor/agent-report.md
-- copy-to-clipboard → drag-to-copy, /copy, Ctrl-Y; native Win32/X11 clipboard, tools, OSC 52; Windows VT mouse   [✓ done 2026-10-24 · v2] → projects/ssl-doctor/copy-to-clipboard.md
+- copy-to-clipboard → drag-to-copy, /copy, Ctrl-Y; native Win32/X11 clipboard, tools, OSC 52; Windows ReadConsoleInputW mouse   [✓ done 2026-10-25 · v3] → projects/ssl-doctor/copy-to-clipboard.md
 - ui-design-system → Theme, full-screen shell, result frames, streaming into frames, centred banner, chat composer   [✓ done 2026-10-24 · v6] → projects/ssl-doctor/ui-design-system.md
 - _decisions → One-line decision log: colours, frames, static input, report pills   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/_decisions.md

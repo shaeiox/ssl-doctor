@@ -226,21 +226,19 @@ if __name__ == "__main__":
 
 
 class WindowsConsoleInput(unittest.TestCase):
-    """The Windows reader: VT input for one key, escape sequences read whole."""
-
-    class Msvcrt:
-        def __init__(self, text):
-            self.queue = list(text)
-
-        def getwch(self):
-            return self.queue.pop(0)
-
-        def kbhit(self):
-            return bool(self.queue)
+    """The Windows reader: console records read under a raw VT input mode."""
 
     class Kernel32:
-        def __init__(self, mode=0x01F7):
-            self.mode, self.sets = mode, []
+        """A console input buffer: key records for text, plus mouse records.
+
+        Records are read only through ReadConsoleInputW, and the mode in force
+        at each read is recorded -- `msvcrt.getwch` forced it to 0, which is
+        what kept mouse reports from ever arriving (the field bug).
+        """
+
+        def __init__(self, records=(), mode=0x01F7):
+            self.mode, self.sets, self.read_modes = mode, [], []
+            self.records = list(records)
 
         def GetStdHandle(self, which):
             return 10
@@ -254,35 +252,93 @@ class WindowsConsoleInput(unittest.TestCase):
             self.mode = mode
             return 1
 
-    def reader(self, text, kernel32=None):
+        def GetNumberOfConsoleInputEvents(self, handle, count_ref):
+            count_ref._obj.value = len(self.records)
+            return 1
+
+        def WaitForSingleObject(self, handle, ms):
+            return 0 if self.records else 0x102           # WAIT_TIMEOUT
+
+        def ReadConsoleInputW(self, handle, record_ref, length, count_ref):
+            if not self.records:
+                return 0
+            self.read_modes.append(self.mode)
+            kind, fields = self.records.pop(0)
+            record = record_ref._obj
+            record.EventType = kind
+            target = record.Event.KeyEvent if kind == tui._KEY_EVENT else record.Event.MouseEvent
+            for name, value in fields.items():
+                setattr(target, name, value)
+            count_ref._obj.value = 1
+            return 1
+
+    @staticmethod
+    def keys(text):
+        return [(tui._KEY_EVENT, {"bKeyDown": 1, "UnicodeChar": ord(c), "wVirtualKeyCode": 0})
+                for c in text]
+
+    @staticmethod
+    def vkey(code):
+        return (tui._KEY_EVENT, {"bKeyDown": 1, "UnicodeChar": 0, "wVirtualKeyCode": code})
+
+    @staticmethod
+    def mouse(x, y, buttons=0, flags=0):
+        return (tui._MOUSE_EVENT, {"X": x, "Y": y, "dwButtonState": buttons,
+                                   "dwEventFlags": flags})
+
+    def reader(self, records, kernel32=None):
         reader = tui.KeyReader(stream=io.StringIO())
         reader._windows = True
-        reader.msvcrt = self.Msvcrt(text)
-        reader.kernel32 = kernel32 or self.Kernel32()
+        reader.kernel32 = kernel32 or self.Kernel32(records)
         return reader
 
     def test_mouse_reports_are_decoded_not_typed(self):
-        reader = self.reader("\x1b[<0;12;5M\x1b[<32;20;6M\x1b[<0;20;6m")
-        self.assertEqual([reader.read_key() for _ in range(3)],
+        reader = self.reader(self.keys("\x1b[<0;12;5M\x1b[<32;20;6M\x1b[<0;20;6m\x1b[<64;1;1M"))
+        self.assertEqual([reader.read_key() for _ in range(4)],
                          [MouseEvent("press", 12, 5), MouseEvent("drag", 20, 6),
-                          MouseEvent("release", 20, 6)])
+                          MouseEvent("release", 20, 6), "wheelup"])
 
-    def test_vt_input_is_on_only_while_reading_a_key(self):
-        kernel32 = self.Kernel32(mode=0x01F7)
-        reader = self.reader("a", kernel32)
+    def test_records_are_read_in_raw_vt_mode(self):
+        # regression: msvcrt.getwch reset the mode to 0 while it read, so the
+        # console never sent wheel/drag reports and Windows Terminal kept them
+        kernel32 = self.Kernel32(self.keys("a"), mode=0x01F7)
+        reader = self.reader(None, kernel32)
         self.assertEqual(reader.read_key(), "a")
-        self.assertEqual(kernel32.sets, [0x01F7 | 0x0200, 0x01F7])   # on, then restored
+        [mode] = kernel32.read_modes
+        self.assertTrue(mode & tui._ENABLE_VT_INPUT)
+        self.assertFalse(mode & 0x0007)                     # no line/echo/processed input
+        self.assertEqual(kernel32.sets, [(0x01F7 & ~0x0007) | 0x0200, 0x01F7])  # on, restored
+
+    def test_native_mouse_records_scroll_and_select(self):
+        # a report that arrives between keys (VT input off) is a MOUSE_EVENT record
+        reader = self.reader([
+            self.mouse(0, 0, buttons=0x00780000, flags=tui._MOUSE_WHEELED),
+            self.mouse(0, 0, buttons=0xFF880000, flags=tui._MOUSE_WHEELED),
+            self.mouse(11, 4, buttons=1),
+            self.mouse(19, 5, buttons=1, flags=tui._MOUSE_MOVED),
+            self.mouse(19, 5, flags=tui._MOUSE_MOVED),      # hover: skipped
+            self.mouse(19, 5, buttons=0),
+        ] + self.keys("z"))
+        self.assertEqual([reader.read_key() for _ in range(6)],
+                         ["wheelup", "wheeldown", MouseEvent("press", 12, 5),
+                          MouseEvent("drag", 20, 6), MouseEvent("release", 20, 6), "z"])
 
     def test_keys_still_decode(self):
-        reader = self.reader("\x1b[A\x1bOB\x1b[5~\xe0Kx\x1b")
-        self.assertEqual([reader.read_key() for _ in range(6)],
-                         ["up", "down", "pageup", "left", "x", "escape"])
+        records = self.keys("\x1b[A\x1bOB\x1b[5~") + [self.vkey(0x25)] + self.keys("x\x03\x1b")
+        records.insert(1, (tui._KEY_EVENT, {"bKeyDown": 0, "UnicodeChar": 0x1b}))  # key-up: skipped
+        reader = self.reader(records)
+        self.assertEqual([reader.read_key() for _ in range(7)],
+                         ["up", "down", "pageup", "left", "x", "ctrl-c", "escape"])
+
+    def test_surrogate_pairs_are_one_key(self):
+        reader = self.reader(self.keys("\ud83d\udd12"))
+        self.assertEqual(reader.read_key(), "\U0001F512")
 
     def test_a_console_without_modes_still_reads_keys(self):
         class NoConsole(self.Kernel32):
             def GetConsoleMode(self, handle, mode_ref):
                 return 0
-        kernel32 = NoConsole()
-        reader = self.reader("q", kernel32)
+        kernel32 = NoConsole(self.keys("q"))
+        reader = self.reader(None, kernel32)
         self.assertEqual(reader.read_key(), "q")
         self.assertEqual(kernel32.sets, [])                 # nothing to restore
