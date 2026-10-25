@@ -1,4 +1,4 @@
-# SSL Doctor v0.8.0
+# SSL Doctor v0.8.1
 
 Offline-capable SSL/TLS diagnostic tool for IT support engineers. It answers:
 *why does this TLS connection fail — the client machine, the nginx server, the
@@ -69,7 +69,7 @@ evidence line gets the full width of the window.
                       ██     ██ ██       ██  ██ ██  ██ ██       ██   ██  ██ ██  ██
                   ██████ ██████ ██████   █████  ██████ ██████   ██   ██████ ██  ██
                    offline ssl/tls diagnostics · client · server · chain · nginx
-                                     creator: eleven  ·  v0.8.0
+                                     creator: eleven  ·  v0.8.1
                 ════════════════════════════════════════════════════════════════════
 
   Welcome. SSL Doctor is read-only; credentials are never logged.
@@ -135,6 +135,9 @@ banner is centred in it and drops from the wordmark to a compact form when the
 window is shorter than 24 rows or narrower than the wordmark.
 Mouse reporting (wheel, press, drag, release) is switched on only while the
 composer is reading, so mouse bytes can never end up inside a running check;
+on Windows the shell reads console input records directly (VT mouse reports
+and native mouse events alike), so wheel, drag-select and copy work in
+Windows Terminal as on Linux;
 during a check, and with Shift+drag at any time, the terminal's own selection
 works as usual. Copies need no extra software: on Windows they use the Win32
 clipboard, on Linux/X11 (including XWayland) SSL Doctor owns the X clipboard

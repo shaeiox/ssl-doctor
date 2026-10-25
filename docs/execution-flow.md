@@ -168,6 +168,11 @@ out; any error there falls back to the line loop below.
 - Mouse reporting (`?1002h ?1006h`) is on only while the composer reads:
   the wheel scrolls, a drag selects transcript text and the release copies it;
   `Ctrl-Y` copies the previous response.
+- On Windows, `KeyReader` reads `ReadConsoleInputW` records under its own raw
+  VT input mode for one key, then restores the mode. It decodes VT mouse
+  reports and native `MOUSE_EVENT` records. `msvcrt.getwch()` is not used: the
+  UCRT resets the input mode to 0 while it reads and drops non-key records, so
+  no mouse report would arrive.
 - Copies go through `ssl_doctor/clipboard.py`: the native OS clipboard (Win32,
   or an X11 helper process), a clipboard tool as fallback, and the OSC 52
   terminal escape.

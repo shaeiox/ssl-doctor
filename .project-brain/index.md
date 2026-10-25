@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-25 · done: Windows mouse fix (getwch reset console mode to 0 → ReadConsoleInputW), uncommitted · next: user verifies wheel/drag/copy in Windows Terminal + conhost · blocker: none
+> resume 2026-10-25 · done: v0.8.1 Windows mouse fix (getwch reset console mode to 0 → ReadConsoleInputW), merged to master, tagged & pushed · next: user verifies wheel/drag/copy in Windows Terminal + conhost · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md

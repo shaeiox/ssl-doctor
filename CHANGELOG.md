@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.8.1 — Windows mouse wheel, selection and copy
+
+The full-screen shell's mouse wheel, drag-to-select and copy now work on
+Windows, and the dependencies are listed in `requirements*.txt`. No change to
+checks, output or the findings contract (still 1.5).
 
 ### Fixed
 
