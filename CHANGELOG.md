@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## v0.8.4 — server-side checks run again
+
+`/scan` and `/server` checks over SSH get past "reading server identity"
+again. No change to checks or the findings contract (still 1.5).
 
 ### Fixed
 
