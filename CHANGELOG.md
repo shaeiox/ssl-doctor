@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Mouse wheel, selection and copy on Windows.** The shell read keys with
+  `msvcrt.getwch()`, which resets the console input mode to 0 for the length of
+  the call and drops every non-key record, so the
+  `ENABLE_VIRTUAL_TERMINAL_INPUT` flag set just before it never took effect.
+  The terminal was in mouse-reporting mode (no native selection) but no report
+  ever reached the shell. The Windows reader now reads `ReadConsoleInputW`
+  records under its own raw VT mode, and also decodes native `MOUSE_EVENT`
+  records that arrive between keys.
+
 ### Added
 
 - **`requirements.txt`** and **`requirements-dev.txt`** spell out the Python

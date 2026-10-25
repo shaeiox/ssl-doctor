@@ -7,10 +7,10 @@
 #   a project's finished topics collapse past 15: '+K more, oldest <date>' (⚠ always kept)
 #   ! <rule> = HARD RULE, never violate (brain-wide on top, or under a project) · ~ = session resume
 #   @ <name> <status> <date> = person (people/<name>.md) · status: active|prospect|paused|closed
-@src index.md  @gen 2026-10-24  @updated 2026-10-24
+@src index.md  @gen 2026-10-25  @updated 2026-10-25
 
 P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
-  ~ 2026-10-24 next: verify copy in Windows Terminal · blocker: none
+  ~ 2026-10-25 next: user verifies wheel/drag/copy in Windows Terminal + conhost · blocker: none
   architecture-and-scope ✓v 2026-10-24 v1
   chain-diagnosis ✓v 2026-10-24 v1
   server-ssh-nginx ✓v 2026-10-24 v1
@@ -20,6 +20,6 @@ P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
   legacy-tls-diagnosis-semantics ✓d 2026-10-24 v1
   tls-handshake-attribution ✓v 2026-10-24 v1
   agent-report ✓d 2026-10-24 v1
-  copy-to-clipboard ✓d 2026-10-24 v2
+  copy-to-clipboard ✓d 2026-10-25 v3
   ui-design-system ✓d 2026-10-24 v6
   _decisions ✓v 2026-10-24 v1
