@@ -114,19 +114,8 @@ def _role_sgr(role: str, mode: str) -> str:
 
 def _vt_enabled() -> bool:
     """Turn on ANSI processing for Windows consoles; False when unsupported."""
-    if os.name != "nt":
-        return True
-    try:
-        import ctypes
-
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
-        state = ctypes.c_uint32()
-        if not kernel32.GetConsoleMode(handle, ctypes.byref(state)):
-            return False
-        return bool(kernel32.SetConsoleMode(handle, state.value | 0x0004))
-    except Exception:
-        return False
+    from .termcaps import vt_output_available
+    return vt_output_available()
 
 
 def resolve_color_mode(stream=None, env=None, windows: Optional[bool] = None,
@@ -2537,7 +2526,9 @@ class SSLDoctorCLI:
 
     def _repl_tui(self) -> int:
         from . import tui as tuimod
+        terminal = getattr(self, "terminal", None)
         session = tuimod.TuiSession(renderer=self._tui_frame,
+                                    mouse=terminal.mouse if terminal else True,
                                     completer=self._completer(),
                                     on_copy=self.copy_text,
                                     last_response=lambda: self._last_response)
@@ -2590,8 +2581,14 @@ class SSLDoctorCLI:
 
     def repl(self) -> int:
         from . import tui as tuimod
+        self.terminal = tuimod.profile()
         if self.use_tui is None:
-            self.use_tui = tuimod.enabled()
+            self.use_tui = self.terminal.fullscreen
+            # a fallback the operator did not ask for is explained once
+            if (not self.terminal.fullscreen and self.terminal.reason
+                    and "turned off" not in self.terminal.reason
+                    and "not a terminal" not in self.terminal.reason):
+                self.note(f"line mode on {self.terminal.host}: {self.terminal.reason}")
         if self.use_tui:
             try:
                 return self._repl_tui()

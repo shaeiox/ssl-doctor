@@ -5,7 +5,7 @@ tags: [ui, terminal, colour, accessibility, claude-code, cli, banner, wordmark, 
 status: done
 trust: ai-inferred
 last_done: 2026-10-25
-version: 7
+version: 8
 ---
 
 **Problem:** The CLI looked like a generic script (16-colour ANSI constants, braille spinner, bare `ssl-doctor>` prompt, flat `[PASS]/[FAIL]` wall). Long `/scan` transcripts were hard to scan and a pending question was easy to miss. v1 still opened with an anonymous clean-text line, with no product mark and no author credit.
@@ -38,3 +38,6 @@ version: 7
 - `-c` batch output, redirected output and `--no-tui` are untouched; the shell never runs unless both stdin and stdout are terminals.
 
 **Notes:** `_USE_COLOR` remains as a compatibility alias for `_MODE != plain`. Frames are static: no alternate screen, no raw mode, no cursor addressing, no background writes while `input()` is blocked. Banner art is the only decorative element; the design system's "no ASCII art" rule was narrowed to "no art outside the startup banner".
+
+**v8 (terminal profiles, field bug "no wheel in cmd / Git Bash"):** alternate screen has no scrollback → the shell must receive the wheel. Classic conhost starts with Quick Edit on (mouse = native selection, no MOUSE_EVENT); winpty enables terminal mouse only for ENABLE_MOUSE_INPUT && ENABLE_EXTENDED_FLAGS && !QUICK_EDIT (winpty src/agent/ConsoleInput.cc shouldActivateTerminalMouse). Fix: `tui.console_read_mode(orig, mouse)` = raw VT input, QE off, MOUSE_INPUT + EXTENDED on (mouse off → MOUSE_INPUT off, QE untouched); `console_restore_mode` re-adds EXTENDED when QE was on. `ssl_doctor/termcaps.detect()` (pure) → TerminalProfile(host, fullscreen, mouse, reason): line mode for TUI off / non-tty / TERM=dumb / no key reader / Windows without VT output (`vt_output_available`, moved from cli). `SSL_DOCTOR_MOUSE=off`. `tui.enabled()` = `profile().fullscreen`; CLI notes unexpected fallbacks. Tests: `tests/test_terminal_profiles.py`. Not verified on real Windows yet.
+

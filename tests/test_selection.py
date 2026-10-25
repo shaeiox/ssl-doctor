@@ -307,7 +307,10 @@ class WindowsConsoleInput(unittest.TestCase):
         [mode] = kernel32.read_modes
         self.assertTrue(mode & tui._ENABLE_VT_INPUT)
         self.assertFalse(mode & 0x0007)                     # no line/echo/processed input
-        self.assertEqual(kernel32.sets, [(0x01F7 & ~0x0007) | 0x0200, 0x01F7])  # on, restored
+        # raw VT input, plus Quick Edit off / mouse input on so conhost and winpty
+        # deliver the wheel (test_terminal_profiles); the original mode comes back
+        expected = ((0x01F7 & ~0x0007) | 0x0200 | 0x0010 | 0x0080) & ~0x0040
+        self.assertEqual(kernel32.sets, [expected, 0x01F7])
 
     def test_native_mouse_records_scroll_and_select(self):
         # a report that arrives between keys (VT input off) is a MOUSE_EVENT record

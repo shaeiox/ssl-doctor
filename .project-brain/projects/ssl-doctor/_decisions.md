@@ -54,4 +54,5 @@ One line per settled choice: `YYYY-MM: chosen > rejected — why`.
 2026-10: resolve relative ssl_certificate/_key against nginx's conf_prefix (main config's directory) > against the -p prefix (as requested) — nginx's own source does the former; validating a prefix-relative file would check a file nginx never opens. The prefix-relative file is still reported when it exists.
 2026-10: per-server nginx settings as fields of the existing remembered-server profile > a second diagnostics store keyed by host:port — one identity and lifecycle; passwords stay in the vault with their own expiry.
 2026-10: new check id nginx.path_resolution (contract 1.6) > folding resolution into nginx.certref — the defect is exactly that resolution and content were not separable.
+2026-10: full-screen shell + console mouse mode (Quick Edit off only while reading) on conhost/winpty > forcing line mode on all Windows consoles — keeps one presentation and drag-to-copy; line mode stays the fallback where VT output or a console is missing.
 
