@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Nginx configuration discovery follows the running nginx.** SSL Doctor used
+  `nginx -T` from the account's `PATH` or a fixed `/etc/nginx` file list, so a
+  custom installation (e.g. `/opt/pvm/nginx/sbin/nginx -p … -c …`) was analysed
+  from an unrelated or partial file and reported "no server block listens on
+  port 443" — then diagnosed as "several server blocks claim this domain" —
+  while HTTPS worked. Discovery now starts from the running master (`-p`, `-c`,
+  `/proc/<pid>/exe`), its systemd unit and its executable's `-V` defaults,
+  falls back to a bounded search, follows the `include` graph (expanded where
+  each include appears) and attaches an evidence level. `nginx.conf` reports
+  that level and every file it could not read; "no server block on port N" is
+  concluded only from a complete configuration of the running instance
+  (otherwise `nginx.domain` is NOT TESTED); a conflict between server blocks is
+  claimed only when two blocks really share a name; and a working endpoint with
+  an unconfirmed configuration becomes an unresolved entry instead of a server
+  cause. `/server config` and web-server detection use the same discovery.
+  Executables named in process titles are run only when root-owned and not
+  group/world-writable. Check ids and the findings contract (1.5) are unchanged.
+
 ## v0.9.2 — no empty passwords, clearer errors
 
 Empty passwords are never sent or saved, and file, tool and state problems

@@ -7,6 +7,8 @@ evidence, and rank causes so the most likely explanation comes first.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -205,7 +207,13 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
     vhost = _first(server, "nginx.domain")
     certref = _first(server, "nginx.certref")
     nginx_prot = _first(server, "nginx.protocols")
-    chain_bad = [f for f in (chain, chainfile) if f and f.status == F.WARNING]
+    nginx_conf = _first(server, "nginx.conf")
+    # nginx findings support a server cause only when the analysed configuration
+    # is the running instance's, complete (nginx.conf PASS); documents from
+    # before configuration discovery carry no nginx.conf verdict to doubt
+    nginx_confirmed = nginx_conf is None or nginx_conf.status == F.PASS
+    chain_bad = [f for f in (chain, chainfile if nginx_confirmed else None)
+                 if f and f.status == F.WARNING]
     rootonly_missing = bool(rootonly and rootonly.status == F.FAIL and any(
         k in " ".join(rootonly.evidence).lower()
         for k in ("local issuer", "first certificate")))
@@ -225,15 +233,47 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
             "The server does not send the full chain (missing intermediates) - "
             "clients without a cached intermediate fail",
             ev, rec)
-    if vhost and vhost.status == F.WARNING:
-        fallback = "fallback" in " ".join(vhost.evidence)
-        add("probable", "server",
-            "The domain has no dedicated nginx server block - a fallback block "
-            "answers and may present the wrong certificate" if fallback else
-            "Several nginx server blocks claim this domain - only the first one "
-            "is used",
-            vhost.evidence, vhost.recommendation)
-    if certref and certref.status == F.WARNING:
+    if vhost and vhost.status == F.WARNING and nginx_confirmed:
+        joined = " ".join(vhost.evidence)
+        no_block = re.search(r"no server block listens on port (\d+)", joined)
+        if "fallback" in joined:
+            add("probable", "server",
+                "The domain has no dedicated nginx server block - a fallback block "
+                "answers and may present the wrong certificate",
+                vhost.evidence, vhost.recommendation)
+        elif "conflicting server name" in joined:
+            add("probable", "server",
+                "Several nginx server blocks claim this domain - only the first one "
+                "is used",
+                vhost.evidence, vhost.recommendation)
+        elif no_block:
+            add("probable", "server",
+                f"No nginx server block listens on port {no_block.group(1)} in the "
+                "analysed configuration - TLS for this endpoint is not served by it",
+                vhost.evidence, vhost.recommendation,
+                limitations=["limited to the configuration of the running nginx that "
+                             "SSL Doctor analysed; another process or device may "
+                             "terminate TLS"])
+    hs_ok = bool(hs and hs.status == F.PASS)
+    if (nginx_conf and nginx_conf.status in (F.WARNING, F.NOT_TESTED) and hs_ok
+            and not (verify and verify.status == F.FAIL)):
+        level = next((e.split(":", 1)[1].split(",")[0].strip()
+                      for e in nginx_conf.evidence if e.startswith("evidence level:")), "")
+        d.unresolved.append(Unresolved(
+            "nginx.conf", nginx_conf.status, "",
+            observed="the HTTPS endpoint completed a TLS handshake"
+                     + ("" if not verify else " and validation passed")
+                     + ", but the nginx configuration serving it could not be "
+                       "established" + (f" (evidence level: {level})" if level else ""),
+            conclusion="Network health and nginx configuration discovery are separate "
+                       "results: the endpoint works, and no server-side configuration "
+                       "fault is concluded from configuration SSL Doctor could not tie "
+                       "to the running nginx.",
+            uncertainty=list(nginx_conf.uncertainty),
+            recommendation="Identify the active configuration (the running master's "
+                           "-p/-c arguments) before changing any server-side "
+                           "configuration."))
+    if certref and certref.status == F.WARNING and nginx_confirmed:
         add("probable", "server",
             "The nginx server block for this domain has no ssl_certificate",
             certref.evidence, certref.recommendation)

@@ -63,6 +63,7 @@ ssl_doctor/cli.py :: main()
    - `ssl_doctor/netchecks.py` — remote DNS/TCP/TLS/HTTPS checks
    - `ssl_doctor/report.py` — HTML/JSON rendering
    - `ssl_doctor/server.py` — SSH transport and nginx analysis
+   - `ssl_doctor/nginx_discovery.py` — which configuration the running nginx uses
    - `ssl_doctor/profiles.py` — remembered server profiles
    - `ssl_doctor/vault.py` — saved passwords in the OS credential vault
    - `ssl_doctor/textcells.py` — text measured in terminal cells
@@ -343,7 +344,12 @@ It then calls `_gather_remote()`:
      - a new connection replaces the current session only once it is up; if it
        fails, the server step stops (the old session stays open)
      - `ServerSession.overview()` + `webserver_detection()`
-     - `ServerSession.nginx_scan(domain, port)`
+     - `ServerSession.nginx_scan(domain, port)`: `discover_nginx()` (cached per
+       connection) runs `nginx_discovery.discover()` through `_SshNginxProbe` —
+       A running master (`ps`, `/proc/<pid>`), B its systemd unit, C trusted
+       executable `-V` / `-T`, D bounded search only without a runtime main
+       configuration, E the include graph — and the findings are qualified by
+       the resulting evidence level
      - `ServerSession.compare_configured_vs_presented(presented_sha256)`
      - `ServerSession.log_scan()`
    - in combined mode without SSH, prints a note explaining how to run the
@@ -710,6 +716,7 @@ User                cli.py                  netchecks/local/server      analyze 
 | `ssl_doctor/tui.py` | Full-screen shell: layout, transcript (frames redrawn per width), composer, completion menu, mouse selection, key reader (termios / Windows console records) |
 | `ssl_doctor/textcells.py` | Width, clipping and wrapping in terminal cells (CJK/emoji = 2, combining = 0) |
 | `ssl_doctor/clipboard.py` | Copy to the clipboard: Win32, X11 helper, tools, OSC 52 |
+| `ssl_doctor/nginx_discovery.py` | Which configuration the running nginx uses: process/unit/`-V` parsing, nginx path semantics, include graph (expanded), evidence levels; pure, driven through a probe |
 | `ssl_doctor/profiles.py` | Remembered server profiles in `~/.ssl-doctor/profiles.json` (validated, atomic, owner-only) |
 | `ssl_doctor/vault.py` | Saved passwords: Windows Credential Manager, Secret Service (`secret-tool`), or none; host-key binding, expiry |
 | `ssl_doctor/findings.py` | `Finding` model, statuses/scopes, `FindingStore` |

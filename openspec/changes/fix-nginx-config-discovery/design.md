@@ -167,9 +167,11 @@ check ids require a contract minor version (1.6) and the information fits
   `nginx.domain`/`nginx.certref` are skipped unless `nginx.conf` is PASS.
 
 ### D11. Test strategy
-A `ScriptedRemote` fixture (command-prefix → `(rc, out, err, fatal)` table,
-plus a fake filesystem for D7's framed reads) drives `discover_nginx` and
-`nginx_scan` without SSH. `FakeSession` keeps its API: it reports one root
+Discovery reaches the server only through a probe object
+(`ServerSession.nginx_probe()`; `_SshNginxProbe` over `run()`). Tests drive
+`discover()` and `nginx_scan` with an in-memory host implementing the same
+interface (`tests/fixtures/nginx_host.py`); the SSH probe's shell scripts are
+exercised for real under `/bin/sh` through `LocalSession`. `FakeSession` keeps its API: it reports one root
 master `/usr/sbin/nginx` with trusted `stat`, answers `-V` with
 `--conf-path=/etc/nginx/nginx.conf` and `<exe> -T …` with its canned config, so
 existing nginx, diagnosis and contract tests run unchanged.

@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 from . import findings as F
+from . import nginx_discovery
 
 STATE_DIR = os.path.expanduser("~/.ssl-doctor")
 # Set in the environment of ssh when a frozen Windows build is its own
@@ -480,6 +481,269 @@ def askpass_reply() -> Optional[int]:
 
 # ---------------------------------------------------------------- SSH session
 
+_FILE_STATE_LABELS = {
+    "missing": "missing", "denied": "not readable", "nomatch": "matched no file",
+    "toolarge": "too large, not read", "unsupported": "unsupported, not read",
+    "limit": "not read (limit reached)",
+}
+
+
+def _nginx_conf_finding(d: "nginx_discovery.Discovery", username: str) -> F.Finding:
+    """`nginx.conf`: what was found, how it relates to the running nginx, what is missing."""
+    nd = nginx_discovery
+    title = "Nginx TLS configuration"
+    ev: List[str] = [f"evidence level: {d.level}"
+                     + ("" if d.level == nd.LEVEL_NONE else
+                        (", configuration graph complete" if d.complete
+                         else ", configuration graph INCOMPLETE"))]
+    ev += d.facts
+    if d.main_path:
+        ev.append(f"main configuration: {d.main_path} ({d.main_how})")
+    if d.via_dump:
+        ev.append(f"read with: {d.via_dump} (output used in memory only)")
+    read = d.read_files
+    if read:
+        ev.append(f"files read: {len(read)} - " + ", ".join(f.path for f in read[:8])
+                  + (" ..." if len(read) > 8 else ""))
+    for f in [f for f in d.files if f.state != nd.READ][:12]:
+        label = _FILE_STATE_LABELS.get(f.state, f.state)
+        ev.append(f"{f.path}: {label}" + (f" ({f.note})" if f.note else ""))
+    if d.roots:
+        ev.append("searched: " + ", ".join(f"{root} ({state})" for root, state in d.roots))
+    ev += [f"limitation: {item}" for item in d.limitations]
+    if d.level == nd.LEVEL_NONE:
+        return F.Finding(
+            "nginx.conf", title, F.NOT_TESTED, F.SCOPE_SERVER,
+            [f"no nginx configuration could be read by account '{username}'", *ev],
+            recommendation="Re-run with an account allowed to read the nginx "
+                           "configuration (and /proc/<pid> of the master), or use "
+                           "/server cert <path> [key] with the certificate paths directly.",
+            uncertainty=list(d.uncertainty))
+    if d.conclusive:
+        return F.Finding("nginx.conf", title, F.PASS, F.SCOPE_SERVER, ev,
+                         uncertainty=list(d.uncertainty))
+    return F.Finding(
+        "nginx.conf", title, F.WARNING, F.SCOPE_SERVER, ev,
+        detail="Conclusions about server blocks below are limited to the analysed files.",
+        recommendation="Confirm which configuration the running nginx uses (its -p/-c "
+                       "arguments) before changing anything; an account that can read "
+                       "/proc/<pid> of the master and the configuration gives a "
+                       "complete view.",
+        uncertainty=list(d.uncertainty))
+
+
+# ------------------------------------------------------- nginx discovery probe
+
+_FRAME = "@@SSLDOCTOR"
+
+
+class _SshNginxProbe:
+    """Read-only remote primitives for `nginx_discovery.discover()` over SSH.
+
+    Every command is a fixed template; paths and unit names were validated by
+    the caller (`nginx_discovery.SAFE_*`) and are quoted here as well, except
+    include patterns, which the shell must expand and which therefore carry
+    only safe characters. Any failure returns "unavailable", never raises.
+    """
+
+    def __init__(self, session: "ServerSession") -> None:
+        self.session = session
+
+    def _run(self, command: str) -> Tuple[int, str]:
+        rc, out, _err, fatal = self.session.run(command)
+        return (rc if not fatal else 255), ("" if fatal else out)
+
+    def processes(self):
+        rc, out = self._run(
+            "command -v ps >/dev/null 2>&1 || echo '@@SSLDOCTOR NOPS'; "
+            "ps -eo pid=,ppid=,user=,etimes=,args= 2>/dev/null | head -c 65536; echo; "
+            "echo \"@@SSLDOCTOR NOW $(date +%s)\"")
+        if rc == 255:
+            return None, None, "the account could not run the process listing"
+        # markers count only as whole lines: ps lists this very command line too
+        if "@@SSLDOCTOR NOPS" in out.splitlines():
+            return None, None, "ps is not installed"
+        now = None
+        lines = []
+        for line in out.splitlines():
+            if line.startswith("@@SSLDOCTOR NOW "):
+                value = line.split()[-1]
+                now = int(value) if value.isdigit() else None
+            else:
+                lines.append(line)
+        return "\n".join(lines), now, ""
+
+    def proc_details(self, pid: int):
+        pid = int(pid)
+        rc, out = self._run(
+            f"for k in exe cwd; do v=$(readlink /proc/{pid}/$k 2>/dev/null); "
+            "if [ -n \"$v\" ]; then echo \"@@SSLDOCTOR $k ok $v\"; "
+            "else echo \"@@SSLDOCTOR $k denied\"; fi; done; "
+            f"echo '@@SSLDOCTOR cgroup'; head -c 4096 /proc/{pid}/cgroup 2>/dev/null")
+        info: Dict = {"denied": []}
+        cgroup = []
+        in_cgroup = False
+        for line in out.splitlines():
+            if line.startswith("@@SSLDOCTOR cgroup"):
+                in_cgroup = True
+            elif line.startswith(_FRAME + " ") and not in_cgroup:
+                parts = line.split(None, 3)
+                if len(parts) == 4 and parts[2] == "ok":
+                    info[parts[1]] = parts[3]
+                elif len(parts) >= 3:
+                    info["denied"].append(f"/proc/{pid}/{parts[1]} is not readable")
+            elif in_cgroup:
+                cgroup.append(line)
+        info["cgroup"] = "\n".join(cgroup)
+        if rc == 255:
+            info["denied"].append(f"/proc/{pid} could not be inspected")
+        return info
+
+    def systemd_show(self, unit: str):
+        rc, out = self._run(f"systemctl show {shlex.quote(unit)} -p Id -p LoadState "
+                            "-p MainPID -p ExecStart -p FragmentPath --no-pager 2>/dev/null "
+                            "| head -c 16384")
+        # systemctl prints default properties for units that do not exist
+        return out if rc == 0 and "LoadState=loaded" in out.splitlines() else None
+
+    def systemd_units(self):
+        rc, out = self._run("command -v systemctl >/dev/null 2>&1 || exit 3; "
+                            "systemctl list-units --type=service --all --no-legend "
+                            "--plain '*nginx*' 2>/dev/null | head -n 20")
+        if rc not in (0, 1):
+            return None
+        return [line.split()[0] for line in out.splitlines() if line.split()]
+
+    def exe_stat(self, path: str):
+        rc, out = self._run(f"stat -Lc '%u %a %F' {shlex.quote(path)} 2>/dev/null")
+        parts = out.strip().split(None, 2)
+        if rc != 0 or len(parts) != 3 or not parts[0].isdigit():
+            return None
+        try:
+            return int(parts[0]), int(parts[1], 8), parts[2]
+        except ValueError:
+            return None
+
+    def build_info(self, exe: str):
+        rc, out = self._run(f"{shlex.quote(exe)} -V 2>&1 | head -c 8192")
+        return out if "nginx version" in out else None
+
+    def _dump(self, command: str):
+        _rc, out = self._run(f"{command} -T 2>/dev/null | head -c 4194304")
+        return out if "# configuration file " in out else ""
+
+    def dump(self, exe: str, prefix: str, conf: str):
+        args = [shlex.quote(exe)]
+        if prefix:
+            args += ["-p", shlex.quote(prefix)]
+        if conf:
+            args += ["-c", shlex.quote(conf)]
+        command = " ".join(args)
+        return self._dump(command), command + " -T"
+
+    def path_dump(self, override: str):
+        # an operator-set SSLDOCTOR_NGINX_CMD may carry its own arguments
+        command = override or "nginx"
+        return self._dump(command), command + " -T"
+
+    def mtimes(self, paths):
+        safe = [p for p in paths if nginx_discovery.SAFE_PATH.match(p)]
+        if not safe:
+            return {}
+        rc, out = self._run("stat -c '%Y %n' -- "
+                            + " ".join(shlex.quote(p) for p in safe) + " 2>/dev/null")
+        found = {}
+        for line in out.splitlines():
+            value, _, path = line.partition(" ")
+            if value.isdigit():
+                found[path] = int(value)
+        return found
+
+    def read(self, patterns):
+        nd = nginx_discovery
+        quoted = " ".join(shlex.quote(p) for p in patterns)
+        rc, out = self._run(
+            "command -v base64 >/dev/null 2>&1 || { echo '@@SSLDOCTOR NOBASE64'; exit 0; }; "
+            f"L={nd.MAX_FILE_BYTES}; T={nd.MAX_TOTAL_BYTES}; t=0; "
+            f"for pat in {quoted}; do n=0; "
+            "for f in $pat; do "                       # unquoted: the shell expands globs
+            "[ -f \"$f\" ] || continue; n=1; "
+            "if [ ! -r \"$f\" ]; then echo \"@@SSLDOCTOR denied 0 0 $pat $f\"; continue; fi; "
+            "s=$(wc -c < \"$f\" 2>/dev/null); s=$((s+0)); "
+            "m=$(stat -c %Y \"$f\" 2>/dev/null); m=$((m+0)); "
+            "if [ $s -gt $L ]; then echo \"@@SSLDOCTOR toolarge $m $s $pat $f\"; continue; fi; "
+            "t=$((t+s)); if [ $t -gt $T ]; then echo \"@@SSLDOCTOR limit $m $s $pat $f\"; "
+            "continue; fi; "
+            "echo \"@@SSLDOCTOR read $m $s $pat $f\"; base64 < \"$f\" | tr -d '\\n'; echo; "
+            "done; "
+            "if [ $n = 0 ]; then d=$(dirname \"$pat\"); "
+            "if [ -d \"$d\" ] && { [ ! -x \"$d\" ] || [ ! -r \"$d\" ]; }; "
+            "then echo \"@@SSLDOCTOR denied 0 0 $pat $pat\"; "
+            "else echo \"@@SSLDOCTOR none 0 0 $pat $pat\"; fi; fi; done")
+        if rc == 255 or "@@SSLDOCTOR NOBASE64" in out.splitlines()[:1]:
+            note = ("base64 is not available on the server" if rc != 255
+                    else "the account could not read files")
+            return [nd.FileRecord(p, p, nd.UNSUPPORTED, note=note) for p in patterns]
+        import base64
+        records = []
+        lines = out.splitlines()
+        i = 0
+        states = {"read": nd.READ, "denied": nd.DENIED, "toolarge": nd.TOOLARGE,
+                  "limit": nd.LIMIT}
+        while i < len(lines):
+            parts = lines[i].split(" ", 5)
+            i += 1
+            if len(parts) != 6 or parts[0] != _FRAME:
+                continue
+            _, state, mtime, size, pattern, path = parts
+            if state == "none":
+                state = nd.NOMATCH if nd.is_glob(pattern) else nd.MISSING
+            else:
+                state = states.get(state, nd.UNSUPPORTED)
+            content = ""
+            if state == nd.READ:
+                payload = lines[i] if i < len(lines) else ""
+                i += 1
+                try:
+                    content = base64.b64decode(payload).decode("utf-8", "replace")
+                except ValueError:
+                    state = nd.UNSUPPORTED
+            records.append(nd.FileRecord(pattern, path, state,
+                                         int(mtime) if mtime.isdigit() else 0,
+                                         int(size) if size.isdigit() else 0, content))
+        return records
+
+    def root_states(self, roots):
+        rc, out = self._run(
+            "for r in " + " ".join(shlex.quote(r) for r in roots) + "; do "
+            "if [ ! -e \"$r\" ]; then echo \"missing $r\"; "
+            "elif [ ! -r \"$r\" ] || [ ! -x \"$r\" ]; then echo \"denied $r\"; "
+            "else echo \"ok $r\"; fi; done")
+        states = []
+        for line in out.splitlines():
+            state, _, root = line.partition(" ")
+            if root in roots:
+                states.append((root, state))
+        return states or [(r, "unknown") for r in roots]
+
+    def find_main(self, roots):
+        rc, out = self._run("find " + " ".join(shlex.quote(r) for r in roots)
+                            + " -xdev -maxdepth 4 -type f -name nginx.conf 2>/dev/null "
+                            "| head -n 20")
+        return [line.strip() for line in out.splitlines()
+                if nginx_discovery.SAFE_PATH.match(line.strip())]
+
+    def list_conf(self, dirs):
+        safe = [d for d in dirs if nginx_discovery.SAFE_PATH.match(d)]
+        if not safe:
+            return []
+        rc, out = self._run("for d in " + " ".join(shlex.quote(d) for d in safe) + "; do "
+                            "[ -d \"$d\" ] && [ -r \"$d\" ] && "
+                            "find \"$d\" -maxdepth 1 -type f -name '*.conf' 2>/dev/null; "
+                            "done | head -n 50")
+        return sorted(line.strip() for line in out.splitlines() if line.strip())
+
+
 class ServerSession:
     """A thin, stateful wrapper around the system ssh client."""
 
@@ -495,6 +759,7 @@ class ServerSession:
         # nginx invocation for config dumps; override for non-default installs,
         # e.g. SSLDOCTOR_NGINX_CMD="/usr/local/nginx/sbin/nginx -p /usr/local/nginx"
         self.nginx_cmd: str = os.environ.get("SSLDOCTOR_NGINX_CMD", "nginx")
+        self._nginx_discovery: Optional[nginx_discovery.Discovery] = None
 
     # -- plumbing ----------------------------------------------------------
     def _base_argv(self) -> List[str]:
@@ -591,6 +856,7 @@ class ServerSession:
     def connect(self) -> List[F.Finding]:
         out: List[F.Finding] = []
         target = f"{self.cfg.host}:{self.cfg.port}"
+        self._nginx_discovery = None
         if self.cfg.auth == "password" and (problem := password_problem(self._password)):
             return [F.Finding("ssh.auth", "SSH authentication", F.FAIL, F.SCOPE_SERVER,
                               [f"not attempted: {problem}"], target=target)]
@@ -660,6 +926,7 @@ class ServerSession:
 
     def disconnect(self) -> None:
         self.connected = False
+        self._nginx_discovery = None
         self._password = ""
         if self._askpass_path and os.path.exists(self._askpass_path):
             try:
@@ -667,6 +934,17 @@ class ServerSession:
             except OSError:
                 pass
             self._askpass_path = None
+
+    # -- nginx discovery ---------------------------------------------------
+    def nginx_probe(self):
+        return _SshNginxProbe(self)
+
+    def discover_nginx(self) -> nginx_discovery.Discovery:
+        """Discovery for this session (stages A-E), computed once per connection."""
+        if self._nginx_discovery is None:
+            override = os.environ.get("SSLDOCTOR_NGINX_CMD", "")
+            self._nginx_discovery = nginx_discovery.discover(self.nginx_probe(), override)
+        return self._nginx_discovery
 
     # -- diagnostics -------------------------------------------------------
     def _need_conn(self) -> Optional[F.Finding]:
@@ -712,10 +990,17 @@ class ServerSession:
                 emit(_f)
             return [_f]
         lines = [ln.strip() for ln in (so + se).splitlines() if ln.strip()]
+        # the running instance, which need not be the nginx on this account's PATH
+        discovery = self.discover_nginx()
+        for m in discovery.masters[:nginx_discovery.MAX_MASTERS]:
+            lines.append(f"running nginx master pid {m.pid}: {m.executable or m.exe or '?'}"
+                         + (f" -p {m.prefix}" if m.prefix else "")
+                         + (f" -c {m.conf}" if m.conf else ""))
         if not lines:
             _f = F.Finding(
                 "srv.web", "Web server detection", F.WARNING, F.SCOPE_SERVER,
-                ["no nginx/apache binaries found in the PATH of this account"],
+                ["no nginx/apache binaries found in the PATH of this account, and no "
+                 "running nginx master is visible"],
                 recommendation="Confirm which service terminates TLS (load balancer? "
                                "IIS? another host?) and re-target the checks.")
             if emit is not None:
@@ -844,13 +1129,21 @@ class ServerSession:
             if emit is not None:
                 emit(err)
             return [err]
+        # nginx: the discovered configuration of the running instance, not fixed dirs
+        discovery = self.discover_nginx()
+        lines: List[str] = []
+        if discovery.source:
+            lines.append(f"nginx configuration {discovery.main_path} "
+                         f"(evidence level {discovery.level}"
+                         + ("" if discovery.complete else ", incomplete") + "):")
+            wanted = re.compile(r"^\s*(server_name|listen|ssl_certificate(_key)?)\b")
+            lines += [ln.strip()[:200] for ln in discovery.source.splitlines()
+                      if wanted.match(ln)][:40]
         rc, so, se, fatal = self.run(
-            f"({self.nginx_cmd} -T 2>/dev/null | grep -iE 'server_name|listen|ssl_certificate' "
-            "| head -n 40; "
-            "apache2ctl -S 2>/dev/null | head -n 30) ; "
-            "grep -rniE 'ssl_certificate|SSLS.*ertificate' /etc/nginx/conf.d /etc/nginx/sites-enabled "
-            "/etc/apache2/sites-enabled /etc/httpd/conf.d 2>/dev/null | head -n 30")
-        lines = [ln.rstrip()[:200] for ln in so.splitlines() if ln.strip()]
+            "apache2ctl -S 2>/dev/null | head -n 30; "
+            "grep -rniE 'SSLCertificate' /etc/apache2/sites-enabled /etc/httpd/conf.d "
+            "2>/dev/null | head -n 30")
+        lines += [ln.rstrip()[:200] for ln in so.splitlines() if ln.strip()]
         if fatal:
             _f = F.Finding("srv.tlsconf", "TLS virtual host configuration", F.FAIL,
                            F.SCOPE_SERVER, [fatal])
@@ -920,38 +1213,14 @@ class ServerSession:
             if emit is not None:
                 emit(f)
             return f
-        # 1. try full dump (needs privileged account on most systems)
-        rc, so, se, fatal = self.run(f"{self.nginx_cmd} -T 2>/dev/null")
-        if not fatal and rc == 0 and so.strip():
-            sources = so
-            used = "nginx -T (full effective configuration)"
-        else:
-            # 2. readable config files (incl. sites-enabled + conf.d)
-            rc2, so2, se2, fatal2 = self.run(
-                "for f in /etc/nginx/nginx.conf /etc/nginx/conf.d/*.conf "
-                "/etc/nginx/sites-enabled/* /usr/local/nginx/conf/nginx.conf "
-                "/usr/local/etc/nginx/nginx.conf; do "
-                "if [ -r \"$f\" ]; then echo \"--- FILE: $f\"; cat \"$f\"; fi; done")
-            if fatal2:
-                _f = F.Finding("nginx.conf", "Nginx TLS configuration", F.FAIL,
-                               F.SCOPE_SERVER, [fatal2])
-                if emit is not None:
-                    emit(_f)
-                return [_f]
-            sources, used = so2, "readable files under /etc/nginx (and local conf dirs)"
-        if not sources.strip() or "server" not in sources:
-            _f = F.Finding(
-                "nginx.conf", "Nginx TLS configuration", F.NOT_TESTED, F.SCOPE_SERVER,
-                ["no readable nginx configuration for account "
-                 f"'{self.cfg.username}' (nginx -T typically needs elevated rights)"],
-                recommendation="Re-run with an account allowed to read the nginx "
-                               "configuration, or use /server cert <path> [key] with "
-                               "the certificate paths directly.")
-            if emit is not None:
-                emit(_f)
-            return [_f]
-        _add(F.Finding("nginx.conf", "Nginx TLS configuration", F.PASS,
-                             F.SCOPE_SERVER, [f"configuration source: {used}"]))
+        d = self.discover_nginx()
+        conf = _nginx_conf_finding(d, self.cfg.username)
+        _add(conf)
+        if d.level == nginx_discovery.LEVEL_NONE:
+            return out
+        sources = d.source
+        scope = (f"scope: {'complete' if d.complete else 'INCOMPLETE'} configuration graph "
+                 f"of {d.main_path} ({len(d.read_files)} file(s)), evidence level {d.level}")
 
         nodes = _parse_nginx_nodes(sources)
         raw_blocks = _collect_server_blocks(nodes)
@@ -964,24 +1233,43 @@ class ServerSession:
         _add(F.Finding(
             "nginx.blocks", "Nginx server blocks", F.PASS, F.SCOPE_SERVER,
             [f"server blocks total: {len(blocks)}, TLS-enabled: {len(ssl_blocks)}",
-             *[f"listen {' / '.join(' '.join(a) for a in d.get('listen', ['-']))} · "
-               f"server_name {' '.join(n for a in d.get('server_name', []) for n in a) or '(none)'}"
-               for d in ssl_blocks[:8]]]))
+             scope,
+             *[f"listen {' / '.join(' '.join(a) for a in b.get('listen', ['-']))} · "
+               f"server_name {' '.join(n for a in b.get('server_name', []) for n in a) or '(none)'}"
+               for b in ssl_blocks[:8]],
+             *[f"not part of the configuration graph (not analysed): {path}"
+               for path in d.discovered_only[:8]]],
+            uncertainty=list(d.uncertainty) if not d.conclusive else []))
 
         match, how, notes = _match_nginx_server(blocks, domain, port)
         if not match:
-            _add(F.Finding(
-                "nginx.domain", f"Nginx vhost for '{domain}'", F.WARNING,
-                F.SCOPE_SERVER, [f"no server block found: {how}"],
-                recommendation="TLS may be terminated elsewhere (load balancer, "
-                               "another process). Verify what answers on 443.",
-                target=self.cfg.host))
+            if d.conclusive:
+                _add(F.Finding(
+                    "nginx.domain", f"Nginx vhost for '{domain}'", F.WARNING,
+                    F.SCOPE_SERVER, [f"no server block found: {how}", scope],
+                    recommendation="TLS may be terminated elsewhere (load balancer, "
+                                   "another process). Verify what answers on 443.",
+                    target=self.cfg.host))
+            else:
+                _add(F.Finding(
+                    "nginx.domain", f"Nginx vhost for '{domain}'", F.NOT_TESTED,
+                    F.SCOPE_SERVER,
+                    [f"no server block found in the analysed files: {how}", scope],
+                    detail="An absence can only be concluded from the complete "
+                           "configuration of the running nginx.",
+                    uncertainty=[f"the analysed configuration is "
+                                 f"{'a candidate' if d.level == nginx_discovery.LEVEL_CANDIDATE else 'incomplete'}"
+                                 f", so it is not established that the running nginx has "
+                                 f"no server block for port {port}", *d.uncertainty],
+                    target=self.cfg.host))
             return out
         matched_dirs = match[0]
         names = [n for a in matched_dirs.get("server_name", []) for n in a]
         # wildcard/regex matches are normal; only fallbacks and conflicts warn
         status = F.WARNING if "fallback" in how or notes else F.PASS
         ev = [f"selected by: {how}",
+              f"configuration evidence level: {d.level}"
+              + ("" if d.complete else " (graph incomplete)"),
               f"matched server_name entry: {match[2]}",
               f"server block names: {', '.join(names) or '(none)'}",
               f"listen: {' / '.join(' '.join(a) for a in matched_dirs.get('listen', ['-']))}",
