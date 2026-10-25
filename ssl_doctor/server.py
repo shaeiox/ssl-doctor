@@ -18,6 +18,7 @@ used automatically if it happens to be importable).  Security properties:
 from __future__ import annotations
 
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -481,6 +482,40 @@ def askpass_reply() -> Optional[int]:
 
 # ---------------------------------------------------------------- SSH session
 
+@dataclass
+class NginxSettings:
+    """Per-server nginx settings in force for a session (see /server config).
+
+    `mode` "manual" means the saved certificate/key paths are validated
+    instead of the automatically resolved ones; `conf` / `prefix` steer
+    discovery in either mode. `origin` says where they came from.
+    """
+    mode: str = "auto"
+    cert: str = ""
+    key: str = ""
+    conf: str = ""
+    prefix: str = ""
+    origin: str = ""
+
+    @property
+    def manual(self) -> bool:
+        return self.mode == "manual"
+
+    @property
+    def is_default(self) -> bool:
+        return not (self.manual or self.conf or self.prefix)
+
+
+_PATH_STATE_LABELS = {
+    "readable": "exists and is readable",
+    "denied": "exists but is not readable by this account",
+    "notfile": "exists but is not a regular file",
+    "missing": "missing (no such file)",
+    "unreachable": "not reachable: a parent directory is not searchable by this account",
+    "unsupported": "not checked: unsupported characters in the path",
+}
+
+
 _FILE_STATE_LABELS = {
     "missing": "missing", "denied": "not readable", "nomatch": "matched no file",
     "toolarge": "too large, not read", "unsupported": "unsupported, not read",
@@ -713,6 +748,30 @@ class _SshNginxProbe:
                                          int(size) if size.isdigit() else 0, content))
         return records
 
+    def file_states(self, paths):
+        """Per path: readable, denied, notfile, missing, unreachable or unsupported."""
+        states = {p: "unsupported" for p in paths if not nginx_discovery.SAFE_PATH.match(p)}
+        safe = [p for p in paths if p not in states]
+        if safe:
+            # walk up to the nearest existing ancestor: a missing file below a
+            # directory the account may not search is "unreachable", not missing
+            _rc, out = self._run(
+                "for p in " + " ".join(shlex.quote(p) for p in safe) + "; do "
+                "if [ -f \"$p\" ] && [ -r \"$p\" ]; then s=readable; "
+                "elif [ -e \"$p\" ] && [ ! -f \"$p\" ]; then s=notfile; "
+                "elif [ -e \"$p\" ]; then s=denied; "
+                "else d=$(dirname \"$p\"); "
+                "while [ \"$d\" != / ] && [ ! -e \"$d\" ]; do d=$(dirname \"$d\"); done; "
+                "if [ -d \"$d\" ] && [ ! -x \"$d\" ]; then s=unreachable; else s=missing; fi; "
+                "fi; echo \"@@SSLDOCTOR $s $p\"; done")
+            for line in out.splitlines():
+                parts = line.split(" ", 2)
+                if len(parts) == 3 and parts[0] == _FRAME and parts[2] in safe:
+                    states[parts[2]] = parts[1]
+            for p in safe:
+                states.setdefault(p, "missing" if _rc == 0 else "unsupported")
+        return states
+
     def root_states(self, roots):
         rc, out = self._run(
             "for r in " + " ".join(shlex.quote(r) for r in roots) + "; do "
@@ -760,6 +819,7 @@ class ServerSession:
         # e.g. SSLDOCTOR_NGINX_CMD="/usr/local/nginx/sbin/nginx -p /usr/local/nginx"
         self.nginx_cmd: str = os.environ.get("SSLDOCTOR_NGINX_CMD", "nginx")
         self._nginx_discovery: Optional[nginx_discovery.Discovery] = None
+        self.nginx_settings = NginxSettings()
 
     # -- plumbing ----------------------------------------------------------
     def _base_argv(self) -> List[str]:
@@ -939,11 +999,18 @@ class ServerSession:
     def nginx_probe(self):
         return _SshNginxProbe(self)
 
+    def set_nginx_settings(self, settings: "NginxSettings") -> None:
+        """Settings changed (connect, /server config): discovery must run again."""
+        self.nginx_settings = settings
+        self._nginx_discovery = None
+
     def discover_nginx(self) -> nginx_discovery.Discovery:
         """Discovery for this session (stages A-E), computed once per connection."""
         if self._nginx_discovery is None:
             override = os.environ.get("SSLDOCTOR_NGINX_CMD", "")
-            self._nginx_discovery = nginx_discovery.discover(self.nginx_probe(), override)
+            self._nginx_discovery = nginx_discovery.discover(
+                self.nginx_probe(), override, conf_override=self.nginx_settings.conf,
+                prefix_override=self.nginx_settings.prefix)
         return self._nginx_discovery
 
     # -- diagnostics -------------------------------------------------------
@@ -1013,12 +1080,31 @@ class ServerSession:
         return [_f]
 
     def scan_cert(self, cert_path: str, key_path: str = "",
-                  emit: Optional[Callable[[F.Finding], None]] = None) -> List[F.Finding]:
-        """Inspect a certificate (and optionally key pairing) ON the server."""
+                  emit: Optional[Callable[[F.Finding], None]] = None,
+                  states: Optional[Dict[str, str]] = None) -> List[F.Finding]:
+        """Inspect a certificate (and optionally key pairing) ON the server.
+
+        File access is checked first: a missing or unreadable file is NOT
+        TESTED with its state, never reported as an invalid certificate.
+        """
         if (err := self._need_conn()):
             if emit is not None:
                 emit(err)
             return [err]
+        if states is None:
+            states = self.nginx_probe().file_states([p for p in (cert_path, key_path) if p])
+        cert_state = states.get(cert_path, "unsupported")
+        if cert_state != "readable":
+            label = ("file not found" if cert_state == "missing"
+                     else _PATH_STATE_LABELS.get(cert_state, cert_state))
+            _f = F.Finding("srv.cert", f"Server certificate {cert_path}", F.NOT_TESTED,
+                           F.SCOPE_SERVER, [f"{cert_path}: {label}"],
+                           recommendation="Check the path, or the read permission of this "
+                                          "account.", target=cert_path)
+            if emit is not None:
+                emit(_f)
+            return [_f]
+        key_state = states.get(key_path, "unsupported") if key_path else ""
         out: List[F.Finding] = []
 
         def _add(f: F.Finding) -> F.Finding:
@@ -1057,7 +1143,15 @@ class ServerSession:
             "srv.cert", f"Server certificate {cert_path}", F.PASS, F.SCOPE_SERVER,
             ev + ([f"sha256: {fp}"] if fp else []), target=cert_path))
 
-        if key_path:
+        if key_path and key_state != "readable":
+            label = ("file not found" if key_state == "missing"
+                     else _PATH_STATE_LABELS.get(key_state, key_state))
+            _add(F.Finding(
+                "srv.keymatch", "Certificate/key pairing on server", F.NOT_TESTED,
+                F.SCOPE_SERVER, [f"private key {key_path}: {label}",
+                                 "the pairing could not be tested"],
+                target=cert_path))
+        elif key_path:
             rc2, so2, se2, _ = self.run(
                 f"chash=$(openssl x509 -noout -pubkey -in {q(cert_path)} 2>/dev/null | "
                 f"openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1); "
@@ -1217,7 +1311,7 @@ class ServerSession:
         conf = _nginx_conf_finding(d, self.cfg.username)
         _add(conf)
         if d.level == nginx_discovery.LEVEL_NONE:
-            return out
+            return self._certificate_checks(d, None, out, _add, emit)
         sources = d.source
         scope = (f"scope: {'complete' if d.complete else 'INCOMPLETE'} configuration graph "
                  f"of {d.main_path} ({len(d.read_files)} file(s)), evidence level {d.level}")
@@ -1262,7 +1356,7 @@ class ServerSession:
                                  f", so it is not established that the running nginx has "
                                  f"no server block for port {port}", *d.uncertainty],
                     target=self.cfg.host))
-            return out
+            return self._certificate_checks(d, None, out, _add, emit)
         matched_dirs = match[0]
         names = [n for a in matched_dirs.get("server_name", []) for n in a]
         # wildcard/regex matches are normal; only fallbacks and conflicts warn
@@ -1343,14 +1437,144 @@ class ServerSession:
                 recommendation="Check include files or a parent http{} certificate, "
                                "or TLS being terminated elsewhere.",
                 target=self.cfg.host))
+            return self._certificate_checks(d, None, out, _add, emit)
+        values = {"certificate": (cert_paths[0], "ssl_certificate" in inherited),
+                  "key": ((key_paths[0], "ssl_certificate_key" in inherited)
+                          if key_paths else None)}
+        return self._certificate_checks(d, values, out, _add, emit)
+
+    def _certificate_checks(self, d, values, out, _add, emit) -> List[F.Finding]:
+        """nginx.path_resolution, then validation of the files that could be opened.
+
+        `values` maps "certificate"/"key" to (configured value, inherited) from
+        the selected block, or is None when discovery gave none. In manual mode
+        the saved paths are validated and the automatic ones only compared.
+        """
+        nd = nginx_discovery
+        settings = self.nginx_settings
+        directive = {"certificate": "ssl_certificate", "key": "ssl_certificate_key"}
+        cprefix = nd.conf_prefix(d)
+        auto: Dict[str, Dict] = {}
+        for kind, entry in (values or {}).items():
+            if not entry:
+                continue
+            value, inherited = entry
+            resolved, method, problem = nd.resolve_cert_path(value, cprefix)
+            alt = ""
+            if (resolved and not value.strip("'\"").startswith("/") and d.prefix
+                    and d.prefix.rstrip("/") + "/" != cprefix):
+                alt = posixpath.normpath(posixpath.join(d.prefix, value.strip("'\"")))
+            auto[kind] = {"value": value, "resolved": resolved, "method": method,
+                          "problem": problem, "alt": alt, "origin": "automatic discovery",
+                          "source": nd.directive_source(d, directive[kind], value, inherited)}
+        chosen: Dict[str, Dict] = {}
+        for kind, saved in (("certificate", settings.cert), ("key", settings.key)):
+            if settings.manual and saved:
+                chosen[kind] = {"value": saved, "resolved": saved, "problem": "",
+                                "method": "saved manual setting", "alt": "",
+                                "origin": "saved manual setting",
+                                "source": settings.origin or "saved manual setting"}
+            elif kind in auto:
+                chosen[kind] = auto[kind]
+        if not chosen:
             return out
-        cert_path = cert_paths[0]
-        key_path = key_paths[0] if key_paths else ""
-        _add(self._chainfile_finding(cert_path))
-        # deep cert + key verification (also populates last_remote_cert_sha256)
-        out.extend(self.scan_cert(cert_path, key_path, emit=emit))
-        self.nginx_cert_path, self.nginx_key_path = cert_path, key_path
+        paths = {r["resolved"] for r in chosen.values() if r["resolved"]}
+        paths |= {r["alt"] for r in chosen.values() if r["alt"]}
+        paths |= {r["resolved"] for r in auto.values() if r["resolved"]}
+        states = self.nginx_probe().file_states(sorted(paths)) if paths else {}
+        _add(self._path_resolution_finding(d, chosen, auto, states))
+        cert, key = chosen.get("certificate"), chosen.get("key")
+        cert_state = states.get(cert["resolved"], "") if cert and cert["resolved"] else ""
+        key_state = states.get(key["resolved"], "") if key and key["resolved"] else ""
+        if cert and cert_state == "readable":
+            cert_path = cert["resolved"]
+            key_path = key["resolved"] if key else ""
+            _add(self._chainfile_finding(cert_path))
+            out.extend(self.scan_cert(cert_path, key_path, emit=emit,
+                                      states={cert_path: cert_state,
+                                              **({key_path: key_state} if key_path else {})}))
+            self.nginx_cert_path, self.nginx_key_path = cert_path, key_path
+            return out
+        reason = ("certificate file could not be opened: "
+                  + (_PATH_STATE_LABELS.get(cert_state, cert_state) if cert_state else
+                     (cert["problem"] if cert else "no ssl_certificate to check")))
+        target = cert["resolved"] if cert and cert["resolved"] else self.cfg.host
+        _add(F.Finding("nginx.chainfile", "Chain completeness of ssl_certificate file",
+                       F.NOT_TESTED, F.SCOPE_SERVER, [reason], target=target))
+        _add(F.Finding("srv.cert", "Server certificate", F.NOT_TESTED, F.SCOPE_SERVER,
+                       [reason], target=target))
+        if cert and cert["resolved"]:
+            self.nginx_cert_path = cert["resolved"]
+            self.nginx_key_path = key["resolved"] if key else ""
         return out
+
+    def _path_resolution_finding(self, d, chosen, auto, states) -> F.Finding:
+        nd = nginx_discovery
+        ev: List[str] = []
+        uncertainty: List[str] = []
+        missing = unreadable_cert = unresolvable = disagree = False
+        for kind in ("certificate", "key"):
+            ref = chosen.get(kind)
+            if ref is None:
+                if kind == "key":
+                    ev.append("key: no ssl_certificate_key configured")
+                continue
+            ev.append(f"{kind}: {ref['value']}  [{ref['source']}]")
+            if ref["problem"]:
+                ev.append(f"  not resolved: {ref['problem']}")
+                unresolvable = unresolvable or kind == "certificate"
+                continue
+            state = states.get(ref["resolved"], "unsupported")
+            ev.append(f"  resolved: {ref['resolved']}  ({ref['method']})")
+            ev.append(f"  {_PATH_STATE_LABELS.get(state, state)}")
+            if state in ("missing", "notfile"):
+                missing = True
+                alt = ref.get("alt")
+                if alt and states.get(alt) in ("readable", "denied"):
+                    ev.append(f"  {alt} exists, but nginx resolves {ref['value']} against "
+                              f"the configuration prefix {nd.conf_prefix(d)}, so it would "
+                              "not open this file")
+            elif state in ("denied", "unreachable", "unsupported"):
+                if kind == "certificate":
+                    unreadable_cert = True
+                else:
+                    ev.append("  the key pairing is not tested (the file cannot be read "
+                              "by this account; normal for root-only keys)")
+            other = auto.get(kind)
+            if (ref["origin"] == "saved manual setting" and other and other["resolved"]
+                    and other["resolved"] != ref["resolved"]):
+                disagree = True
+                ev.append(f"  automatic discovery resolves {other['value']} to "
+                          f"{other['resolved']} ({_PATH_STATE_LABELS.get(states.get(other['resolved'], ''), '?')}); "
+                          "the saved path is the one validated")
+        manual = any(r["origin"] == "saved manual setting" for r in chosen.values())
+        ev.append("origin: " + ("saved manual setting" + (f" ({self.nginx_settings.origin})"
+                                                          if self.nginx_settings.origin else "")
+                                if manual else
+                                f"automatic discovery (configuration evidence level {d.level})"))
+        if unresolvable or unreadable_cert:
+            status = F.NOT_TESTED
+        elif missing:
+            status = F.FAIL if (d.conclusive and not manual) else F.WARNING
+            if not manual and not d.conclusive:
+                uncertainty.append("the configuration these paths come from is not "
+                                   "confirmed as the running nginx's, so a missing file "
+                                   "does not prove a broken server")
+        elif disagree:
+            status = F.WARNING
+        else:
+            status = F.PASS
+        if manual:
+            rec = ("" if status == F.PASS else
+                   "Correct the saved paths (/server config set) or return to automatic "
+                   "discovery (/server config clear).")
+        else:
+            rec = ("" if status == F.PASS else
+                   "If this server uses a custom layout, save its paths: /server config set "
+                   "--cert <path> --key <path>")
+        return F.Finding("nginx.path_resolution", "Certificate and key file paths", status,
+                         F.SCOPE_SERVER, ev, recommendation=rec, uncertainty=uncertainty,
+                         target=self.cfg.host)
 
     def _chainfile_finding(self, cert_path: str) -> F.Finding:
         """Linkage of the ssl_certificate file: leaf first, each issued by the next.
@@ -1362,11 +1586,18 @@ class ServerSession:
         rc, so, se, fatal = self.run(f"cat {shlex.quote(cert_path)} 2>&1")
         blocks = certs.extract_pem_blocks(so.encode()) if not fatal else []
         if not blocks:
-            return F.Finding(
-                "nginx.chainfile", title, F.FAIL, F.SCOPE_SERVER,
-                [f"{cert_path}: no PEM certificates readable",
-                 (fatal or so.strip() or se.strip())[:200]],
-                recommendation="Check the path and read permissions.", target=cert_path)
+            # the caller checked the file is readable: no PEM here is bad content,
+            # not a missing intermediate and not a path problem
+            if not fatal and rc == 0:
+                ev = [f"{cert_path}: no PEM certificate in the file",
+                      "the content does not contain a -----BEGIN CERTIFICATE----- block"]
+            else:
+                ev = [f"{cert_path}: certificate file could not be read",
+                      (fatal or se.strip() or so.strip())[:200]]
+            return F.Finding("nginx.chainfile", title, F.FAIL, F.SCOPE_SERVER, ev,
+                             recommendation="Point ssl_certificate at a PEM file that holds "
+                                            "the certificate (and its intermediates).",
+                             target=cert_path)
         try:
             chain = [certs.decode_pem(b) for b in blocks]
         except Exception as exc:  # noqa: BLE001

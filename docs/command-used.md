@@ -131,6 +131,12 @@ incomplete, `local.rootca` reports `NOT TESTED` instead of blaming the client.
 /server nginx example.com               running nginx -> its config graph -> vhost, protocols, ciphers, cert/key
 /server nginx example.com:8443          same, for a non-default TLS port
 /server cert /etc/nginx/ssl/site.crt /etc/nginx/ssl/site.key
+/server config show                     nginx settings in force for this server (auto/manual)
+/server config set --cert /opt/pvm/nginx/conf/ssl/fullchain.pem --key /opt/pvm/nginx/conf/ssl/private.key
+                                        save this server's certificate/key paths (manual mode)
+/server config set files --conf /opt/pvm/nginx/conf/nginx.conf
+                                        point discovery at a main configuration for "files"
+/server config clear                    back to automatic discovery
 /server config                          scan readable TLS/vhost configuration
 /server logs                            recent TLS-related service log entries
 /server compare                         configured certificate vs served certificate

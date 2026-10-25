@@ -105,6 +105,8 @@ class Discovery:
     build: Dict[str, str] = field(default_factory=dict)
     main_path: str = ""
     main_how: str = ""
+    prefix: str = ""                # effective -p prefix (runtime, build or operator)
+    operator_main: bool = False     # main configuration given by a saved setting
     runtime_main: bool = False      # main config derived from the running instance
     via_dump: str = ""              # the -T command used, if any
     files: List[FileRecord] = field(default_factory=list)
@@ -402,10 +404,59 @@ def graph_from_dump(dump: str, main: str) -> Tuple[List[FileRecord], str]:
     return [files[p] for p in order if p in files], expand(first, files, matches, conf_dir)
 
 
+# ------------------------------------------------- certificate path resolution
+#
+# nginx resolves a relative ssl_certificate / ssl_certificate_key against
+# ngx_cycle->conf_prefix (src/event/ngx_event_openssl.c), which nginx sets to
+# the directory of the main configuration file once -c was resolved against
+# -p (src/core/nginx.c, ngx_process_options). It is NOT the -p prefix itself:
+# -p only anchors a relative -c and directives such as error_log and pid.
+
+def conf_prefix(d: "Discovery") -> str:
+    """nginx's configuration prefix: the main configuration's directory, with '/'."""
+    return posixpath.dirname(d.main_path).rstrip("/") + "/" if d.main_path else ""
+
+
+def resolve_cert_path(value: str, prefix: str) -> Tuple[str, str, str]:
+    """(resolved path, method, problem) for an ssl_certificate[_key] value."""
+    v = value.strip("'\"")
+    if "$" in v:
+        return "", "", ("contains an nginx variable, resolved per request (e.g. per SNI "
+                        "name); not statically resolvable")
+    if v.startswith("data:"):
+        return "", "", "inline data: value; there is no file to check"
+    if v.startswith("/"):
+        return posixpath.normpath(v), "absolute path", ""
+    if not prefix:
+        return "", "", "relative path and nginx's configuration prefix is unknown"
+    return (posixpath.normpath(posixpath.join(prefix, v)),
+            f"relative to the configuration prefix {prefix} (the main configuration's "
+            "directory; nginx's rule for ssl_certificate and ssl_certificate_key)", "")
+
+
+def directive_source(d: "Discovery", name: str, value: str, inherited: bool = False) -> str:
+    """`file:line` of the first `name value;` in the graph (visit order)."""
+    from .server import _strip_nginx_comments
+    pattern = re.compile(r"(?<![\w$])" + re.escape(name) + r"\s+['\"]?"
+                         + re.escape(value.strip("'\"")) + r"['\"]?\s*;")
+    suffix = " (inherited from http{})" if inherited else ""
+    for f in d.read_files:
+        for number, line in enumerate(_strip_nginx_comments(f.content).splitlines(), 1):
+            if pattern.search(line):
+                return f"{f.path}:{number}{suffix}"
+    return "line unknown" + suffix
+
+
 # ------------------------------------------------------------------ discovery
 
-def discover(probe, override_cmd: str = "") -> Discovery:
-    """Run stages A-E through `probe`; never raises for remote failures."""
+def discover(probe, override_cmd: str = "", conf_override: str = "",
+             prefix_override: str = "") -> Discovery:
+    """Run stages A-E through `probe`; never raises for remote failures.
+
+    `conf_override` / `prefix_override` are operator settings saved for the
+    server: the override main configuration is analysed instead of the derived
+    one and counts as runtime evidence only when the two are the same file.
+    """
     d = Discovery()
     ps_text, now, why = probe.processes()
     if ps_text is None:
@@ -441,7 +492,7 @@ def discover(probe, override_cmd: str = "") -> Discovery:
     # main configuration from the running instance
     if d.master is not None:
         m = d.master
-        conf_arg, prefix_arg = m.conf, m.prefix
+        conf_arg, prefix_arg = m.conf, prefix_override or m.prefix
         if not conf_arg and d.unit_linked:
             unit_args = args_from_command(d.unit.get("ExecStartArgv", ""))
             conf_arg, prefix_arg = unit_args.get("c", ""), prefix_arg or unit_args.get("p", "")
@@ -452,6 +503,10 @@ def discover(probe, override_cmd: str = "") -> Discovery:
                 d.limitations.append(limitation)
             if path:
                 d.main_path, d.main_how, d.runtime_main = path, how, True
+            if prefix_arg.startswith("/"):
+                d.prefix = prefix_arg
+            elif d.build.get("prefix"):
+                d.prefix = d.build["prefix"]
         else:
             d.limitations.append("the running master's configuration path cannot be "
                                  "derived: no -c argument and the executable's build "
@@ -459,7 +514,21 @@ def discover(probe, override_cmd: str = "") -> Discovery:
             d.uncertainty.append("the running instance may use a configuration outside "
                                  "the locations SSL Doctor can see")
 
-    if d.runtime_main:
+    if prefix_override:
+        d.prefix = prefix_override
+    if conf_override:
+        override = posixpath.normpath(conf_override)
+        if d.runtime_main and override == d.main_path:
+            d.main_how += " - matches the operator-specified main configuration"
+        else:
+            if d.runtime_main:
+                d.facts.append(f"the running master's arguments resolve to {d.main_path}, "
+                               f"but the saved setting names {override}")
+            d.main_path, d.runtime_main, d.operator_main = override, False, True
+            d.main_how = "operator-specified main configuration (saved setting)"
+    if d.operator_main:
+        d.files, d.complete, d.source = build_graph(d.main_path, probe.read)
+    elif d.runtime_main:
         dumped = ""
         if d.executable_trusted:
             dumped, cmd = probe.dump(d.executable, d.master.prefix, d.master.conf)

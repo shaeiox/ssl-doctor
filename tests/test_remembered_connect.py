@@ -35,7 +35,11 @@ class FakeSession:
 
     def __init__(self, cfg, password=""):
         self.cfg, self.password, self.connected = cfg, password, False
+        self.nginx_settings = server.NginxSettings()
         FakeSession.instances.append(self)
+
+    def set_nginx_settings(self, settings):
+        self.nginx_settings = settings
 
     def connect(self):
         ok = self.cfg.auth == "key" or self.password == FakeSession.accepted

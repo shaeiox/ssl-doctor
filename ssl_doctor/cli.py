@@ -348,7 +348,17 @@ COMMANDS: List[tuple] = [
 
 
 # commands whose argument is a remembered server's name
-PROFILE_ARGUMENT_COMMANDS = ("/server connect", "/server forget-password", "/server forget")
+PROFILE_ARGUMENT_COMMANDS = ("/server connect", "/server forget-password", "/server forget",
+                             "/server config show", "/server config set",
+                             "/server config clear")
+SETTINGS_ACTIONS = {
+    "show": "nginx settings saved for this server",
+    "set": "save certificate/key paths for this server",
+    "clear": "back to automatic discovery",
+}
+# /server config set flags -> profile fields
+SETTINGS_FLAGS = {"--cert": "nginx_cert", "--key": "nginx_key",
+                  "--conf": "nginx_conf", "--prefix": "nginx_prefix"}
 
 
 def command_completions(prefix: str, limit: int = 3, profiles=()) -> List[tuple]:
@@ -358,6 +368,10 @@ def command_completions(prefix: str, limit: int = 3, profiles=()) -> List[tuple]
     rows are that command with each matching profile name instead.
     """
     text = (prefix or "").lstrip()
+    if text.lower().startswith("/server config ") and " " not in text[len("/server config "):]:
+        partial = text[len("/server config "):]
+        return [(f"/server config {a}", d) for a, d in sorted(SETTINGS_ACTIONS.items())
+                if a.startswith(partial) and partial != a][:max(0, limit)]
     for command in PROFILE_ARGUMENT_COMMANDS:
         if text.lower().startswith(command + " "):
             partial = text[len(command) + 1:].strip()
@@ -1183,6 +1197,9 @@ class SSLDoctorCLI:
             ("/server nginx [domain[:port]]", "examine nginx SSL config: vhost match, protocols, ciphers, cert/key"),
             ("/server cert <file> [key]", "inspect cert (and key pairing) on the server"),
             ("/server config", "scan readable web-server TLS/vhost configuration"),
+            ("/server config show [name]", "nginx settings saved for this server (auto or manual paths)"),
+            ("/server config set [name]", "save this server's certificate/key paths (--cert --key --conf --prefix)"),
+            ("/server config clear [name]", "forget the saved paths; back to automatic discovery"),
             ("/server logs", "recent TLS-related service log entries (if readable)"),
             ("/server compare", "configured certificate vs certificate served on the network"),
             ("/server disconnect", "close the SSH session"),
@@ -1514,6 +1531,9 @@ class SSLDoctorCLI:
         if sub in ("forget", "forget-password"):
             self._server_forget(args[1:], password_only=sub == "forget-password")
             return
+        if sub == "config" and len(args) > 1 and args[1].lower() in SETTINGS_ACTIONS:
+            self._server_settings(args[1].lower(), args[2:])
+            return
         if sub == "disconnect":
             if self.server:
                 self.server.disconnect()
@@ -1766,6 +1786,170 @@ class SSLDoctorCLI:
             self.note(f"using the current session {current.cfg.username}@{current.cfg.host}")
         return chosen
 
+    # ---------------- /server config show|set|clear ----------------
+    def _apply_nginx_settings(self, profile) -> None:
+        """Make a profile's nginx settings the ones in force for the session."""
+        settings = servermod.NginxSettings(
+            mode=profile.nginx_mode, cert=profile.nginx_cert, key=profile.nginx_key,
+            conf=profile.nginx_conf, prefix=profile.nginx_prefix,
+            origin=f"saved for {profile.name}")
+        if self.server is not None and hasattr(self.server, "set_nginx_settings"):
+            self.server.set_nginx_settings(settings)
+            if not settings.is_default:
+                self.note(f"nginx settings for {profile.name}: {settings.mode}"
+                          + (f", certificate {settings.cert}" if settings.cert else "")
+                          + (f", key {settings.key}" if settings.key else "")
+                          + (f", main configuration {settings.conf}" if settings.conf else "")
+                          + (f", prefix {settings.prefix}" if settings.prefix else ""))
+
+    def _connected_profile(self):
+        if not (self.server and self.server.connected):
+            return None
+        c = self.server.cfg
+        key = (c.username, c.host.lower(), c.port)
+        return next((p for p in self._profiles().all()
+                     if (p.username, p.host.lower(), p.port) == key), None)
+
+    def _settings_target(self, name: str):
+        """("profile", Profile) | ("session", None) | None after an error message."""
+        store = self._profiles()
+        if name:
+            profile = store.get(name)
+            if profile is None:
+                close = store.closest(name)
+                hint = f"; did you mean {', '.join(close)}?" if close else ""
+                self.error(f"no remembered server named {name!r}{hint}")
+                return None
+            return "profile", profile
+        if self.server and self.server.connected:
+            profile = self._connected_profile()
+            return ("profile", profile) if profile else ("session", None)
+        if store.all() and not self._batch_mode:
+            picked = self._pick_recent(store)
+            if isinstance(picked, profilesmod.Profile):
+                return "profile", picked
+            if picked is None:
+                self.note("connect to the server first (/server connect), then run "
+                          "/server config again")
+            return None
+        self.error("not connected and no remembered server named - connect first, or "
+                   "name a remembered server: /server config <show|set|clear> <name>")
+        return None
+
+    def _server_settings(self, action: str, args: List[str]) -> None:
+        name, flags = "", {}
+        i = 0
+        while i < len(args):
+            if args[i] in SETTINGS_FLAGS:
+                if i + 1 >= len(args):
+                    self.error(f"{args[i]} needs a path (or 'none')")
+                    return
+                flags[SETTINGS_FLAGS[args[i]]] = args[i + 1]
+                i += 2
+            elif args[i].startswith("--"):
+                self.error(f"unknown option {args[i]} (use {', '.join(SETTINGS_FLAGS)})")
+                return
+            else:
+                name = args[i]
+                i += 1
+        target = self._settings_target(name)
+        if target is None:
+            return
+        kind, profile = target
+        if action == "show":
+            self._show_settings(profile)
+        elif action == "clear":
+            self._save_settings(kind, profile, {f: "" for f in SETTINGS_FLAGS.values()})
+        else:
+            values = self._settings_values(profile, flags)
+            if values is not None:
+                self._save_settings(kind, profile, values)
+
+    def _current_settings(self, profile) -> Dict[str, str]:
+        if profile is not None:
+            return {f: getattr(profile, f) for f in SETTINGS_FLAGS.values()}
+        s = self.server.nginx_settings
+        return {"nginx_cert": s.cert, "nginx_key": s.key, "nginx_conf": s.conf,
+                "nginx_prefix": s.prefix}
+
+    def _settings_values(self, profile, flags) -> Optional[Dict[str, str]]:
+        values = self._current_settings(profile)
+        labels = {"nginx_cert": "certificate path", "nginx_key": "private key path",
+                  "nginx_conf": "main nginx configuration", "nginx_prefix": "nginx prefix (-p)"}
+        if flags:
+            updates = {f: ("" if v.lower() in ("none", "-") else v) for f, v in flags.items()}
+        elif self._interactive_session() and not self._batch_mode:
+            updates = {}
+            for field_name in ("nginx_cert", "nginx_key", "nginx_conf", "nginx_prefix"):
+                answer = self.prompt(f"{labels[field_name]} (blank keeps, '-' clears)",
+                                     values[field_name]).strip()
+                updates[field_name] = "" if answer == "-" else answer
+        else:
+            self.error("usage: /server config set [name] --cert <path> [--key <path>] "
+                       "[--conf <path>] [--prefix <path>]")
+            return None
+        for field_name, value in updates.items():
+            problem = profilesmod.manual_path_problem(value)
+            if problem:
+                self.error(f"{labels[field_name]} {value!r} refused: {problem}; nothing saved")
+                return None
+        values.update(updates)
+        return values
+
+    def _save_settings(self, kind, profile, values) -> None:
+        mode = "manual" if (values["nginx_cert"] or values["nginx_key"]) else "auto"
+        if kind == "session" and self._remembering() and not self._batch_mode:
+            c = self.server.cfg
+            answer = self.prompt(f"Remember {c.username}@{c.host}:{c.port} (profile only) to "
+                                 "keep these settings? (yes/no)", "yes").lower()
+            if answer in ("yes", "y"):
+                store = self._profiles()
+                profile = profilesmod.Profile(
+                    name=profilesmod.default_name(c.host, {p.name for p in store.all()}),
+                    host=c.host, port=c.port, username=c.username, auth=c.auth,
+                    key_path=c.key_path, tls_host=c.tls_host, tls_port=c.tls_port)
+                kind = "profile"
+        if kind == "profile" and self._remembering():
+            for field_name, value in values.items():
+                setattr(profile, field_name, value)
+            profile.nginx_mode = mode
+            if self._persist(lambda: self._profiles().save(profile)):
+                self.note(f"nginx settings saved for {profile.name} ({profile.endpoint}): "
+                          + ("automatic discovery" if mode == "auto" else "manual paths"))
+            connected = self._connected_profile()
+            if connected is not None and connected.name == profile.name:
+                self._apply_nginx_settings(profile)
+            return
+        if not (self.server and self.server.connected):
+            self.error("remembering servers is turned off, so settings can only apply to a "
+                       "connected session; nothing was saved")
+            return
+        self.server.set_nginx_settings(servermod.NginxSettings(
+            mode=mode, cert=values["nginx_cert"], key=values["nginx_key"],
+            conf=values["nginx_conf"], prefix=values["nginx_prefix"], origin="this session only"))
+        self.note("these settings apply to this session only; they are not saved "
+                  + ("(remembering is turned off)" if not self._remembering() else ""))
+
+    def _show_settings(self, profile) -> None:
+        if profile is not None:
+            values, mode = self._current_settings(profile), profile.nginx_mode
+            self.out(paint(f"nginx settings for {profile.name} ({profile.endpoint})",
+                           "primary", bold=True))
+        else:
+            s = self.server.nginx_settings
+            values, mode = self._current_settings(None), s.mode
+            c = self.server.cfg
+            self.out(paint(f"nginx settings for {c.username}@{c.host}:{c.port} "
+                           "(not remembered; this session only)", "primary", bold=True))
+        self.out("  mode: " + ("manual - the saved certificate/key paths are validated"
+                               if mode == "manual" else "automatic discovery"))
+        for field_name, label in (("nginx_cert", "certificate"), ("nginx_key", "private key"),
+                                  ("nginx_conf", "main configuration"),
+                                  ("nginx_prefix", "prefix")):
+            self.out(f"  {label}: {values[field_name] or '(not set)'}")
+        self.out(paint("change: /server config set [--cert ...] - automatic: "
+                       "/server config clear", "muted", dim=True))
+
     # ---------------- /server connect ----------------
     def _server_connect(self, name: str = "",
                         profile: Optional[profilesmod.Profile] = None,
@@ -2005,6 +2189,8 @@ class SSLDoctorCLI:
         self.note(f"{why}; it was removed from {self._vault().name}")
 
     def _after_connect(self, settings, fingerprints, password: str, source: str) -> None:
+        if settings.profile is not None:
+            self._apply_nginx_settings(settings.profile)
         if settings.tls_explicit and settings.tls_host != settings.host:
             self.note(f"TLS target recorded as {settings.tls_host}:{settings.tls_port} "
                       f"(differs from SSH endpoint)")

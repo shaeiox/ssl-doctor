@@ -349,7 +349,12 @@ It then calls `_gather_remote()`:
        A running master (`ps`, `/proc/<pid>`), B its systemd unit, C trusted
        executable `-V` / `-T`, D bounded search only without a runtime main
        configuration, E the include graph — and the findings are qualified by
-       the resulting evidence level
+       the resulting evidence level; then `_certificate_checks()` resolves the
+       selected block's `ssl_certificate` / `ssl_certificate_key` against
+       nginx's configuration prefix (`nginx_discovery.resolve_cert_path`) or
+       takes the saved manual paths (`ServerSession.nginx_settings`), checks
+       the files (`file_states`), reports `nginx.path_resolution`, and runs
+       `nginx.chainfile` / `srv.cert` / `srv.keymatch` only on opened files
      - `ServerSession.compare_configured_vs_presented(presented_sha256)`
      - `ServerSession.log_scan()`
    - in combined mode without SSH, prints a note explaining how to run the
@@ -388,7 +393,9 @@ host key is trusted:
    the host key, runs `ssh ... true`, and reports `ssh.hostkey` / `ssh.auth`.
    A saved password the server rejects is deleted from the vault and asked
    once.
-5. **Outcome** — first successful connection: *Remember this server?
+5. **Outcome** — a remembered server's nginx settings (`nginx_mode`,
+   certificate, key, main configuration, prefix) become the session's
+   `NginxSettings`. First successful connection: *Remember this server?
    [P]rofile only · [S]ave password too · [N]o*; later ones update
    `last_used` (and offer to re-save a password that could not be used).
    Remembering is off for `-c`, non-interactive sessions, `--no-remember` and
@@ -746,7 +753,7 @@ User                cli.py                  netchecks/local/server      analyze 
 | `packaging/winsvc.py` | Windows service wrapper |
 | `tests/` | Unit, integration, TLS fixture, nginx, air-gap, contract, and end-to-end tests |
 | `service/tests/` | Control-plane, tenancy, identity, monitoring, audit, migration tests |
-| `schemas/findings-1.0.schema.json` … `findings-1.5.schema.json` | Published findings-contract schemas (current: 1.5) |
+| `schemas/findings-1.0.schema.json` … `findings-1.6.schema.json` | Published findings-contract schemas (current: 1.6) |
 | `docs/decisions/` | Architecture decision records (ADR-001: remembered servers) |
 
 ---
