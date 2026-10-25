@@ -1,0 +1,30 @@
+# SSL Doctor — Python dependencies (Python 3.10+)
+#
+# The CLI (python3 ssldoctor.py) needs NOTHING from this file: it is
+# standard-library only and calls the system `openssl`/`ssh` binaries when
+# present. Install these requirements only for the self-hosted control plane
+# (service/), its SSO support and the Windows service host.
+#
+#   python3 -m pip install -r requirements.txt
+#   python3 -m pip install . "./service"      # equivalent, uses the metadata
+#
+# Tests and executable builds: see requirements-dev.txt.
+
+# ---------------------------------------------------------------- control plane
+# Multi-tenant API, dashboard, scheduler and result history (service/).
+fastapi>=0.110
+uvicorn>=0.29
+psycopg[binary]>=3.1
+python-multipart>=0.0.9
+
+# ------------------------------------------------------------------------- SSO
+# Imported lazily: needed only when an organization signs in with OIDC or SAML.
+# OIDC  — ID-token signature, issuer, audience, nonce and expiry checks.
+authlib
+# SAML 2.0 service provider; xmlsec signs/verifies assertions in strict mode.
+python3-saml
+xmlsec
+
+# --------------------------------------------------- Windows service host
+# Service registration for ssl-doctor-agent.exe / ssldoctor-server.exe.
+pywin32; sys_platform == "win32"

@@ -1,0 +1,23 @@
+# SSL Doctor — development, test and build dependencies (Python 3.10+)
+#
+#   python3 -m pip install -r requirements-dev.txt
+#   python3 -m pip install -e . -e ./service    # to install the packages too
+#
+# The CLI test suite alone needs only `jsonschema`:
+#   python3 -m pip install jsonschema && python3 -m unittest discover -s tests
+
+-r requirements.txt
+
+# --------------------------------------------------------------- test suite
+# tests/ validate emitted findings against schemas/.
+jsonschema>=4.18
+# service/tests: ASGI client, throwaway PostgreSQL, and key/cert fixtures.
+httpx>=0.27
+pgserver
+cryptography
+
+# ---------------------------------------------------------------- executables
+# packaging/build.py freezes the CLI, agent and server (no cross-compiling).
+pyinstaller>=6.6
+# packaging/release.py emits the CycloneDX SBOM shipped in the offline bundle.
+cyclonedx-bom>=4

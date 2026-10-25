@@ -40,6 +40,19 @@ venv/bin/python -m unittest discover -s tests
 
 Tests that need the `openssl` binary are skipped when it is missing.
 
+Dependencies are listed as plain requirements files for people who do not want
+to install the packages themselves:
+
+| File | Contents |
+|---|---|
+| `requirements.txt` | the optional control plane (`service/`): FastAPI, uvicorn, psycopg, multipart, plus the lazily imported SSO libraries (Authlib, python3-saml, xmlsec) and `pywin32` on Windows. The CLI itself needs none of it. |
+| `requirements-dev.txt` | the above plus test and build tooling (`jsonschema`, `httpx`, `pgserver`, `cryptography`, `pyinstaller`, `cyclonedx-bom`). |
+
+```bash
+python3 -m pip install -r requirements-dev.txt   # ~ `pip install . "./service[dev]"`
+python3 -m pip install -r requirements.txt       # ~ `pip install . "./service"`
+```
+
 ## Terminal look
 
 SSL Doctor opens as a **full-screen application** built like a terminal: the

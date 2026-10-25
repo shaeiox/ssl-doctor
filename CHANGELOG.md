@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`requirements.txt`** and **`requirements-dev.txt`** spell out the Python
+  dependencies in one place: control plane (FastAPI, uvicorn, psycopg,
+  multipart), the lazily imported SSO libraries (Authlib, python3-saml,
+  xmlsec), `pywin32` on Windows, and the test/build tooling. The CLI stays
+  standard-library only, so neither file is needed to run it.
+
 ## v0.8.0 — AI-ready reports, copy to clipboard, full-screen shell
 
 `/report agent` exports a scan for any AI model; text can be copied out of a
