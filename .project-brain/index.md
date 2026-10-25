@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-25 · done: v0.8.3 (ssh-keyscan KEX fallback via ssh probes + Windows askpass .cmd/exe), merged to master, tagged & pushed · next: user retries /server connect files.cloudavid.com with password on Windows; if it fails get `ssh -V` · blocker: none
+> resume 2026-10-25 · done: v0.8.3 released; overview() NameError fix (run call lost in a024efe) on branch fix/server-overview-run, not merged · next: user re-runs /scan files.cloudavid.com step 3; merge + release 0.8.4 · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md

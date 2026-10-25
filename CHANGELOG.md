@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`/scan` step 3 stopped with "NameError: name 'fatal' is not defined".**
+  The findings-streaming change (v0.7) dropped the remote command from the
+  server identity check (`ServerSession.overview()`) while keeping the code
+  that reads its result, so every server-side run failed right after
+  "reading server identity". The command is back, and a new test drives every
+  server check on a connected session against success, empty, error and
+  transport-failure replies.
+
 ## v0.8.3 — SSH connect: host keys without ssh-keyscan's KEX, Windows passwords
 
 `/server connect` works against servers that pick sntrup761x25519 when the

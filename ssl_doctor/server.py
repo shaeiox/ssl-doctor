@@ -599,6 +599,8 @@ class ServerSession:
             if emit is not None:
                 emit(err)
             return [err]
+        rc, so, se, fatal = self.run(
+            "uname -a; echo ---; cat /etc/os-release 2>/dev/null | head -n 3; echo ---; id")
         if fatal or rc != 0:
             _f = F.Finding("srv.os", "Server OS and identity", F.FAIL, F.SCOPE_SERVER,
                            [fatal or (se.strip() or f"rc={rc}")])
