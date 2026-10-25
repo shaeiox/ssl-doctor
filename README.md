@@ -387,6 +387,10 @@ ssldoctor.py            entry point
 ssl_doctor/
   cli.py                REPL, theme/frames/spinner, banner, prompts, scan orchestration
   tui.py                full-screen shell: layout, transcript, composer, key reader
+  textcells.py          width/clip/wrap in terminal cells (CJK, emoji, combining marks)
+  clipboard.py          copy to the clipboard (Win32, X11 helper, tools, OSC 52)
+  profiles.py           remembered server profiles (non-secret, ~/.ssl-doctor/profiles.json)
+  vault.py              saved passwords in the OS credential vault (or none)
   findings.py           PASS/FAIL/WARNING/NOT TESTED model + session store
   certs.py              offline certificate parsing + key matching (digest-only)
   netchecks.py          target parsing, domain profile, DNS/TCP/TLS/HTTPS checks
@@ -398,6 +402,7 @@ ssl_doctor/
   agent.py              outbound-only scan agent (`ssldoctor.py agent`)
 schemas/                published findings-contract JSON schemas (1.0-1.5)
 docs/                   contract, agents, executed commands, execution flow
+docs/decisions/         architecture decision records (ADRs)
 service/                optional multi-tenant service (separate package)
 tests/                  unittest suite (`python -m unittest discover -s tests`)
 ```

@@ -4,9 +4,9 @@ Reference for the commands used in this project to diagnose TLS failures and to
 verify the project itself. Everything here is **read-only**: no `sudo`, no
 service restarts, no config edits, and no credentials in command lines.
 
-- Tool version: **SSL Doctor v0.3.0**
+- Tool version: **SSL Doctor v0.9.0**
 - Entry point: `ssldoctor.py` (also installed as the `ssl-doctor` console script)
-- Interactive: `python3 ssldoctor.py`
+- Interactive: `python3 ssldoctor.py` (full-screen shell on a terminal; `--no-tui` for the line REPL)
 - One-shot: `python3 ssldoctor.py "/tls example.com"`
 - Batch: `python3 ssldoctor.py -c "/scan example.com --with-server" -c "/report both out"`
 
@@ -19,6 +19,8 @@ python3 ssldoctor.py                # interactive REPL
 python3 ssldoctor.py /version       # print version and exit
 python3 ssldoctor.py /help          # list every slash command
 python3 ssldoctor.py -h             # CLI usage/options
+python3 ssldoctor.py --no-tui       # line-oriented REPL instead of the full-screen shell
+python3 ssldoctor.py --no-remember  # never remember servers or use saved passwords
 ```
 
 Useful session utilities:
@@ -132,8 +134,16 @@ incomplete, `local.rootca` reports `NOT TESTED` instead of blaming the client.
 ```
 
 Host keys are checked against `~/.ssl-doctor/known_hosts`: unknown keys require
-an explicit `yes`, and changed keys are refused (possible MITM). If the account
-lacks rights, checks report `NOT TESTED` and name the missing permission.
+an explicit `yes`, and changed keys are refused (possible MITM). Keys are read
+with `ssh-keyscan`, or through `ssh` with every authentication method off when
+`ssh-keyscan` cannot negotiate a key exchange. If the account lacks rights,
+checks report `NOT TESTED` and name the missing permission.
+
+After a successful connection you can remember the server (profile only by
+default, or with its password in Windows Credential Manager / the Linux Secret
+Service). A saved password is used only when the host key is trusted and
+matches the one it was saved with; see
+[ADR-001](decisions/ADR-001-remembered-servers.md).
 
 Example sequence:
 
@@ -169,7 +179,11 @@ Regression suite (the primary check used during development):
 python3 -m unittest discover -s tests -v
 ```
 
-Result on this checkout: **54 tests run, OK (6 skipped)**.
+Result on this checkout (v0.9.0, Linux): **547 tests run, OK (22 skipped)**. The
+skipped tests are platform-bound: the real Windows Credential Manager contract
+runs only on Windows (the `windows-latest` CI job), the real Secret Service
+contract only with `SSL_DOCTOR_TEST_SECRET_SERVICE=1` on a desktop session, and
+a few POSIX/Windows-specific terminal and permission tests on the other OS.
 
 Service/control-plane suite (needs its dev extras / throwaway PostgreSQL):
 

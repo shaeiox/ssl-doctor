@@ -5,7 +5,7 @@ points, argument handling, the command loop, what each command does internally,
 how findings become a diagnosis and a report, and how the session shuts down.
 File names are included at every step.
 
-Version covered: `0.3.0` (`ssl_doctor/__init__.py`).
+Version covered: `0.9.0` (`ssl_doctor/__init__.py`).
 
 ---
 
@@ -63,8 +63,14 @@ ssl_doctor/cli.py :: main()
    - `ssl_doctor/netchecks.py` — remote DNS/TCP/TLS/HTTPS checks
    - `ssl_doctor/report.py` — HTML/JSON rendering
    - `ssl_doctor/server.py` — SSH transport and nginx analysis
-2. Decides whether colors are enabled: stdout is a TTY and `NO_COLOR` is unset
-   (`_USE_COLOR`).
+   - `ssl_doctor/profiles.py` — remembered server profiles
+   - `ssl_doctor/vault.py` — saved passwords in the OS credential vault
+   - `ssl_doctor/textcells.py` — text measured in terminal cells
+   (`ssl_doctor/tui.py` and `ssl_doctor/clipboard.py` are imported when the
+   full-screen shell or a copy needs them.)
+2. Resolves one colour level (`resolve_color_mode()`: `NO_COLOR`,
+   `SSL_DOCTOR_COLOR`, tty, `TERM=dumb`, Windows VT, `COLORTERM`, `TERM`) and
+   the glyph set for the stream's encoding; `_USE_COLOR` remains as an alias.
 3. On Windows, issues an empty `os.system("")` to enable ANSI escape handling
    in modern consoles.
 
@@ -73,21 +79,30 @@ ssl_doctor/cli.py :: main()
 `ssl_doctor/cli.py :: main()` performs these steps in order:
 
 1. Copies `sys.argv[1:]` (or an injected `argv`).
+   - **Askpass helper:** when `SSL_DOCTOR_ASKPASS=1` is set (a frozen Windows
+     build started by `ssh` as its `SSH_ASKPASS` helper), `server.askpass_reply()`
+     prints the password from the environment and `main()` returns `0` at once.
 2. **Agent branch:** if the first argument is exactly `agent`, imports
    `ssl_doctor/agent.py` and returns `agent.main(argv[1:])`. An
    `agent.AgentError` is printed in red and converted to exit code `1`.
 3. Creates one `SSLDoctorCLI` instance. Its constructor initializes:
    - `store = findings.FindingStore()` — all findings for this session
    - `net_timeout = 8.0`
-   - `cmd_timeout = 20.0`
+   - `command_timeout = 20.0`
    - `server = None` — no SSH session yet
    - `remote_facts = {}` — structured facts from the last remote scan
    - `_diagnosis = None` — cached correlation result
    - `_running = True`
+   - `use_tui = None` (decide from the terminal), `no_remember = False`
+   - `_profile_store` / `_secret_vault = None` — remembered servers, loaded on
+     first use (`profiles.ProfileStore`, `vault.open_vault()`)
 4. Scans the remaining arguments left to right:
    - `-c <command>` — appends the command to the **batch list**
    - `--timeout <seconds>` — sets only `cli.net_timeout` (invalid values are
      ignored)
+   - `--no-tui` / `--plain` — line REPL instead of the full-screen shell
+   - `--no-remember` — never remember servers or use saved passwords
+   - `--typewriter`, `--typewriter-speed <cps>` — gradual output on a terminal
    - `-h` / `--help` — prints the banner and help, returns `0`
    - an argument starting with `/` — joins that argument and **all remaining
      arguments** into one batch command and stops parsing
@@ -365,7 +380,7 @@ host key is trusted:
 - `StrictHostKeyChecking=yes`
 - a private known-hosts file at `~/.ssl-doctor/known_hosts`
 - public-key or password-only authentication as configured
-- a command timeout (`cmd_timeout`)
+- a command timeout (`command_timeout`)
 - for passwords, a temporary `SSH_ASKPASS` helper in the private state
   directory, fed through an environment variable: `askpass.sh` on POSIX,
   `askpass.cmd` (runs the interpreter) on Windows, or the frozen exe itself
@@ -677,13 +692,18 @@ User                cli.py                  netchecks/local/server      analyze 
 |---|---|
 | `ssldoctor.py` | Source entry point; calls `ssl_doctor.cli.main()` |
 | `pyproject.toml` | Declares the `ssl-doctor` console script and package |
-| `ssl_doctor/__init__.py` | Version (`0.3.0`) and application name |
-| `ssl_doctor/cli.py` | Argument parsing, batch mode, REPL, dispatch, all command handlers, spinner/colors, `/scan` orchestration |
+| `ssl_doctor/__init__.py` | Version (`0.9.0`) and application name |
+| `ssl_doctor/cli.py` | Argument parsing, batch mode, REPL, dispatch, all command handlers, spinner/colors, result frames, `/scan` orchestration, the `/server connect` pipeline and remembered-server commands |
+| `ssl_doctor/tui.py` | Full-screen shell: layout, transcript (frames redrawn per width), composer, completion menu, mouse selection, key reader (termios / Windows console records) |
+| `ssl_doctor/textcells.py` | Width, clipping and wrapping in terminal cells (CJK/emoji = 2, combining = 0) |
+| `ssl_doctor/clipboard.py` | Copy to the clipboard: Win32, X11 helper, tools, OSC 52 |
+| `ssl_doctor/profiles.py` | Remembered server profiles in `~/.ssl-doctor/profiles.json` (validated, atomic, owner-only) |
+| `ssl_doctor/vault.py` | Saved passwords: Windows Credential Manager, Secret Service (`secret-tool`), or none; host-key binding, expiry |
 | `ssl_doctor/findings.py` | `Finding` model, statuses/scopes, `FindingStore` |
 | `ssl_doctor/netchecks.py` | Target parsing, domain profile, DNS/TCP/TLS/HTTPS suite, presented-chain reading |
 | `ssl_doctor/certs.py` | PEM/DER parsing, chain assessment, hostname matching, cert/key digest matching |
 | `ssl_doctor/local.py` | Local machine checks: OS, clock skew, proxy, Windows stores, certutil, Schannel |
-| `ssl_doctor/server.py` | SSH config/session, host-key trust store, nginx config parsing and vhost resolution, remote checks |
+| `ssl_doctor/server.py` | SSH config/session, host-key trust store (with the `ssh` probe fallback when `ssh-keyscan` cannot negotiate), askpass helper (POSIX script, Windows `.cmd` or the frozen exe), nginx config parsing and vhost resolution, remote checks |
 | `ssl_doctor/analyze.py` | Correlation rules producing ranked causes and overall verdict |
 | `ssl_doctor/report.py` | Findings-contract payload, JSON writer, self-contained HTML renderer |
 | `ssl_doctor/contract.py` | Schema version, validation, and secret/private-key redaction |
@@ -706,7 +726,8 @@ User                cli.py                  netchecks/local/server      analyze 
 | `packaging/winsvc.py` | Windows service wrapper |
 | `tests/` | Unit, integration, TLS fixture, nginx, air-gap, contract, and end-to-end tests |
 | `service/tests/` | Control-plane, tenancy, identity, monitoring, audit, migration tests |
-| `schemas/findings-1.0.schema.json`, `schemas/findings-1.1.schema.json` | Published findings-contract schemas |
+| `schemas/findings-1.0.schema.json` … `findings-1.5.schema.json` | Published findings-contract schemas (current: 1.5) |
+| `docs/decisions/` | Architecture decision records (ADR-001: remembered servers) |
 
 ---
 
@@ -715,13 +736,16 @@ User                cli.py                  netchecks/local/server      analyze 
 `ssldoctor.py` calls `ssl_doctor/cli.py :: main`, which either delegates to the
 agent entry point or builds a `SSLDoctorCLI`. That object owns a
 `FindingStore`, timeouts, the optional SSH session, and remote scan facts. The
-program then either runs a batch of `-c`/slash commands or enters a REPL. Each
+program then either runs a batch of `-c`/slash commands or enters the
+full-screen shell (or the line REPL with `--no-tui`). Each
 line is split with `shlex` and dispatched to a `cmd_*` method. Commands run
 read-only checks in `netchecks.py`, `local.py`, `certs.py`, or `server.py`,
 convert results to `Finding` objects, append them to the store, and print them.
 `/diagnose` sends the whole store through `analyze.py` to produce ranked causes
 and an overall PASS/WARNING/FAIL verdict. `/report` builds a findings-contract
 document, redacts secrets and private keys in `contract.py`, and writes JSON
-and/or self-contained HTML via `report.py`. `/exit` disconnects SSH, clears the
+and/or self-contained HTML via `report.py`. `/server connect` verifies the host
+key before any password is asked for or read from the OS vault, and can
+remember the server for next time. `/exit` disconnects SSH, clears the
 password, stops the loop, prints `bye`, and returns exit code `0`; batch mode
 instead returns `1` only when the final diagnosis is `FAIL`.
