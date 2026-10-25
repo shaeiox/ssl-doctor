@@ -5,7 +5,7 @@ points, argument handling, the command loop, what each command does internally,
 how findings become a diagnosis and a report, and how the session shuts down.
 File names are included at every step.
 
-Version covered: `0.9.1` (`ssl_doctor/__init__.py`).
+Version covered: `0.9.2` (`ssl_doctor/__init__.py`).
 
 ---
 
@@ -220,6 +220,9 @@ Important details:
 - `exit` / `quit` without a slash are recognized by the REPL before dispatch.
 - Ctrl-C at the prompt exits the session cleanly. Ctrl-C **during** a command
   is caught inside `execute()` and prints `interrupted`; the session continues.
+- Any other exception from a command is caught there too: a file or process
+  error prints `/<command>: <path>: <reason>`, a bug prints
+  `internal error in /<command>: …`; the session continues either way.
 - At shutdown the SSH session is disconnected (which wipes the in-memory
   password and removes the temporary askpass helper) and the process returns
   `0`.
@@ -371,7 +374,10 @@ host key is trusted:
    the vault (`ssl_doctor/vault.py`: Windows Credential Manager, Secret
    Service, or `NullVault`) is read with the presented `SHA256:` fingerprints;
    it is skipped when they do not match the ones the password was saved with.
-   Otherwise `getpass.getpass()` / the shell's masked input asks for it.
+   Otherwise `getpass.getpass()` / the shell's masked input asks for it; an
+   empty or blank answer is refused and asked again (at most three times),
+   and Ctrl-C cancels (`server.password_problem()` is the one rule, also
+   applied by `ServerSession.connect`, the vault and the askpass helpers).
 4. **Session** — `server.ServerSession(cfg, password).connect()` re-verifies
    the host key, runs `ssh ... true`, and reports `ssh.hostkey` / `ssh.auth`.
    A saved password the server rejects is deleted from the vault and asked
@@ -699,7 +705,7 @@ User                cli.py                  netchecks/local/server      analyze 
 |---|---|
 | `ssldoctor.py` | Source entry point; calls `ssl_doctor.cli.main()` |
 | `pyproject.toml` | Declares the `ssl-doctor` console script and package |
-| `ssl_doctor/__init__.py` | Version (`0.9.1`) and application name |
+| `ssl_doctor/__init__.py` | Version (`0.9.2`) and application name |
 | `ssl_doctor/cli.py` | Argument parsing, batch mode, REPL, dispatch, all command handlers, spinner/colors, result frames, `/scan` orchestration, the `/server connect` pipeline and remembered-server commands |
 | `ssl_doctor/tui.py` | Full-screen shell: layout, transcript (frames redrawn per width), composer, completion menu, mouse selection, key reader (termios / Windows console records) |
 | `ssl_doctor/textcells.py` | Width, clipping and wrapping in terminal cells (CJK/emoji = 2, combining = 0) |

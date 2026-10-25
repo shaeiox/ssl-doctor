@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.9.2 — no empty passwords, clearer errors
+
+Empty passwords are never sent or saved, and file, tool and state problems
+produce a message instead of a Python exception. No change to checks or the
+findings contract (still 1.5).
 
 ### Fixed
 
