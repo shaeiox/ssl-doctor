@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-25 · done: v0.10.0 (nginx cert path resolution + /server config show|set|clear, contract 1.6) merged to master, tagged & pushed · next: archive fix-nginx-config-discovery + nginx-cert-path-resolution; user verifies on the /opt/pvm server; remembered-servers needs Windows CI + manual vault checks · blocker: none
+> resume 2026-10-25 · done: v0.10.0 pushed; archived 10 completed OpenSpec changes, 11 new main specs, terminal-interface reconciled (RECONCILED.md per change) · next: widen terminal-interface Purpose by hand; remembered-servers needs Windows CI + manual vault checks; fix-tls-handshake-timeout-attribution 37/38, fix-chain-diagnosis-saas-enterprise 46/52 · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-25 · v2] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md

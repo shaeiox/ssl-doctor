@@ -53,9 +53,17 @@ relaxed probe also succeeded.
 - **THEN** the TLS 1.3 row is never `refused`, and a failed re-probe is `inconclusive`
 
 ### Requirement: Confidence, limitations and remediation match the evidence
+The certainty, limitations and remediation of a protocol cause SHALL follow the
+policy that produced the evidence.
+
+#### Scenario: Default-policy acceptance
 - **WHEN** the evidence is a default-policy acceptance
 - **THEN** the cause may be `possible`/`probable` with no policy limitation and a remediation to disable the version
+
+#### Scenario: Relaxed-only acceptance
 - **WHEN** the evidence is a relaxed-only acceptance
 - **THEN** the cause is `possible`, lists the relaxed-policy limitation and still recommends disabling TLS 1.0/1.1
+
+#### Scenario: Unverified or inconclusive evidence
 - **WHEN** the evidence is unverified or inconclusive
 - **THEN** no cause asserts server support, and the diagnosis notes name the probe gap
