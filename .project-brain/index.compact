@@ -10,7 +10,7 @@
 @src index.md  @gen 2026-10-25  @updated 2026-10-25
 
 P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
-  ~ 2026-10-25 next: user retries /server connect files.cloudavid.com, shares `ssh -V`; check Windows password askpass (askpass.sh) · blocker: none
+  ~ 2026-10-25 next: user retries /server connect files.cloudavid.com with password on Windows; if it fails get `ssh -V` · blocker: none
   architecture-and-scope ✓v 2026-10-24 v1
   chain-diagnosis ✓v 2026-10-24 v1
   server-ssh-nginx ✓d 2026-10-25 v2

@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.8.3 — SSH connect: host keys without ssh-keyscan's KEX, Windows passwords
+
+`/server connect` works against servers that pick sntrup761x25519 when the
+local `ssh-keyscan` cannot run it, and password logins work on Windows. No
+change to checks or the findings contract (still 1.5).
 
 ### Fixed
 

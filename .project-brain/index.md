@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-25 · done: ssh-keyscan KEX fallback via ssh probes on branch fix/ssh-hostkey-kex, not merged · next: user retries /server connect files.cloudavid.com, shares `ssh -V`; check Windows password askpass (askpass.sh) · blocker: none
+> resume 2026-10-25 · done: v0.8.3 (ssh-keyscan KEX fallback via ssh probes + Windows askpass .cmd/exe), merged to master, tagged & pushed · next: user retries /server connect files.cloudavid.com with password on Windows; if it fails get `ssh -V` · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md
