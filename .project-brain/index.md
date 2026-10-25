@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-25 · done: v0.8.4 (overview() NameError fix, run call lost in a024efe), merged to master, tagged & pushed · next: user re-runs /scan files.cloudavid.com through step 3/4 · blocker: none
+> resume 2026-10-25 · done: v0.8.4 released; remembered-servers ADR-001 + OpenSpec change proposed on branch docs/remembered-servers · next: owner confirms the 4 defaults, then /openspec-apply-change remembered-servers · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md
@@ -19,4 +19,5 @@
 - agent-report → /report agent: AI-ready md+json from the redacted contract doc, verbatim prompt, atomic write   [✓ done 2026-10-24 · v1] → projects/ssl-doctor/agent-report.md
 - copy-to-clipboard → drag-to-copy, /copy, Ctrl-Y; native Win32/X11 clipboard, tools, OSC 52; Windows ReadConsoleInputW mouse   [✓ done 2026-10-25 · v3] → projects/ssl-doctor/copy-to-clipboard.md
 - ui-design-system → Theme, full-screen shell, result frames, streaming into frames, centred banner, chat composer   [✓ done 2026-10-25 · v7] → projects/ssl-doctor/ui-design-system.md
+- remembered-servers → SSH server profiles + passwords in OS vault (Win Credential Manager / Secret Service), host-key bound; ADR-001 + OpenSpec proposed   [⚠ in-progress 2026-10-25 · v1] → projects/ssl-doctor/remembered-servers.md
 - _decisions → One-line decision log: colours, frames, static input, report pills   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/_decisions.md

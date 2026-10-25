@@ -2,7 +2,7 @@
 project: ssl-doctor
 topic: server-ssh-nginx
 tags: [ssh, nginx, apache, vhost, config, hostkeys, permissions]
-status: verified
+status: done
 trust: human
 last_done: 2026-10-25
 version: 2
