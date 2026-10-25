@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-25 · done: remembered-servers implemented (tasks 1–5) on branch feat/remembered-servers, not merged · next: Windows CI run (real Credential Manager) + manual checks 6.2, then archive + merge/release · blocker: none
+> resume 2026-10-25 · done: v0.9.0 remembered servers, merged to master, tagged & pushed (OpenSpec change kept open: 24/26) · next: check windows-latest CI (real Credential Manager, task 6.1) + manual GNOME Keyring/Windows checks (6.2), then /openspec-archive-change remembered-servers · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md

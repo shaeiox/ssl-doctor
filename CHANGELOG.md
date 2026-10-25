@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## v0.9.0 — remembered servers
+
+Reconnect to a server you have used before with `/server connect <name>`: SSL
+Doctor remembers non-secret server profiles and, if you choose, keeps the
+password in the operating system's credential vault, bound to the server's
+host key. No new dependency; the findings contract stays at 1.5.
 
 ### Added
 
