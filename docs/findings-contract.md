@@ -182,3 +182,14 @@ forms) and any `PRIVATE KEY` PEM block, replacing them with `[REDACTED]`.
 | `nginx.ciphers` | Nginx ssl_ciphers of the selected block |
 | `nginx.certref` | Certificate and key referenced by the selected block |
 | `nginx.chainfile` | Linkage of the ssl_certificate file |
+
+**Nginx configuration evidence.** `nginx.conf` says which configuration the
+`nginx.*` findings come from and how it relates to the running nginx; its first
+evidence line is `evidence level: <level>` — `runtime-verified`,
+`runtime-associated`, `candidate` or `none`. Status: `PASS` = complete include
+graph of the running instance; `WARNING` = candidate or incomplete graph (the
+reason is in `uncertainty`); `NOT TESTED` = nothing could be read. When the
+graph is not a complete one of the running instance and no block matches the
+port, `nginx.domain` is `NOT TESTED` (with `uncertainty`), never a `WARNING`
+claiming the absence; the diagnosis then raises no nginx-derived server cause
+and may add an `unresolved` entry for `nginx.conf`.

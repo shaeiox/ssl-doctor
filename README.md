@@ -285,11 +285,29 @@ method that was used.
 Via a read-only SSH session (`/server connect` or `/scan --server-only` /
 `/server nginx <domain>[:port]`; without a port, the session's TLS port is used):
 
-1. **Configuration source**: `nginx -T` when the account may run it, otherwise
-   the readable files under `/etc/nginx` (`nginx.conf`, `conf.d/`,
-   `sites-enabled/`). Insufficient permissions → explicit `NOT TESTED`.
+1. **Configuration of the running nginx** (`nginx.conf`): SSL Doctor first finds
+   the running master process (executable, `-p`, `-c`), its systemd unit and the
+   build defaults of *that* executable (`-V`), so a custom installation such as
+   `/opt/pvm/nginx/sbin/nginx -p /opt/pvm/nginx/ -c conf/nginx.conf` is analysed
+   from its own configuration, not from `/etc/nginx`. Only when that yields
+   nothing does a bounded search of `/etc/nginx`, `/usr/local/nginx`,
+   `/usr/local/etc/nginx`, `/opt` and `/srv` run. From the main file it follows
+   `include` (absolute, relative, wildcard, nested; each file once) — files on
+   disk that are not included are listed but never analysed. The result carries
+   an **evidence level**: *runtime-verified* (from the running master, complete,
+   unchanged since it started), *runtime-associated*, *candidate* (not linked to
+   a running master) or *none*. `nginx.conf` is PASS only for a complete graph of
+   the running instance; WARNING for a candidate or incomplete one; NOT TESTED
+   when nothing could be read. Executables are run (`-V`, `-T` with the master's
+   own arguments) only when they are root-owned and not group/world-writable —
+   a process title alone can be spoofed.
 2. **Server-block inventory**: total blocks and TLS-enabled blocks with their
-   `listen`/`server_name`.
+   `listen`/`server_name`, and the scope (complete or incomplete graph,
+   evidence level). "No server block listens on port 443" is a finding only for
+   a complete graph of the running instance; otherwise `nginx.domain` is
+   `NOT TESTED` with the reason, and the diagnosis keeps a working HTTPS
+   endpoint and an unconfirmed configuration apart (an *unresolved* entry, no
+   server-side change recommended).
 3. **Vhost resolution for your domain and port**: the server block nginx would
    serve, using nginx's own rules. Only blocks listening on the target port are
    considered. Then: exact `server_name` (the first one wins; duplicates raise a

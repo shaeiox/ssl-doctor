@@ -8,13 +8,25 @@ from ssl_doctor import server
 
 
 class FakeSession(server.ServerSession):
-    """`nginx -T` returns `config`; every other command runs locally (read-only)."""
+    """A running nginx whose `-T` returns `config`; other commands run locally."""
 
     def __init__(self, config: str, tls_host: str = "shop.test", tls_port: int = 443):
         super().__init__(server.SSHConfig(host="fake-host", username="tester",
                                           tls_host=tls_host, tls_port=tls_port))
         self.config = config
         self.connected = True
+
+    def nginx_probe(self):
+        # a running root master whose trusted executable dumps `config` with -T
+        from fixtures.nginx_host import Exe, File, NginxHost, master_line, version
+        dump = "# configuration file /etc/nginx/nginx.conf:\n" + self.config
+        return NginxHost(
+            ps=master_line(700, '/usr/sbin/nginx -g "daemon on; master_process on;"'),
+            proc={700: {"exe": "/usr/sbin/nginx"}},
+            executables={"/usr/sbin/nginx": Exe(
+                version_output=version("/usr/share/nginx", "/etc/nginx/nginx.conf"),
+                dump=dump)},
+            files={"/etc/nginx/nginx.conf": File(self.config, mtime=1)})
 
     def run(self, remote_cmd: str):
         if remote_cmd.startswith("nginx -T"):

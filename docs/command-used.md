@@ -128,7 +128,7 @@ incomplete, `local.rootca` reports `NOT TESTED` instead of blaming the client.
 /server forget-password files           delete only the saved password
 /server status                          show SSH session state
 /server overview                        remote OS / web-server identification
-/server nginx example.com               vhost match, protocols, ciphers, cert/key
+/server nginx example.com               running nginx -> its config graph -> vhost, protocols, ciphers, cert/key
 /server nginx example.com:8443          same, for a non-default TLS port
 /server cert /etc/nginx/ssl/site.crt /etc/nginx/ssl/site.key
 /server config                          scan readable TLS/vhost configuration
@@ -136,6 +136,16 @@ incomplete, `local.rootca` reports `NOT TESTED` instead of blaming the client.
 /server compare                         configured certificate vs served certificate
 /server disconnect                      close the SSH session
 ```
+
+Nginx configuration comes from the **running** nginx: SSL Doctor reads the
+master process (`ps`, `/proc/<pid>/exe|cwd|cgroup`), its systemd unit
+(`systemctl show`), the executable's `-V` (only for a root-owned,
+non-writable executable), and then the `include` graph of the main file
+(`stat`, `base64` of each file). A bounded `find` over `/etc/nginx`,
+`/usr/local/nginx`, `/usr/local/etc/nginx`, `/opt` and `/srv` runs only when
+none of that names a configuration. `nginx.conf` states the evidence level
+(runtime-verified / runtime-associated / candidate / none). Nothing is
+reloaded, restarted or written.
 
 Host keys are checked against `~/.ssl-doctor/known_hosts`: unknown keys require
 an explicit `yes`, and changed keys are refused (possible MITM). Keys are read

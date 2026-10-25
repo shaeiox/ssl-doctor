@@ -89,5 +89,24 @@ class EveryCheckRuns(unittest.TestCase):
                     self.assertTrue(all(isinstance(f, F.Finding) for f in results))
 
 
+class DiscoveryNeverRaises(unittest.TestCase):
+    """nginx discovery over the real SSH probe, whatever the server answers."""
+
+    def test_every_reply_kind(self):
+        for name, reply in EveryCheckRuns.REPLIES.items():
+            with self.subTest(reply=name):
+                session = FakeServer(*reply)
+                d = session.discover_nginx()
+                self.assertIs(session.discover_nginx(), d)       # cached per connection
+                self.assertIn(d.level, ("none", "candidate"))
+
+    def test_the_cache_is_cleared_on_disconnect(self):
+        session = FakeServer()
+        first = session.discover_nginx()
+        session.disconnect()
+        session.connected = True
+        self.assertIsNot(session.discover_nginx(), first)
+
+
 if __name__ == "__main__":
     unittest.main()
