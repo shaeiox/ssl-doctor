@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.8.2 — result frames straight at every window size
+
+Result frames in the full-screen shell are redrawn to the window on every
+resize, and text is measured in terminal cells, so wide characters no longer
+push a border out. No change to checks or the findings contract (still 1.5).
 
 ### Fixed
 

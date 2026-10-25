@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-25 · done: responsive result frames (reflow at layout + cell widths) on branch fix/responsive-frames, not merged · next: user checks resize + CJK hosts, then merge/release · blocker: none
+> resume 2026-10-25 · done: v0.8.2 responsive result frames (reflow at layout + cell widths), merged to master, tagged & pushed · next: user checks resize + CJK hosts on Windows/Linux · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md

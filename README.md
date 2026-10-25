@@ -1,4 +1,4 @@
-# SSL Doctor v0.8.1
+# SSL Doctor v0.8.2
 
 Offline-capable SSL/TLS diagnostic tool for IT support engineers. It answers:
 *why does this TLS connection fail — the client machine, the nginx server, the
@@ -69,7 +69,7 @@ evidence line gets the full width of the window.
                       ██     ██ ██       ██  ██ ██  ██ ██       ██   ██  ██ ██  ██
                   ██████ ██████ ██████   █████  ██████ ██████   ██   ██████ ██  ██
                    offline ssl/tls diagnostics · client · server · chain · nginx
-                                     creator: eleven  ·  v0.8.1
+                                     creator: eleven  ·  v0.8.2
                 ════════════════════════════════════════════════════════════════════
 
   Welcome. SSL Doctor is read-only; credentials are never logged.
@@ -133,6 +133,9 @@ and a space or `Esc` dismisses the list.
 The column is the terminal width, capped at 120 columns and left-aligned; the
 banner is centred in it and drops from the wordmark to a compact form when the
 window is shorter than 24 rows or narrower than the wordmark.
+Result frames are redrawn to the current window width on every resize, and
+widths are measured in terminal cells (CJK and emoji count two), so a frame's
+border stays straight at any size.
 Mouse reporting (wheel, press, drag, release) is switched on only while the
 composer is reading, so mouse bytes can never end up inside a running check;
 on Windows the shell reads console input records directly (VT mouse reports

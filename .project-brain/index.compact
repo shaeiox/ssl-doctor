@@ -10,7 +10,7 @@
 @src index.md  @gen 2026-10-25  @updated 2026-10-25
 
 P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
-  ~ 2026-10-25 next: user checks resize + CJK hosts, then merge/release · blocker: none
+  ~ 2026-10-25 next: user checks resize + CJK hosts on Windows/Linux · blocker: none
   architecture-and-scope ✓v 2026-10-24 v1
   chain-diagnosis ✓v 2026-10-24 v1
   server-ssh-nginx ✓v 2026-10-24 v1
