@@ -24,6 +24,8 @@ One line per settled choice: `YYYY-MM: chosen > rejected — why`.
 2026-10: `creator: eleven` is a fixed constant > a flag or env override — the credit is part of the banner requirement and a cosmetic switch is not worth the surface area.
 2026-10: alternate screen + composed frame > scrollback-only output — a diagnostic session is an app: fixed chrome, bounded panel, scrollback you can revisit, and a command bar that does not scroll away.
 2026-10: hand-rolled termios/msvcrt key reader > curses/prompt_toolkit/rich — stdlib-only, no TERM database, and one predictable code path for the batch fallback.
+2026-10: redraw result frames from transcript text at layout time (`tui.reflow_frame`) > storing findings objects in the transcript — keeps the colourless text model that colorize, selection, /copy and the response recorder already share; frames are our own regular output, so parsing them is reliable.
+2026-10: own `textcells` (unicodedata) > the `wcwidth` package — the CLI stays stdlib-only; ambiguous-width box glyphs count as one cell.
 2026-10: Windows keys via ReadConsoleInputW (ctypes) > msvcrt.getwch — UCRT `_getwch` forces input mode 0 and drops non-key records, so VT mouse input could never arrive; reading records ourselves keeps the mode we set and also gets native MOUSE_EVENTs.
 2026-10: raw mode for a single keystroke > raw for the whole session — a crashing check or a child process (`ssh`, `openssl`) must never inherit a raw terminal, and ISIG keeps Ctrl-C a real signal.
 2026-10: capture command output as plain text and recolour at render time > storing ANSI — wrapping/padding by visible width needs no terminal emulator, so centring stays exact.

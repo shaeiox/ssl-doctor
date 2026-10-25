@@ -29,6 +29,7 @@ from typing import Dict, List, Optional
 
 from . import APP_NAME, __version__
 from . import findings as F
+from . import textcells
 from .analyze import diagnose
 from . import certs as certmod
 from . import local as localmod
@@ -359,9 +360,9 @@ def _wrap(text: str, width: int) -> List[str]:
     """Wrap without dropping characters; long tokens are broken, not elided."""
     if width <= 0:
         return [text]
-    lines = textwrap.wrap(text, width=max(12, width), break_long_words=True,
-                          break_on_hyphens=False) or [""]
-    return lines
+    # by terminal cells, so wide characters cannot push a frame border out
+    text = text.replace("\t", " ").replace("\n", " ").strip()
+    return textcells.wrap(text, max(12, width)) or [""]
 
 
 # --------------------------------------------------------------- indicators
@@ -543,7 +544,7 @@ def _spans_text(spans) -> str:
 
 
 def _span_len(spans) -> int:
-    return sum(len(text) for text, _, _ in spans)
+    return sum(textcells.width(text) for text, _, _ in spans)
 
 
 def _paint_line(spans) -> str:
@@ -561,8 +562,9 @@ def _box_row(content, inner: int) -> List:
 def _box_title(label: str, inner: int) -> str:
     title = (label or "results").strip()
     room = inner - len(INDENT) - 6
-    if room >= 6 and len(title) > room:
-        title = title[:max(4, room - len(_GLYPHS.ellipsis))] + _GLYPHS.ellipsis
+    if room >= 6 and textcells.width(title) > room:
+        title = (textcells.clip(title, max(4, room - len(_GLYPHS.ellipsis)))
+                 + _GLYPHS.ellipsis)
     return title
 
 
@@ -571,12 +573,12 @@ def _box_counts(items: List[F.Finding], room: int) -> List:
     sep = f" {_GLYPHS['sep']} " if _GLYPHS.unicode else " - "
     segments = _counts_segments(items)
     text = sep.join(part for part, _ in segments)
-    if len(text) > room:
+    if textcells.width(text) > room:
         kept = [seg for seg in segments if not seg[0].startswith("0 ")]
         segments = kept or segments
         text = sep.join(part for part, _ in segments)
-    if len(text) > room:
-        return [(text[:max(0, room)], "muted", False)]
+    if textcells.width(text) > room:
+        return [(textcells.clip(text, max(0, room)), "muted", False)]
     spans: List = []
     for index, (part, role) in enumerate(segments):
         if index:
@@ -595,7 +597,7 @@ def _box_top(label: str, width: int) -> List:
     width, inner = _box_geometry(width)
     h = _GLYPHS.h
     title = _box_title(label, inner)
-    fill = max(1, width - len(INDENT) - len(f"{h} {title} ") - 2)
+    fill = max(1, width - len(INDENT) - textcells.width(f"{h} {title} ") - 2)
     return [(INDENT, "", False), (_GLYPHS.corner("╭", "+") + h + " ", "tool", False),
             (title, "primary", True),
             (" " + h * fill + _GLYPHS.corner("╮", "+"), "tool", False)]
@@ -657,7 +659,7 @@ def _box_bottom(items: List[F.Finding], width: int) -> List:
     width, inner = _box_geometry(width)
     h = _GLYPHS.h
     footer = _box_counts(items, inner - 6)
-    used = sum(len(text) for text, _, _ in footer)
+    used = _span_len(footer)
     tail_fill = max(1, width - len(INDENT) - used - 5)
     return [(INDENT, "", False), (_GLYPHS.corner("╰", "+") + h + " ", "tool", False),
             *footer, (" " + h * tail_fill + _GLYPHS.corner("╯", "+"), "tool", False)]
@@ -1733,8 +1735,8 @@ class SSLDoctorCLI:
             columns, _ = session.size()
         except Exception:
             return 0
-        # one column of breathing room on the right of the frame
-        return max(0, tuimod.block_width(columns) - tuimod.GUTTER * 2 - 2)
+        # breathing room on the right of the frame
+        return max(0, tuimod.block_width(columns) - tuimod.GUTTER * 2 - tuimod.FRAME_MARGIN)
 
     def _tui_header(self, width: int, rows: int) -> List[List]:
         """The centred banner: the full wordmark when the screen has the room.

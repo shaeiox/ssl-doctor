@@ -4,8 +4,8 @@ topic: ui-design-system
 tags: [ui, terminal, colour, accessibility, claude-code, cli, banner, wordmark, tui, composer, streaming]
 status: done
 trust: ai-inferred
-last_done: 2026-10-24
-version: 6
+last_done: 2026-10-25
+version: 7
 ---
 
 **Problem:** The CLI looked like a generic script (16-colour ANSI constants, braille spinner, bare `ssl-doctor>` prompt, flat `[PASS]/[FAIL]` wall). Long `/scan` transcripts were hard to scan and a pending question was easy to miss. v1 still opened with an anonymous clean-text line, with no product mark and no author credit.
@@ -25,11 +25,14 @@ version: 6
 - **Frame-less layout (v4, `drop-output-frame`).** No output box: `build_frame()` draws the transcript as plain text in the centred column, top-aligned one blank line under the banner, with the status line + dashed input + hints following it (short sessions read as one centred block; long ones push the chrome to the last rows). Each command's output is a block (blank line between commands) and `center_blocks()` centres each block on its own width, keeping internal alignment. `Transcript.tail(..., fill=False)` returns only real lines, `content_height()` budgets the frame-less chrome.
 - **Full-screen shell (`ssl_doctor/tui.py`, v3).** Interactive start enters the alternate screen and draws one composed frame: centred column `min(columns-2, 96)`, header (wordmark or compact), output panel with scrollback, status line, command bar, key hints. `build_frame()` is pure (size + spans in, exact lines + cursor cell out), so layout is tested without a terminal. `Transcript` wraps to panel width and scrolls; `CaptureStream` turns command stdout into panel lines (`_CAPTURE` makes `paint()` a no-op and `print_findings()` use plain rows, so the panel — not a box — is the frame). `KeyReader` enters raw mode for one keystroke only (ISIG kept), decoding arrows/PgUp/Home/End/Ctrl keys; `TuiSession` adds command-bar editing, history, masked password entry and a status-line spinner ticker. `tui.enabled()` gates on tty + platform + `SSL_DOCTOR_TUI` + `--no-tui`; everything else runs the old line REPL.
 
+- **Responsive frames (v7, field bug).** Frames were baked into the transcript at capture width → narrowing re-wrapped border rows, widening left them short; and `len()` widths let CJK/emoji push the right border out. Now `Transcript.wrapped(w)` finds frames (`_frame_span`: top `╭─ t ─╮`/`+- t -+`, `│ … │` rows, optional base for a streaming frame) and `reflow_frame()` redraws them at `w - FRAME_MARGIN` (identity when already that width): borders rebuilt, title/counts cut by cells, long rows wrapped inside with the title hanging under itself and evidence past its bullet. `ssl_doctor/textcells.py` (`width/clip/slice/pad/wrap`) replaces `len()` in cli box drawing, `wrap_line`, `truncate_spans`, `_reverse`, `build_frame`, the composer input and `selected_text`. Tests: `tests/test_responsive_frames.py` (every width 16–120, ASCII + Unicode, live frames, wide chars).
+
 **Invariants (verified):**
 - Plain mode (non-tty, `NO_COLOR`, `TERM=dumb`, cp1252) emits **no** escape sequences and only ASCII, banner included.
 - `creator: eleven` appears at every width and in every mode; no flag hides it.
 - `/version`, `/help`, `/timeout`, `/findings`, `/tls`, `/cert inspect` output is unchanged apart from the banner and the earlier glyph substitutions; exit codes identical.
 - JSON payload identical apart from timestamps/fingerprints; no presentation data in the contract.
+- Every result-frame row in the shell is exactly `transcript width - FRAME_MARGIN` cells, at any window size.
 - 302 tests pass (6 skipped); `tests/test_result_frames.py` covers streaming frames, the composer and colours while running.
 - The screen renderer paints with `paint_screen()` (terminal colour mode only), never `paint()`: `paint()` goes plain while `_CAPTURE` is set, and the spinner/streaming redraw the screen during every command — using it made the banner and composer colourless while running.
 - `-c` batch output, redirected output and `--no-tui` are untouched; the shell never runs unless both stdin and stdout are terminals.
