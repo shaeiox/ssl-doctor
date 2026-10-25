@@ -6,4 +6,4 @@ new ADR that references it.
 
 | ADR | Title | Status |
 |---|---|---|
-| [ADR-001](ADR-001-remembered-servers.md) | Remembered servers — profiles on disk, passwords only in the OS vault | Proposed |
+| [ADR-001](ADR-001-remembered-servers.md) | Remembered servers — profiles on disk, passwords only in the OS vault | Accepted |

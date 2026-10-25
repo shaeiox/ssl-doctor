@@ -1,6 +1,6 @@
 # ADR-001: Remembered servers — profiles on disk, passwords only in the OS vault
 
-- **Status:** Proposed (2026-10-25)
+- **Status:** Accepted (2026-10-25; implemented on `feat/remembered-servers`)
 - **Deciders:** eleven (owner)
 - **Change:** `openspec/changes/remembered-servers/`
 
@@ -66,7 +66,7 @@ Split what is remembered into two stores with different protection:
    --all` and `/server forget-password <name>` delete. Saved passwords unused for
    90 days expire.
 
-### Defaults recorded here, to confirm before implementation
+### Defaults (accepted with the change)
 
 | Question | Proposed default |
 |---|---|
@@ -103,3 +103,22 @@ Split what is remembered into two stores with different protection:
   profiles. Headless Linux gets no password caching.
 - **Compatibility:** existing prompts stay as the path for a new server; the
   trust store, askpass helper and redaction are unchanged.
+
+## Implementation notes (2026-10-25)
+
+Recorded while implementing; none changes the decision.
+
+- The profile stores **all** `SHA256:` fingerprints the trusted server
+  presented (`hostkey_fingerprints`, up to 8), not one; any match releases the
+  password, as any matching key type makes the host trusted.
+- Windows keeps the fingerprints in the credential's `Comment`
+  (`hostkey=<fp>,<fp>`); the Secret Service keeps one item per fingerprint
+  with a `hostkey` attribute, so the keyring's own attribute match enforces
+  the binding.
+- Profile values that `ssh` would read as an option (a leading `-` in host,
+  user or key path) are rejected on load, in addition to the field allowlist.
+- `/scan` asks *Use remembered server …?* before falling back to the prompts;
+  declining skips the recent-servers list.
+- Windows passwords longer than 2560 bytes (the Credential Manager limit) are
+  not saved; the operator is told and still connects.
+

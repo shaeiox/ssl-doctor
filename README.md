@@ -22,11 +22,13 @@ python3 ssldoctor.py -c "/scan example.com --with-server" -c "/report both out"
 | `-c "<command>"` | run a command non-interactively (repeatable); exit code `1` when the diagnosis is `FAIL` |
 | `--timeout <seconds>` | network timeout (default 8 s; `/timeout` changes it in a session) |
 | `--no-tui` (or `--plain`) | line-oriented REPL instead of the full-screen shell |
+| `--no-remember` | never offer to remember servers and never use saved passwords (also `SSL_DOCTOR_REMEMBER=off`) |
 | `--typewriter`, `--typewriter-speed <cps>` | type output out gradually on an interactive terminal (also `/typewriter on\|off\|speed <n>`) |
 | `-h`, `--help` | banner and command list |
 
 Environment: `NO_COLOR` / `SSL_DOCTOR_COLOR=never|always` control colour,
-`SSL_DOCTOR_TUI=0` disables the full-screen shell.
+`SSL_DOCTOR_TUI=0` disables the full-screen shell, `SSL_DOCTOR_REMEMBER=off`
+disables remembered servers.
 
 ### Development
 
@@ -311,7 +313,9 @@ Via a read-only SSH session (`/server connect` or `/scan --server-only` /
 | `/local [cert]` | Client machine: OS, clock skew vs server, proxy, Windows stores/root-CA presence, certutil chain engine, Schannel events |
 | `/cert inspect <file> [host]` | Parse PEM/DER cert or chain file: dates, SANs, fingerprints, chain order |
 | `/cert match <cert> <key>` | Prove key belongs to cert (digest comparison only) |
-| `/server connect · status · disconnect` | Interactive SSH setup with verified host keys |
+| `/server connect [name] · status · disconnect` | SSH setup with verified host keys; `name` connects to a remembered server without the prompts |
+| `/servers` | Remembered servers: name, `user@host:port`, auth, whether a password is saved, last use (never the password) |
+| `/server forget <name>\|--all` · `/server forget-password <name>` | Forget a remembered server and its saved password, or only the password |
 | `/server overview · nginx · cert · config · logs · compare` | The read-only server-side checks listed above |
 | `/diagnose` | Correlate everything into ranked causes (confirmed / probable / possible) with evidence + remediation |
 | `/report [html\|json\|both] [path]` | Self-contained HTML and/or machine-readable JSON |
@@ -342,6 +346,23 @@ for the optional service in [`service/`](service/); see
 - Host keys come from `ssh-keyscan`; if it cannot negotiate a key exchange
   (some builds offer `sntrup761x25519` without implementing it), they are read
   through `ssh` with every authentication method off.
+- **Remembered servers.** After a successful `/server connect` you are asked
+  *Remember this server? [P]rofile only (default) · [S]ave password too · [N]o*.
+  A profile is non-secret (host, port, user, auth method, key path, TLS
+  target) and lives in `~/.ssl-doctor/profiles.json` (owner-only, written
+  atomically, validated on load). A saved password lives **only** in the
+  operating system's credential vault — Windows Credential Manager, or the
+  Linux Secret Service (GNOME Keyring, KWallet) through `secret-tool` with the
+  password on stdin. Without a vault (headless Linux, SSH sessions) passwords
+  are never saved and are asked every time; there is no file fallback.
+- A saved password is released only after the host key is trusted **and**
+  matches the fingerprint it was saved with: a changed key refuses the
+  connection before the vault is read, and a re-trusted key asks for the
+  password again. A password the server rejects is deleted; saved passwords
+  unused for 90 days expire. Batch runs (`-c`), agents and the service never
+  remember. Key logins remember only the key path — passphrases stay with
+  `ssh-agent` / Pageant, the stronger choice for important servers. See
+  [ADR-001](docs/decisions/ADR-001-remembered-servers.md).
 - No `sudo`, no service restarts, no config edits — when the account lacks
   rights, checks report `NOT TESTED` and say exactly what rights are needed.
 - Windows-only checks (stores, certutil, Schannel) activate solely on Windows.

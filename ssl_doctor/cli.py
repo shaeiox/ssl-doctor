@@ -25,6 +25,7 @@ import sys
 import textwrap
 import threading
 import time
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from . import APP_NAME, __version__
@@ -36,6 +37,8 @@ from . import local as localmod
 from . import netchecks
 from . import report as reportmod
 from . import server as servermod
+from . import profiles as profilesmod
+from . import vault as vaultmod
 
 _TW_ENABLED = False
 _TW_CPS = 40.0
@@ -335,6 +338,7 @@ COMMANDS: List[tuple] = [
     ("/diagnose", "correlate findings into root causes"),
     ("/findings", "list everything recorded this session"),
     ("/copy", "copy the previous response (or 'all') to the clipboard"),
+    ("/servers", "remembered SSH servers (passwords are never shown)"),
     ("/report", "write an HTML, JSON or AI-ready (agent) report"),
     ("/timeout", "show or set the network timeout"),
     ("/clear", "discard recorded findings"),
@@ -343,12 +347,27 @@ COMMANDS: List[tuple] = [
 ]
 
 
-def command_completions(prefix: str, limit: int = 3) -> List[tuple]:
-    """Commands matching `prefix`, best match first, for the completion menu."""
-    word = (prefix or "").strip().lower()
-    if not word.startswith("/"):
+# commands whose argument is a remembered server's name
+PROFILE_ARGUMENT_COMMANDS = ("/server connect", "/server forget-password", "/server forget")
+
+
+def command_completions(prefix: str, limit: int = 3, profiles=()) -> List[tuple]:
+    """Commands matching `prefix`, best match first, for the completion menu.
+
+    After a command that takes a remembered server (`/server connect `), the
+    rows are that command with each matching profile name instead.
+    """
+    text = (prefix or "").lstrip()
+    for command in PROFILE_ARGUMENT_COMMANDS:
+        if text.lower().startswith(command + " "):
+            partial = text[len(command) + 1:].strip()
+            if " " in partial:
+                return []
+            return [(f"{command} {p.name}", p.endpoint) for p in profiles
+                    if p.name.startswith(partial)][:max(0, limit)]
+    word = text.lower()
+    if not word.startswith("/") or " " in word:     # a typed space ends the command word
         return []
-    word = word.split(" ", 1)[0]
     exact = [row for row in COMMANDS if row[0] == word]
     starts = [row for row in COMMANDS if row[0].startswith(word) and row[0] != word]
     inside = [row for row in COMMANDS if word.lstrip("/") and word.strip("/") in row[0]
@@ -922,6 +941,36 @@ class _ResponseRecorder:
 # ------------------------------------------------------------------- CLI
 
 
+def remember_enabled(env, batch: bool, interactive: bool, no_remember: bool = False) -> bool:
+    """Whether this session may offer to remember servers and use saved passwords."""
+    setting = (env.get("SSL_DOCTOR_REMEMBER") or "").strip().lower()
+    return (interactive and not batch and not no_remember
+            and setting not in ("off", "0", "no", "false"))
+
+
+@dataclass
+class _ConnectSettings:
+    """What /server connect needs, whether typed or taken from a profile."""
+    host: str
+    port: int
+    username: str
+    auth: str
+    key_path: str = ""
+    tls_host: str = ""
+    tls_port: int = 443
+    tls_explicit: bool = False
+    profile: Optional[profilesmod.Profile] = None
+    resave: bool = False            # a saved password could not be used: offer to replace it
+
+    @classmethod
+    def from_profile(cls, profile) -> "_ConnectSettings":
+        return cls(host=profile.host, port=profile.port, username=profile.username,
+                   auth=profile.auth, key_path=os.path.expanduser(profile.key_path),
+                   tls_host=profile.tls_host or profile.host, tls_port=profile.tls_port,
+                   tls_explicit=bool(profile.tls_host and profile.tls_host != profile.host),
+                   profile=profile)
+
+
 class SSLDoctorCLI:
     def __init__(self) -> None:
         self.store = F.FindingStore()
@@ -938,6 +987,10 @@ class SSLDoctorCLI:
         self._session_log: List[str] = []
         self.use_tui: Optional[bool] = None  # None = decide from the terminal
         self._BATCH_MODE = False
+        # remembered servers: loaded on first use (injectable for tests)
+        self.no_remember = False
+        self._profile_store: Optional[profilesmod.ProfileStore] = None
+        self._secret_vault: Optional[vaultmod.SecretVault] = None
         # typewriter state
         self._typewriter_enabled = False
         self._typewriter_cps = 40.0
@@ -1114,7 +1167,10 @@ class SSLDoctorCLI:
             ("/local", "diagnostics for this machine (Windows-aware)"),
             ("/cert inspect <file> [hostname]", "parse a PEM/DER certificate or chain file"),
             ("/cert match <cert> <key>", "verify a private key belongs to a certificate"),
-            ("/server connect", "interactive SSH setup for authorized server-side checks"),
+            ("/server connect [name]", "SSH setup for authorized server-side checks (name: a remembered server)"),
+            ("/servers", "list remembered servers; passwords live only in the OS credential vault"),
+            ("/server forget <name>|--all", "forget a remembered server and its saved password"),
+            ("/server forget-password <name>", "delete only the saved password"),
             ("/server status", "show SSH session state"),
             ("/server overview", "remote OS / web-server identification"),
             ("/server nginx [domain[:port]]", "examine nginx SSL config: vhost match, protocols, ciphers, cert/key"),
@@ -1133,6 +1189,8 @@ class SSLDoctorCLI:
             ("/version", "show version"),
             ("/typewriter [on|off|speed <n>]", "toggle typewriter output (tty only)"),
             ("/exit", "leave ssl-doctor"),
+            ("--no-remember", "start option: never remember servers or use saved passwords "
+                              "(also SSL_DOCTOR_REMEMBER=off)"),
         ]
         self.out(paint(f"{APP_NAME} commands:", "primary", bold=True))
         for c, d in rows:
@@ -1405,7 +1463,13 @@ class SSLDoctorCLI:
             self.remote_facts.update(hs_facts)
             print_findings(extras)
         if not (self.server and self.server.connected):
-            self._server_connect()
+            match = self._profiles().match_domain(host) if not self._batch_mode else None
+            if match is not None and self.prompt(
+                    f"Use remembered server {match.name} ({match.endpoint})? (yes/no)",
+                    "yes").lower() in ("yes", "y"):
+                self._server_connect(profile=match)
+            else:
+                self._server_connect(offer_recent=match is None)
         if not (self.server and self.server.connected):
             return
         srv = self.server
@@ -1434,7 +1498,10 @@ class SSLDoctorCLI:
     def cmd_server(self, args: List[str]) -> None:
         sub = args[0].lower() if args else "status"
         if sub == "connect":
-            self._server_connect()
+            self._server_connect(args[1] if len(args) > 1 else "")
+            return
+        if sub in ("forget", "forget-password"):
+            self._server_forget(args[1:], password_only=sub == "forget-password")
             return
         if sub == "disconnect":
             if self.server:
@@ -1505,54 +1572,235 @@ class SSLDoctorCLI:
             return
         self.store.extend(items)
 
-    def _server_connect(self) -> None:
+    # ---------------- remembered servers ----------------
+    def _interactive_session(self) -> bool:
+        if self._tui is not None:
+            return True
+        try:
+            return sys.stdin.isatty() and sys.stdout.isatty()
+        except Exception:
+            return False
+
+    def _remembering(self) -> bool:
+        return remember_enabled(os.environ, batch=self._batch_mode,
+                                interactive=self._interactive_session(),
+                                no_remember=self.no_remember)
+
+    def _profiles(self) -> profilesmod.ProfileStore:
+        if self._profile_store is None:
+            self._profile_store = profilesmod.ProfileStore(warn=self.note).load()
+            if self._remembering():
+                for name in self._profile_store.expire(self._vault()):
+                    self.note(f"saved password for {name} expired after "
+                              f"{vaultmod.EXPIRY_DAYS} days unused and was deleted")
+        return self._profile_store
+
+    def _vault(self) -> vaultmod.SecretVault:
+        if self._secret_vault is None:
+            self._secret_vault = vaultmod.open_vault(enabled=self._remembering())
+        return self._secret_vault
+
+    def _completer(self):
+        """The shell's completion callback, with remembered servers as arguments."""
+        def complete(prefix: str) -> List[tuple]:
+            try:
+                profiles = self._profiles().all()
+            except Exception:
+                profiles = []
+            return command_completions(prefix, profiles=profiles)
+        complete.completes_arguments = True       # type: ignore[attr-defined]
+        return complete
+
+    def cmd_servers(self, args: List[str]) -> None:
+        store = self._profiles()
+        rows = store.all()
+        if not rows:
+            self.note("No servers are remembered yet. After a successful /server connect "
+                      "you are asked whether to remember it.")
+            return
+        vault_name = self._vault().name
+        self.out(paint("Remembered servers", "primary", bold=True))
+        self.out("  " + paint(f"{'NAME':<16} {'ENDPOINT':<36} {'AUTH':<9} "
+                              f"{'PASSWORD':<10} LAST USED", "muted"))
+        for p in rows:
+            saved = "saved" if p.password_saved else "-"
+            used = p.last_used[:10]
+            self.out(f"  {p.name:<16} {p.endpoint:<36} {p.auth:<9} {saved:<10} {used}")
+        if any(p.password_saved for p in rows):
+            self.note(f"saved passwords are kept in {vault_name}, never in a file")
+        if any(p.auth == "password" for p in rows):
+            self.note("for password servers a key login (with ssh-agent) is the stronger "
+                      "choice")
+        sep = f" {_GLYPHS['sep']} " if _GLYPHS.unicode else " - "
+        self.out(paint(f"connect: /server connect <name>{sep}forget: /server forget <name>",
+                       "muted", dim=True))
+
+    def _server_forget(self, args: List[str], password_only: bool) -> None:
+        store = self._profiles()
+        command = "/server forget-password" if password_only else "/server forget"
+        if not args:
+            self.error(f"usage: {command} <name>" + ("" if password_only else "|--all"))
+            return
+        if args[0] == "--all" and not password_only:
+            everything = store.all()
+            if not everything:
+                self.note("no servers are remembered")
+                return
+            answer = self.prompt(f"Forget all {len(everything)} remembered servers and their "
+                                 f"saved passwords? (yes/no)", "no").lower()
+            if answer not in ("yes", "y"):
+                self.note("nothing was forgotten")
+                return
+            for profile in everything:
+                self._delete_saved_password(profile)
+                store.forget(profile.name)
+            self.note(f"forgot {len(everything)} remembered servers")
+            return
+        profile = store.get(args[0])
+        if profile is None:
+            close = store.closest(args[0])
+            hint = f"; did you mean {', '.join(close)}?" if close else ""
+            self.error(f"no remembered server named {args[0]!r}{hint}")
+            return
+        self._delete_saved_password(profile)
+        if password_only:
+            profile.password_saved = False
+            store.save(profile)
+            self.note(f"saved password for {profile.name} deleted; the server stays "
+                      "remembered")
+        else:
+            store.forget(profile.name)
+            self.note(f"forgot {profile.name} and any saved password")
+
+    def _delete_saved_password(self, profile) -> None:
+        # always, even when the profile says no password: a crash can orphan one
+        try:
+            self._vault().delete(vaultmod.target_for(profile))
+        except vaultmod.VaultError as exc:
+            self.note(f"could not delete the saved password for {profile.name}: {exc}")
+
+    # ---------------- /server connect ----------------
+    def _server_connect(self, name: str = "",
+                        profile: Optional[profilesmod.Profile] = None,
+                        offer_recent: bool = True) -> None:
+        """settings -> host key -> secret -> session -> outcome (ADR-001).
+
+        The password is asked for, or read from the vault, only once the host
+        key is trusted, so no secret is ever collected for a refused host.
+        """
+        settings = self._connect_settings(name, profile, offer_recent)
+        if settings is None:
+            return
+        key = self._verify_host_key(settings)
+        if key is None:
+            return
+        fingerprints = servermod.sha256_fingerprints(key.fingerprints)
+        password, source = "", ""
+        if settings.auth == "password":
+            password, source = self._saved_password(settings, fingerprints)
+            if not password:
+                password = self._ask_password()
+                if password is None:
+                    return
+        connected, auth_failed = self._open_session(settings, password)
+        if not connected and auth_failed and source:
+            self._forget_password(settings.profile, "the server rejected the saved password")
+            password = self._ask_password()
+            if password is None:
+                return
+            source = ""
+            connected, _ = self._open_session(settings, password)
+        if connected:
+            self._after_connect(settings, fingerprints, password, source)
+
+    def _connect_settings(self, name: str, profile,
+                          offer_recent: bool = True) -> Optional["_ConnectSettings"]:
+        store = self._profiles()
+        if name:
+            profile = store.get(name)
+            if profile is None:
+                close = store.closest(name)
+                hint = f"; did you mean {', '.join(close)}?" if close else ""
+                self.error(f"no remembered server named {name!r}{hint} (/servers lists them)")
+                return None
+        elif profile is None and offer_recent and store.all() and not self._batch_mode:
+            profile = self._pick_recent(store)
+            if profile is False:
+                return None
+        if profile is not None:
+            if profile.auth == "key" and not os.path.exists(os.path.expanduser(profile.key_path)):
+                self.error(f"key not found: {profile.key_path}")
+                return None
+            self.out(paint(f"connecting to remembered server {profile.name} "
+                           f"({profile.endpoint})", "primary", bold=True))
+            return _ConnectSettings.from_profile(profile)
+        return self._ask_settings(store)
+
+    def _pick_recent(self, store):
+        recent = store.recent(5)
+        choices = "  ".join(f"{i}={p.name}" for i, p in enumerate(recent, 1))
+        self.out(paint("Remembered servers:", "primary", bold=True))
+        for i, p in enumerate(recent, 1):
+            self.out(f"  {i}  {p.name:<16} {p.endpoint}")
+        answer = self.prompt(f"server: {choices}  n=new server", "1").strip().lower()
+        if answer in ("n", "new"):
+            return None
+        if answer.isdigit() and 1 <= int(answer) <= len(recent):
+            return recent[int(answer) - 1]
+        chosen = store.get(answer)
+        if chosen is None:
+            self.error(f"no remembered server {answer!r}")
+            return False
+        return chosen
+
+    def _ask_settings(self, store) -> Optional["_ConnectSettings"]:
         self.out(paint("SSH connection setup (credentials are never displayed "
                        "or written to disk):", "primary", bold=True))
         host = self.prompt("SSH hostname or IP")
         if not host:
             self.error("hostname required")
-            return
-        ssh_port_s = self.prompt("SSH port", "22")
+            return None
+        known = store.for_host(host)
+        ssh_port_s = self.prompt("SSH port", str(known.port) if known else "22")
         if not ssh_port_s.isdigit():
             self.error("invalid port")
-            return
-        user = self.prompt("SSH username", getpass.getuser())
+            return None
+        user = self.prompt("SSH username", known.username if known else getpass.getuser())
         auth = ""
+        default_auth = "1" if known and known.auth == "password" else "2"
         while auth not in ("1", "2"):
-            auth = self.prompt("auth method: 1=password  2=private key", "2")
-        password, key_path, method = "", "", "key"
-        if auth == "1":
-            method = "password"
-            try:
-                if self._tui is not None:
-                    password = self._tui.read_secret("SSH password (hidden)")
-                else:
-                    password = getpass.getpass("SSH password (hidden): ")
-            except EOFError:
-                self.error("cannot read password in this terminal")
-                return
-            if not password:
-                self.error("empty password")
-                return
-        else:
-            key_path = os.path.expanduser(self.prompt("private key path",
-                                                      "~/.ssh/id_rsa"))
+            auth = self.prompt("auth method: 1=password  2=private key", default_auth)
+        key_path, method = "", "password" if auth == "1" else "key"
+        if method == "key":
+            default_key = known.key_path if known and known.key_path else "~/.ssh/id_rsa"
+            key_path = os.path.expanduser(self.prompt("private key path", default_key))
             if not os.path.exists(key_path):
                 self.error(f"key not found: {key_path}")
-                return
-        tls_host = self.prompt("TLS target hostname (blank = SSH host)", "")
-        tls_port_s = self.prompt("TLS target port", "443")
+                return None
+        default_tls = known.tls_host if known and known.tls_host != known.host else ""
+        tls_host = self.prompt("TLS target hostname (blank = SSH host)", default_tls)
+        tls_port_s = self.prompt("TLS target port", str(known.tls_port) if known else "443")
         tls_port = int(tls_port_s) if tls_port_s.isdigit() else 443
+        settings = _ConnectSettings(host=host, port=int(ssh_port_s), username=user,
+                                    auth=method, key_path=key_path,
+                                    tls_host=tls_host or host, tls_port=tls_port,
+                                    tls_explicit=bool(tls_host))
+        if known and (known.port, known.username, known.auth) == \
+                (settings.port, settings.username, settings.auth):
+            settings.profile = known
+        return settings
 
+    def _verify_host_key(self, settings) -> Optional[servermod.HostKeyInfo]:
+        host, port, user = settings.host, settings.port, settings.username
         timeout = self.net_timeout
         with Spinner(f"verifying host key of {host}"):
-            key = servermod.host_key_status(host, int(ssh_port_s), timeout, user)
+            key = servermod.host_key_status(host, port, timeout, user)
         if key.status == "unreachable":
             self.error(f"cannot reach the SSH service / host key: {key.detail}")
             self.store.add(F.Finding(
                 "ssh.hostkey", "SSH host key verification", F.FAIL, F.SCOPE_SERVER,
-                [key.detail], target=f"{host}:{ssh_port_s}"))
-            return
+                [key.detail], target=f"{host}:{port}"))
+            return None
         if key.status == "changed":
             self.error("HOST KEY CHANGED - possible MITM. Refusing to connect.")
             for fp in key.fingerprints:
@@ -1561,8 +1809,8 @@ class SSLDoctorCLI:
                       "entry from ~/.ssl-doctor/known_hosts before retrying.")
             self.store.add(F.Finding(
                 "ssh.hostkey", "SSH host key verification", F.FAIL, F.SCOPE_SERVER,
-                [key.detail, *key.fingerprints], target=f"{host}:{ssh_port_s}"))
-            return
+                [key.detail, *key.fingerprints], target=f"{host}:{port}"))
+            return None
         if key.status == "unknown":
             self.out(paint("The host key is not in the ssl-doctor trust store:", "warning"))
             for fp in key.fingerprints:
@@ -1571,31 +1819,134 @@ class SSLDoctorCLI:
                               "no").lower()
             if ans not in ("yes", "y"):
                 self.note("connection aborted before authentication")
-                return
-            ok, msg = servermod.store_host_key(host, int(ssh_port_s), timeout, user)
+                return None
+            ok, msg = servermod.store_host_key(host, port, timeout, user)
             if not ok:
                 self.error(msg)
-                return
+                return None
             self.note(msg)
+        return key
 
+    def _saved_password(self, settings, fingerprints) -> tuple:
+        """(password, vault name) when the vault releases one for this key."""
+        profile = settings.profile
+        if profile is None or not profile.password_saved:
+            return "", ""
+        store = self._vault()
+        ok, reason = store.available()
+        if not ok:
+            self.note(f"saved password not available ({reason}); asking instead")
+            return "", ""
+        if profile.hostkey_fingerprints and not (set(fingerprints)
+                                                 & set(profile.hostkey_fingerprints)):
+            settings.resave = True
+            self.note("the server's host key differs from the one the password was saved "
+                      "with, so the saved password is not used")
+            return "", ""
+        try:
+            secret = store.get(vaultmod.target_for(profile), fingerprints)
+        except vaultmod.VaultError as exc:
+            self.note(f"saved password not available ({exc}); asking instead")
+            return "", ""
+        if not secret:
+            settings.resave = True
+            self.note(f"no saved password found in {store.name}; asking instead")
+            return "", ""
+        self.note(f"password from {store.name}")
+        return secret, store.name
+
+    def _ask_password(self) -> Optional[str]:
+        try:
+            if self._tui is not None:
+                password = self._tui.read_secret("SSH password (hidden)")
+            else:
+                password = getpass.getpass("SSH password (hidden): ")
+        except EOFError:
+            self.error("cannot read password in this terminal")
+            return None
+        if not password:
+            self.error("empty password")
+            return None
+        return password
+
+    def _open_session(self, settings, password: str) -> tuple:
+        """(connected, authentication failed)."""
         cfg = servermod.SSHConfig(
-            host=host, port=int(ssh_port_s), username=user, auth=method,
-            key_path=key_path, connect_timeout=timeout,
-            command_timeout=self.command_timeout,
-            tls_host=tls_host or host, tls_port=tls_port)
+            host=settings.host, port=settings.port, username=settings.username,
+            auth=settings.auth, key_path=settings.key_path,
+            connect_timeout=self.net_timeout, command_timeout=self.command_timeout,
+            tls_host=settings.tls_host, tls_port=settings.tls_port)
         if self.server:
             self.server.disconnect()
         self.server = servermod.ServerSession(cfg, password=password)
-        with Spinner(f"connecting to {user}@{host}"):
+        with Spinner(f"connecting to {settings.username}@{settings.host}"):
             items = self.server.connect()
         self.store.extend(items)
         print_findings(items)
-        if self.server.connected:
-            if tls_host and tls_host != host:
-                self.note(f"TLS target recorded as {tls_host}:{tls_port} (differs from "
-                          f"SSH endpoint)")
-            self.out(paint("next: /server overview, /server cert <path> [key], "
-                           "/server compare", "muted", dim=True))
+        auth_failed = any(f.check == "ssh.auth" and f.status == F.FAIL for f in items)
+        return bool(self.server.connected), auth_failed
+
+    def _forget_password(self, profile, why: str) -> None:
+        try:
+            self._vault().delete(vaultmod.target_for(profile))
+        except vaultmod.VaultError as exc:
+            self.note(f"could not delete the saved password: {exc}")
+        profile.password_saved = False
+        self._profiles().save(profile)
+        self.note(f"{why}; it was removed from {self._vault().name}")
+
+    def _after_connect(self, settings, fingerprints, password: str, source: str) -> None:
+        if settings.tls_explicit and settings.tls_host != settings.host:
+            self.note(f"TLS target recorded as {settings.tls_host}:{settings.tls_port} "
+                      f"(differs from SSH endpoint)")
+        profile = settings.profile
+        if self._remembering():
+            if profile is None:
+                self._offer_remember(settings, fingerprints, password)
+            else:
+                profile.last_used = profilesmod.now_iso()
+                if (not source and password and settings.resave
+                        and self._vault().available()[0]):
+                    answer = self.prompt(f"Save this password for {profile.name} in "
+                                         f"{self._vault().name}? (yes/no)", "no").lower()
+                    if answer in ("yes", "y"):
+                        self._store_password(profile, password, fingerprints)
+                self._profiles().save(profile)
+        self.out(paint("next: /server overview, /server cert <path> [key], "
+                       "/server compare", "muted", dim=True))
+
+    def _offer_remember(self, settings, fingerprints, password: str) -> None:
+        store = self._profiles()
+        ok, reason = self._vault().available()
+        can_save = settings.auth == "password" and ok and bool(fingerprints)
+        if settings.auth == "password" and not ok:
+            self.note(f"passwords cannot be saved here: {reason}")
+        options = "[P]rofile only  " + ("[S]ave password too  " if can_save else "") + "[N]o"
+        answer = self.prompt(f"Remember this server? {options}", "p").strip().lower()
+        if answer not in ("p", "profile", "s", "save") or (answer[0] == "s" and not can_save):
+            if answer not in ("n", "no"):
+                self.note("not remembered")
+            return
+        profile = profilesmod.Profile(
+            name=profilesmod.default_name(settings.host, {p.name for p in store.all()}),
+            host=settings.host, port=settings.port, username=settings.username,
+            auth=settings.auth, key_path=settings.key_path, tls_host=settings.tls_host,
+            tls_port=settings.tls_port, hostkey_fingerprints=fingerprints[:8])
+        if answer[0] == "s":
+            self._store_password(profile, password, fingerprints)
+        store.save(profile)
+        self.note(f"remembered as {profile.name} - next time: /server connect {profile.name}")
+
+    def _store_password(self, profile, password: str, fingerprints) -> None:
+        try:
+            self._vault().put(vaultmod.target_for(profile), password, fingerprints)
+        except vaultmod.VaultError as exc:
+            self.note(f"password not saved: {exc}")
+            profile.password_saved = False
+            return
+        profile.password_saved = True
+        profile.hostkey_fingerprints = list(fingerprints)[:8]
+        self.note(f"password saved in {self._vault().name}")
 
     # ---------------- /diagnose ----------------
     def cmd_diagnose(self, args: List[str]) -> None:
@@ -1875,7 +2226,7 @@ class SSLDoctorCLI:
     def _repl_tui(self) -> int:
         from . import tui as tuimod
         session = tuimod.TuiSession(renderer=self._tui_frame,
-                                    completer=command_completions,
+                                    completer=self._completer(),
                                     on_copy=self.copy_text,
                                     last_response=lambda: self._last_response)
         set_capture_width(self._capture_width(session))
@@ -1997,6 +2348,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             i += 2
         elif argv[i] in ("--no-tui", "--plain"):
             cli.use_tui = False
+            i += 1
+        elif argv[i] == "--no-remember":
+            cli.no_remember = True
             i += 1
         elif argv[i] == "--typewriter":
             cli._typewriter_enabled = True

@@ -18,6 +18,7 @@ used automatically if it happens to be importable).  Security properties:
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -323,6 +324,19 @@ def _scan_host_keys_ssh(host: str, port: int, timeout: float, username: str,
     if lines:
         return lines, ""
     return [], f"{keyscan_error}; ssh: {last_error or 'no host keys retrieved'}"
+
+
+_SHA256 = re.compile(r"SHA256:[A-Za-z0-9+/]{43}")
+
+
+def sha256_fingerprints(lines: List[str]) -> List[str]:
+    """The `SHA256:` fingerprints in `ssh-keygen -l` output lines, in order."""
+    found: List[str] = []
+    for line in lines:
+        for fp in _SHA256.findall(line):
+            if fp not in found:
+                found.append(fp)
+    return found
 
 
 def host_key_status(host: str, port: int, timeout: float = 8.0,

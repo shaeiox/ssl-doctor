@@ -1256,7 +1256,8 @@ class TuiSession:
             self.menu_index = 0
             return
         text = self.input
-        if not text.startswith("/") or " " in text:
+        arguments = getattr(self.completer, "completes_arguments", False)
+        if not text.startswith("/") or (" " in text and not arguments):
             self.menu = []
             self.menu_index = 0
             return

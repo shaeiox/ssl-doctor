@@ -331,27 +331,34 @@ about origin correctly.
 
 ### 7.3 `/server connect` — SSH setup
 
-`_server_connect()` in `ssl_doctor/cli.py`:
+`_server_connect(name="", profile=None)` in `ssl_doctor/cli.py` runs five
+steps (ADR-001); no password is asked for, or read from the vault, before the
+host key is trusted:
 
-1. Prompts for SSH host, port (default `22`), username
-   (default `getpass.getuser()`), and auth method
-   (`1=password`, `2=private key`).
-2. For a key: expands and checks the path; for a password: reads it with
-   `getpass.getpass()` (never echoed, never persisted).
-3. Prompts for the TLS target host (blank means the SSH host) and TLS port
-   (default `443`).
-4. Calls `server.host_key_status()`:
-   - `unreachable` → records a FAIL, stops
-   - `changed` → records a FAIL, refuses to connect (possible MITM), tells the
-     user to remove the stale entry from `~/.ssl-doctor/known_hosts`
-   - `unknown` → displays fingerprints and asks for explicit trust; on “yes”
-     calls `server.store_host_key()`
-   - `trusted` → proceeds
-5. Builds `server.SSHConfig`, replaces any existing session, creates
-   `server.ServerSession`, and calls `connect()`.
-6. `ServerSession.connect()` re-verifies the host key, runs a read-only
-   `ssh ... true` probe, and reports `ssh.hostkey` and `ssh.auth` findings.
-7. On success it notes the TLS target and suggests next commands.
+1. **Settings** — `/server connect <name>` takes the remembered profile
+   (`ssl_doctor/profiles.py`, `~/.ssl-doctor/profiles.json`); without a name and
+   with profiles present it offers the recent servers (`n` = new); `/scan`
+   offers the profile whose TLS target or host matches. Otherwise it prompts
+   for host, port (`22`), user (`getpass.getuser()`), auth method
+   (`1=password`, `2=private key`), key path, TLS target host and port, with
+   defaults pre-filled from a profile for the same host.
+2. **Host key** — `server.host_key_status()`: `unreachable` and `changed`
+   record a FAIL and stop; `unknown` shows the fingerprints and asks for
+   explicit trust (`server.store_host_key()` on "yes"); `trusted` proceeds.
+3. **Secret** — for password logins: when the profile has a saved password,
+   the vault (`ssl_doctor/vault.py`: Windows Credential Manager, Secret
+   Service, or `NullVault`) is read with the presented `SHA256:` fingerprints;
+   it is skipped when they do not match the ones the password was saved with.
+   Otherwise `getpass.getpass()` / the shell's masked input asks for it.
+4. **Session** — `server.ServerSession(cfg, password).connect()` re-verifies
+   the host key, runs `ssh ... true`, and reports `ssh.hostkey` / `ssh.auth`.
+   A saved password the server rejects is deleted from the vault and asked
+   once.
+5. **Outcome** — first successful connection: *Remember this server?
+   [P]rofile only · [S]ave password too · [N]o*; later ones update
+   `last_used` (and offer to re-save a password that could not be used).
+   Remembering is off for `-c`, non-interactive sessions, `--no-remember` and
+   `SSL_DOCTOR_REMEMBER=off`; the vault is then a `NullVault`.
 
 `ServerSession.run()` invokes the system `ssh` binary with:
 

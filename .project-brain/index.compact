@@ -10,7 +10,7 @@
 @src index.md  @gen 2026-10-25  @updated 2026-10-25
 
 P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
-  ~ 2026-10-25 next: owner confirms the 4 defaults, then /openspec-apply-change remembered-servers · blocker: none
+  ~ 2026-10-25 next: Windows CI run (real Credential Manager) + manual checks 6.2, then archive + merge/release · blocker: none
   architecture-and-scope ✓v 2026-10-24 v1
   chain-diagnosis ✓v 2026-10-24 v1
   server-ssh-nginx ✓d 2026-10-25 v2
@@ -22,5 +22,5 @@ P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
   agent-report ✓d 2026-10-24 v1
   copy-to-clipboard ✓d 2026-10-25 v3
   ui-design-system ✓d 2026-10-25 v7
-  remembered-servers ⚠ 2026-10-25 v1
+  remembered-servers ⚠ 2026-10-25 v2
   _decisions ✓v 2026-10-24 v1
