@@ -19,8 +19,10 @@ python3 ssldoctor.py -c "/scan example.com --with-server" -c "/report both out"
 
 | Option | Effect |
 |---|---|
-| `-c "<command>"` | run a command non-interactively (repeatable); exit code `1` when the diagnosis is `FAIL` |
+| `-c "<command>"` | run a command non-interactively (repeatable); exit code `1` when the overall diagnosis is `FAIL`, otherwise `0` (see [Overall result](#overall-result)) |
 | `--timeout <seconds>` | network timeout (default 8 s; `/timeout` changes it in a session) |
+| `--revocation=staple\|online\|off` | revocation checking (default `staple`). `staple` judges the OCSP response the server staples; nothing is sent to the CA. `online` also asks the CA's OCSP responder, then its CRL, for the leaf and each intermediate. This sends the certificates' serial numbers to the CA, so the CA learns which site you checked and from where. `off` checks nothing and reports `not-checked` |
+| `--expiry-warn-days <1-365>` | warn when any certificate expires within this many days (default 30; agents take it per job from the service's target setting) |
 | `--no-tui` (or `--plain`) | line-oriented REPL instead of the full-screen shell |
 | `--no-remember` | never offer to remember servers and never use saved passwords (also `SSL_DOCTOR_REMEMBER=off`) |
 | `--typewriter`, `--typewriter-speed <cps>` | type output out gradually on an interactive terminal (also `/typewriter on\|off\|speed <n>`) |
@@ -250,7 +252,12 @@ wrong endpoint).
 
 | Check id | What it proves |
 |---|---|
-| `tls.chain` | The chain the server **actually sends**, judged on its own: `complete`, `incomplete` (intermediates not sent) or `broken` (a certificate is not issued by the next one, matched by name and key identifier). Reported `NOT TESTED` when the chain can't be read; it never assumes "leaf only". |
+| `tls.chain` | The chain the server **actually sends**, judged on its own. Each link is **verified cryptographically** with `openssl verify`: the next certificate's key must have signed it, and it must be a CA (Basic Constraints, `pathLenConstraint`). Names and key identifiers only pick the candidate. `complete`: PASS, evidence "signatures verified", every path to a trusted root listed (cross-signed chains give several), and a verified chain whose root this machine lacks stays complete ("anchor unknown"). `incomplete`: WARNING, naming the missing issuer, its key identifier and the AIA URL. `broken`: a wrong or misordered issuer is a WARNING, while a failed signature, a non-CA issuer or an exceeded path length is a FAIL. Duplicates are a WARNING. Without `openssl` the links are matched by name only and the chain is never PASS. `NOT TESTED` when the chain can't be read; it never assumes "leaf only". |
+| `chain.validity` | Dates of every certificate after the leaf: expired or not yet valid is FAIL, and an intermediate that expires before the leaf is WARNING ("the chain stops validating on …"). |
+| `chain.trust` | Trust class from verified paths only, never from issuer names: `public` (anchored in this machine's system store, named with its anchor count), `private` (only through a CA file the service references, such as `ssl_trusted_certificate`), `self-signed`, or `unknown`. An expired anchor warns, with the limitation that other clients may build another path. |
+| `cert.policy` | Key and signature policy (`policy 1`, below). |
+| `tls.revocation` | Revocation state `good`, `revoked`, `unavailable` (no OCSP/CRL information), `not-checked` or `inconclusive`, with its source (`stapled`, `ocsp`, `crl`). A response counts only when its signature verifies against the issuer, it names this certificate and it is within its validity window. A stapled response that fails these checks is a server WARNING. A revoked certificate is a confirmed cause. An unreachable responder is `inconclusive` (NOT TESTED), never FAIL. |
+| `chain.usage` | The leaf may authenticate a TLS server (EKU `serverAuth` or unrestricted; Key Usage that fits its key type), and every issuer with a Key Usage includes `keyCertSign`. A client-only certificate is FAIL with its own cause. |
 | `tls.verify` | Validation against this machine's full trust store, including any cached intermediates (what *this* machine sees). |
 | `tls.verify.rootonly` | Validation against trusted **roots only**, with no cached or bundled intermediates (what a client that has never seen the intermediate sees). PASS on `tls.verify` with FAIL here means the server is missing its intermediate. |
 | `tls.hostname` | Name coverage from **subjectAltName only**. A CN-only certificate fails, because modern clients ignore the CN. |
@@ -350,8 +357,11 @@ Via a read-only SSH session (`/server connect` or `/scan --server-only` /
    below run only on files that could be opened; otherwise they are NOT TESTED
    with the reason, so a path problem is never shown as a broken certificate.
 6. **Chain linkage of `ssl_certificate`**: the leaf comes first, and each
-   certificate must be issued by the next one. A leaf-only file (intermediates
-   not sent) or a wrong intermediate gives a WARNING naming the broken link.
+   certificate must be issued **and signed** by the next one (same verification
+   as `tls.chain`). A leaf-only file (intermediates not sent) or a wrong
+   intermediate gives a WARNING naming the broken link. A forged or non-CA
+   intermediate, a file that starts with a CA certificate, or a DER file gives a
+   FAIL. `chain.usage` checks the configured certificate's key usages.
 7. **Certificate details + key pairing** of the referenced files (digest-only
    comparison, key bytes never read out). A key the account may not read —
    normal for root-only keys — makes the pairing NOT TESTED, not a warning.
@@ -367,13 +377,14 @@ Via a read-only SSH session (`/server connect` or `/scan --server-only` /
 | `/scan …` | See table above |
 | `/tls <host\|URL> [--sni name]` | Remote TLS/HTTPS suite: DNS, TCP, handshake, chain, validation, TLS 1.0–1.3 matrix, SNI diff, multi-IP diff, weak ciphers, HTTP redirects |
 | `/local [cert]` | Client machine: OS, clock skew vs server, proxy, Windows stores/root-CA presence, certutil chain engine, Schannel events |
-| `/cert inspect <file> [host]` | Parse PEM/DER cert or chain file: dates, SANs, fingerprints, chain order |
+| `/cert inspect <file> [host]` | Parse a certificate or chain file strictly, by content (PEM, DER; PKCS#7, PKCS#12, keys and CSRs are named, with a conversion hint): every certificate listed with its role (leaf / intermediate / root / unrelated), dates, SANs, fingerprints, order, duplicates. A truncated or corrupt block fails the whole file |
 | `/cert match <cert> <key>` | Prove key belongs to cert (digest comparison only) |
+| `/cert cafile <file>` | Check a root / CA bundle: an entry counts as a root only when it is a CA and its own key signed it; non-roots are named |
 | `/server connect [name] · status · disconnect` | SSH setup with verified host keys; `name` connects to a remembered server without the prompts |
 | `/server config show\|set\|clear [name]` | Per-server nginx settings: `set --cert <path> --key <path> [--conf <path>] [--prefix <path>]` saves manual paths for the connected (or named) remembered server and uses them on every later connection; `clear` returns to automatic discovery; bare `/server config` is the TLS-configuration inventory |
 | `/servers` | Remembered servers: name, `user@host:port`, auth, whether a password is saved, last use (never the password) |
 | `/server forget <name>\|--all` · `/server forget-password <name>` | Forget a remembered server and its saved password, or only the password |
-| `/server overview · nginx · cert · config · logs · compare` | The read-only server-side checks listed above |
+| `/server overview · nginx · cert · services · config · logs · compare` | The read-only server-side checks listed above; `services` names the process on the TLS port (nginx, Apache httpd, HAProxy, or an unsupported one), records the real exit status of the service's own configuration test, compares certificate/key times with the running workers (reload needed?), and finds certbot / acme.sh / lego renewal that manages the configured certificate |
 | `/diagnose` | Correlate everything into ranked causes (confirmed / probable / possible) with evidence + remediation |
 | `/report [html\|json\|both] [path]` | Self-contained HTML and/or machine-readable JSON |
 | `/report agent [dir]` | AI-ready export of the latest completed scan: `agent-report.md` (paste into any AI model; ends with a built-in analysis prompt) and `agent-report.json` (findings contract), in `./ssl-doctor-agent-report-<timestamp>/` or `dir`. Nothing is sent anywhere |
@@ -381,10 +392,48 @@ Via a read-only SSH session (`/server connect` or `/scan --server-only` /
 | `/typewriter [on\|off\|speed <n>]` | Gradual output on an interactive terminal |
 | `/timeout`, `/findings`, `/clear`, `/help`, `/version`, `/exit` | Session utilities |
 
-JSON reports follow the versioned **findings contract** (currently `1.6`;
+JSON reports follow the versioned **findings contract** (currently `1.7`;
 schemas in [`schemas/`](schemas/), reference in
 [`docs/findings-contract.md`](docs/findings-contract.md)). Minor versions only
-add fields, so 1.0–1.5 documents keep validating.
+add fields, so 1.0–1.6 documents keep validating.
+
+### Certificate policy (`policy 1`)
+
+| Rule | Result |
+|---|---|
+| RSA (and RSA-PSS) key below 2048 bits | FAIL |
+| DSA key | FAIL |
+| EC key on a curve other than P-256, P-384 or P-521 | WARNING |
+| Ed25519 / Ed448 | PASS |
+| MD5- or SHA-1-based signature on any certificate except a root's own self-signature | FAIL |
+| Any certificate expiring within the warning threshold (`--expiry-warn-days`, default 30) | WARNING |
+
+Hostname coverage follows modern clients: subjectAltName only (the CN is
+ignored), case-insensitive, internationalised names as A-labels. An IP
+matches only an IP entry. A wildcard covers exactly one whole left-most label,
+never the bare domain, never a partial label (`w*.`), and never a public suffix
+such as `*.co.uk`. That last check uses a built-in list of common suffixes, not
+the full Public Suffix List. The configured certificate on the server
+(`srv.cert`) is judged by the same dates and name rules as the one the server
+presents.
+
+### Overall result
+
+`/diagnose` (and the end of `/scan`) gives one overall result:
+
+- **FAIL**: a cause is *confirmed*, or a check failed and no cause rule
+  explains it. Such a check is listed as unexplained ("No root cause pattern
+  matched these findings: …") and still counts. It is never dropped.
+- **WARNING**: any other cause or unexplained warning exists, or the only
+  failures are of the network path (timeouts, resets) or of SSL Doctor's own
+  session (SSH login, a remote command that could not run).
+- **PASS**: nothing failed or warned. Checks that could not be completed are
+  `NOT TESTED`. They never make the result worse, and the notes list each one
+  with its reason.
+
+A timeout during certificate validation is reported as `NOT TESTED`, not as a
+certificate failure. With `-c`, the exit code is `1` exactly when the result is
+FAIL.
 
 `ssldoctor.py agent enroll|run` runs SSL Doctor as an outbound-only scan agent
 for the optional service in [`service/`](service/); see
@@ -422,6 +471,12 @@ for the optional service in [`service/`](service/); see
   remember. Key logins remember only the key path — passphrases stay with
   `ssh-agent` / Pageant, the stronger choice for important servers. See
   [ADR-001](docs/decisions/ADR-001-remembered-servers.md).
+- **Private keys are never shown and passphrases are never asked for.** Key
+  pairing (`/cert match`, `/server cert`, `/scan --with-server`) compares only
+  public-key SHA-256 digests. An encrypted key (PEM, PKCS#8 PEM or DER, PKCS#12)
+  is detected from its structure and reported as `NOT TESTED` (pairing not
+  possible), never as a mismatch. So is a key this account cannot read, and so
+  is any failed openssl step.
 - **Per-server nginx settings** (`/server config set`) are stored in that
   server's profile next to its connection settings — never a password — and
   apply only to that server. They outlive a saved password's expiry. In manual
@@ -466,7 +521,7 @@ ssl_doctor/
   report.py             JSON + HTML report rendering
   contract.py           findings-contract schema, validation, redaction
   agent.py              outbound-only scan agent (`ssldoctor.py agent`)
-schemas/                published findings-contract JSON schemas (1.0-1.6)
+schemas/                published findings-contract JSON schemas (1.0-1.7)
 docs/                   contract, agents, executed commands, execution flow
 docs/decisions/         architecture decision records (ADRs)
 service/                optional multi-tenant service (separate package)

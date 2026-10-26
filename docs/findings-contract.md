@@ -1,9 +1,10 @@
 # Findings contract (`findings/1.x`)
 
 Every JSON report, agent upload and service export is a findings document.
-Current schema: [`schemas/findings-1.6.schema.json`](../schemas/findings-1.6.schema.json)
+Current schema: [`schemas/findings-1.7.schema.json`](../schemas/findings-1.7.schema.json)
 (source of truth: `ssl_doctor/contract.py`). Earlier minor versions stay
-published: [`findings-1.5`](../schemas/findings-1.5.schema.json),
+published: [`findings-1.6`](../schemas/findings-1.6.schema.json),
+[`findings-1.5`](../schemas/findings-1.5.schema.json),
 [`findings-1.4`](../schemas/findings-1.4.schema.json),
 [`findings-1.3`](../schemas/findings-1.3.schema.json),
 [`findings-1.2`](../schemas/findings-1.2.schema.json),
@@ -19,12 +20,15 @@ published: [`findings-1.5`](../schemas/findings-1.5.schema.json),
 | 1.4 | Per-version probe classes in `facts.probe_policy.support` (`default`, `relaxed-only`, `relaxed-only-unverified`, `rejected`, `inconclusive`) plus `confirmed_legacy` / `unverified_legacy`, and three new observations that say which policy actually proved deprecated-TLS acceptance. A relaxed-policy handshake can no longer be reported as ordinary-client support |
 | 1.5 | Optional `uncertainty` on findings (why the evidence cannot settle the question), `diagnosis.unresolved` (warnings kept visible without a root cause), `facts.probe_policy.default_probe` (raw default-policy probe state, `client-limited` = never sent) and `facts.endpoint_comparison.addresses` (DNS addresses, so partial coverage is explicit) |
 | 1.6 | Check id `nginx.path_resolution`: how `ssl_certificate` / `ssl_certificate_key` were resolved (nginx's configuration-prefix rule or a saved manual setting) and whether the files can be opened, reported apart from certificate validation. No structural change |
+| 1.7 | Check ids for verified certificate analysis (`chain.validity`, `chain.usage`, `chain.trust`, `cert.policy`, `cert.cafile`, `tls.revocation`) and TLS service deployment (`srv.service`, `srv.configtest`, `srv.reload`, `srv.renewal`, `srv.keystartup`, `srv.inventory`); failure kinds `verifier-unavailable`, `key-encrypted`, `key-unreadable`, `command-failed`, `permission-denied` and the chain classes `chain-signature`, `chain-misordered`, `chain-incomplete`, `chain-unverified`, `chain-hygiene`, `chain-wrong-leaf`; optional `facts.certificates` (per judged chain) and `diagnosis.unexplained` (failures no cause rule explained, which now count toward `overall`) |
 
 ## Versioning
 
 - `schema_version` is `"<major>.<minor>"`. Consumers accept only the major
   version they support and reject others with an error naming both versions.
 - **Minor** versions only add: new optional fields or new check ids.
+  Validation therefore accepts any well-formed check id; `unregistered_checks()`
+  lists the ids this version's registry does not know.
 - **Major** versions may rename or remove fields or check ids.
 
 ## Failure classification (`failure_kind`)
@@ -45,6 +49,21 @@ when nothing failed, including every `PASS`.
 | `no-version-answered` | `tls.protocols` | every per-version probe stalled or errored without a TLS answer |
 | `probe-inconclusive` | `tls.protocols`, `tls.multiip` | the probe could not establish a result from the available evidence |
 | `endpoint-unreachable` | `tls.multiip` | no endpoint could be reached, so no certificate evidence exists |
+| `verifier-unavailable` | certificate and key checks | no tool was available to verify signatures or keys, so the check is `NOT TESTED` |
+| `key-encrypted` | `cert.keymatch`, `srv.keymatch` | the private key is passphrase-encrypted; it was not read and the pairing is `NOT TESTED`, never a mismatch |
+| `key-unreadable` | `cert.keymatch`, `srv.keymatch` | the key exists but this account cannot read it |
+| `command-failed` | server and certificate checks | a command the check needs exited unsuccessfully; its output was not used as evidence |
+| `permission-denied` | server checks | the check needs access this account does not have |
+| `chain-signature` | `tls.chain`, `nginx.chainfile`, `cert.chainfile` | a link's signature, CA flag (Basic Constraints) or path length does not verify (`FAIL`) |
+| `chain-misordered` | chain checks | a certificate is not followed by the certificate that issued it (`WARNING`) |
+| `chain-incomplete` | chain checks | the issuer of the top certificate was not included (`WARNING`) |
+| `chain-unverified` | chain checks | links match by name only; signatures could not be verified (`WARNING`, with `uncertainty`) |
+| `chain-hygiene` | chain checks | repeated or unrelated certificates (`WARNING`) |
+| `chain-wrong-leaf` | `nginx.chainfile`, `cert.chainfile` | the file starts with a CA certificate instead of the server certificate |
+
+`connect-timeout`, `negotiation-timeout`, `network-error` and
+`endpoint-unreachable` describe the network path. A `FAIL` that carries one of
+them and that no cause explains makes `overall` at most `WARNING`.
 
 A `WARNING` on `tls.handshake` with a timeout-class `failure_kind` means the stall
 was confirmed by a second attempt, which then completed.
@@ -64,6 +83,8 @@ into a configuration defect on its own. `""` means "nothing notable observed".
 | `legacy-accepted-default` | `tls.protocols` | a deprecated version (TLS 1.0/1.1) was accepted with the default cipher policy, so an ordinary client can negotiate it |
 | `legacy-accepted-relaxed-only` | `tls.protocols` | a deprecated version answered only when legacy cipher suites were offered, and the default-policy probe was refused: the server still speaks it, but a default-configured client is rejected |
 | `legacy-accepted-unverified` | `tls.protocols` | a deprecated version answered only under the relaxed policy and the default-policy probe could not produce a result (client limitation or timeout), so ordinary-client compatibility is unknown |
+| `listener-unsupported` | `srv.service` | the TLS port is served by a process SSL Doctor does not analyse (Caddy, Traefik, a Java server…); nginx-derived causes are not raised |
+| `no-local-listener` | `srv.service` | nothing on the analysed host listens on the TLS port; TLS is terminated elsewhere |
 | `tls12-relaxed-only` | `tls.protocols` | TLS 1.2 answers only when legacy cipher suites are offered, and the default-policy probe was refused: default-configured clients cannot negotiate it |
 
 ## Cause limitations (`limitations`)
@@ -95,8 +116,37 @@ A warning whose evidence justifies no root cause stays visible here instead of
 disappearing into a generic note. Each entry keeps three things apart:
 `observed` (what the probe saw), `conclusion` (the most the evidence supports)
 and `uncertainty` (why the probes cannot settle the question), plus the
-`recommendation` for a controlled verification. `overall` is still derived from
-causes only.
+`recommendation` for a controlled verification.
+
+## Unexplained findings and the overall verdict (`diagnosis.unexplained`)
+
+Since 1.7, a `FAIL` or `WARNING` finding that no cause rule explains (and that is
+not already `unresolved`) is listed in `diagnosis.unexplained` with its `check`,
+`status`, `title`, `failure_kind` and evidence. `overall` is:
+
+- `FAIL` when a cause is `confirmed`, or an unexplained `FAIL` carries no
+  network-path `failure_kind`;
+- `WARNING` when any other cause or unexplained entry exists;
+- `PASS` otherwise. `NOT TESTED` findings never raise `overall`; they are listed
+  in `notes`.
+
+A finding that fails can therefore no longer disappear from the verdict because
+no root-cause pattern matched it. The batch exit code is 1 exactly when
+`overall` is `FAIL`.
+
+## Certificate facts (`facts.certificates`)
+
+One entry per judged chain, keyed `presented`, `configured:<path>` or
+`supplied:<path>`: `source`, `path`, `status` (as `chain_status`),
+`trust_class` (`public`, `private`, `self-signed`, `unknown`), `anchor`,
+`revocation` (`good`, `revoked`, `unavailable`, `not-checked`, `inconclusive`)
+and `certificates`. Each certificate has `position`, `role` (`leaf`,
+`intermediate`, `root`, `unrelated`), `sha256`, `subject`, `issuer`,
+`not_before`, `not_after`, `key_type`, `key_bits`, `curve`,
+`signature_algorithm`, `ca`, `path_len`, `key_usage`, `extended_key_usage`,
+`ski`, `aki` and `link` (`verified`, `signature-failed`, `name-mismatch`,
+`name-only`, `not-a-ca`, `anchor`). No key material is ever included. The block
+is optional; producers fill it as the analysis behind each value exists.
 
 ## Endpoint states (`facts.endpoints`)
 
@@ -185,6 +235,18 @@ forms) and any `PRIVATE KEY` PEM block, replacing them with `[REDACTED]`.
 | `nginx.certref` | Certificate and key referenced by the selected block |
 | `nginx.path_resolution` | Certificate and key file paths: resolution and access |
 | `nginx.chainfile` | Linkage of the ssl_certificate file |
+| `chain.validity` | Validity period of every non-leaf certificate in a chain |
+| `chain.usage` | Basic Constraints, Key Usage and Extended Key Usage of a chain |
+| `chain.trust` | Validation of a chain to a named trust anchor, and its trust class |
+| `cert.policy` | Key strength and signature algorithm policy |
+| `cert.cafile` | Root / CA bundle file parsing and classification |
+| `tls.revocation` | OCSP / CRL revocation status |
+| `srv.service` | Process that terminates TLS on the target port |
+| `srv.configtest` | Native configuration test of the TLS service |
+| `srv.reload` | Reload state of the service after certificate changes |
+| `srv.renewal` | Renewal tooling that manages the configured certificate |
+| `srv.keystartup` | Encrypted private key versus service startup configuration |
+| `srv.inventory` | Every certificate configured for the TLS service |
 
 **Nginx configuration evidence.** `nginx.conf` says which configuration the
 `nginx.*` findings come from and how it relates to the running nginx; its first

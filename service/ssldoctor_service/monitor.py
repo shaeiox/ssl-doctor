@@ -33,7 +33,8 @@ from uuid import UUID
 from . import audit
 from .db import Database
 
-STATEFUL = ("expiry_soon", "expired", "chain_incomplete", "endpoint_inconsistent")
+STATEFUL = ("expiry_soon", "expired", "chain_incomplete", "endpoint_inconsistent",
+            "chain_certificate_invalid", "revoked")
 LEAF_CHANGED = "leaf_changed:"           # event conditions, one per new leaf
 
 _SUMMARY = {
@@ -41,6 +42,10 @@ _SUMMARY = {
     "expired": "certificate EXPIRED {ago} days ago",
     "chain_incomplete": "the server no longer sends a complete certificate chain",
     "endpoint_inconsistent": "endpoints of this target present different certificates",
+    # findings contract 1.7
+    "chain_certificate_invalid": "a certificate in the presented chain is expired or "
+                                 "not yet valid",
+    "revoked": "a presented certificate is revoked",
     "leaf_changed": "the presented certificate changed",
 }
 
@@ -113,23 +118,30 @@ def conditions_of(doc: dict, threshold_days: int, now: datetime) -> Dict[str, di
             out["expiry_soon"] = {"days": days}
     if facts.get("chain_status") in ("incomplete", "broken"):
         out["chain_incomplete"] = {"chain_status": facts["chain_status"]}
-    if any(f["check"] == "tls.multiip" and f["status"] == "WARNING"
-           for f in doc.get("findings", [])):
+    findings = doc.get("findings", [])
+    if any(f["check"] == "tls.multiip" and f["status"] == "WARNING" for f in findings):
         out["endpoint_inconsistent"] = {}
+    # 1.7 findings; documents from older agents simply do not carry them
+    for f in findings:
+        if f["check"] == "chain.validity" and f["status"] == "FAIL" \
+                and f.get("scope") == "remote-net":
+            out["chain_certificate_invalid"] = {"evidence": list(f.get("evidence", []))[:3]}
+        elif f["check"] == "tls.revocation" and f["status"] == "FAIL":
+            out["revoked"] = {"evidence": list(f.get("evidence", []))[:3]}
     return out
 
 
 def evaluate(conn, org_id: UUID, target_id: UUID, result_id: UUID, doc: dict,
              now: datetime) -> List[str]:
     """Update alert state for a newly stored result. Returns conditions opened."""
-    if not doc.get("facts"):
+    if "leaf" not in (doc.get("facts") or {}):
         return []                          # server-side results carry no endpoint facts
     t = conn.execute("SELECT host, port, expiry_threshold_days FROM app.targets "
                      "WHERE id = %s AND org_id = %s", (target_id, org_id)).fetchone()
     current = conditions_of(doc, t["expiry_threshold_days"], now)
     prev = conn.execute(
         "SELECT id, document FROM app.scan_results WHERE target_id = %s AND org_id = %s "
-        "AND id <> %s AND document ? 'facts' ORDER BY created_at DESC LIMIT 1",
+        "AND id <> %s AND document->'facts' ? 'leaf' ORDER BY created_at DESC LIMIT 1",
         (target_id, org_id, result_id)).fetchone()
     leaf = (doc["facts"].get("leaf") or {}).get("sha256")
     prev_leaf = ((prev["document"]["facts"].get("leaf") or {}).get("sha256")

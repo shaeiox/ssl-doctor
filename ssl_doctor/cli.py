@@ -26,13 +26,15 @@ import textwrap
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from . import APP_NAME, __version__
 from . import findings as F
 from . import textcells
 from .analyze import diagnose
+from . import certpolicy, revocation
 from . import certs as certmod
+from . import chainval
 from . import local as localmod
 from . import netchecks
 from . import report as reportmod
@@ -1177,12 +1179,14 @@ class SSLDoctorCLI:
             ("/local", "diagnostics for this machine (Windows-aware)"),
             ("/cert inspect <file> [hostname]", "parse a PEM/DER certificate or chain file"),
             ("/cert match <cert> <key>", "verify a private key belongs to a certificate"),
+            ("/cert cafile <file>", "check a root/CA bundle: which entries are real roots"),
             ("/server connect [name]", "SSH setup for authorized server-side checks (name: a remembered server)"),
             ("/servers", "list remembered servers; passwords live only in the OS credential vault"),
             ("/server forget <name>|--all", "forget a remembered server and its saved password"),
             ("/server forget-password <name>", "delete only the saved password"),
             ("/server status", "show SSH session state"),
             ("/server overview", "remote OS / web-server identification"),
+            ("/server services", "who serves the TLS port, config test, reload state, renewal"),
             ("/server nginx [domain[:port]]", "examine nginx SSL config: vhost match, protocols, ciphers, cert/key"),
             ("/server cert <file> [key]", "inspect cert (and key pairing) on the server"),
             ("/server config", "scan readable web-server TLS/vhost configuration"),
@@ -1322,6 +1326,11 @@ class SSLDoctorCLI:
                 items = phase.done(certmod.inspect_cert_file(path, hostname,
                                                              emit=phase.add))
             self.store.extend(items)
+            parsed = certmod.parse_cert_file(path)
+            if parsed.ok:
+                self.remote_facts.setdefault("certificate_chains", {})[
+                    f"supplied:{path}"] = chainval.certificates_fact(
+                        parsed.certs, "supplied", certmod.load_root_anchors(), path)
             return
         if args[0] == "match":
             if len(args) < 3:
@@ -1334,7 +1343,18 @@ class SSLDoctorCLI:
                                                           emit=phase.add))
             self.store.extend(items)
             return
-        self.error("usage: /cert inspect <file> [hostname] | /cert match <cert> <key>")
+        if args[0] == "cafile":
+            if len(args) < 2:
+                self.error("usage: /cert cafile <file>")
+                return
+            path = os.path.expanduser(args[1])
+            with self._results(f"checking CA bundle {os.path.basename(path)}") as phase:
+                items = phase.done([chainval.ca_file_finding(
+                    certmod.parse_cert_file(path), path, F.SCOPE_LOCAL)])
+            self.store.extend(items)
+            return
+        self.error("usage: /cert inspect <file> [hostname] | /cert match <cert> <key> | "
+                   "/cert cafile <file>")
 
     # ---------------- /tls ----------------
     def _sni_arg(self, args: List[str]) -> Optional[str]:
@@ -1498,18 +1518,35 @@ class SSLDoctorCLI:
 
         with self._results(f"examining nginx SSL configuration for "
                            f"'{domain}:{port}'") as phase:
-            items = phase.done(srv.nginx_scan(domain, port, emit=phase.add))
+            items = phase.done(srv.nginx_scan(domain, port, emit=phase.add,
+                                              addresses=self._target_addresses(domain)))
         self.store.extend(items)
 
-        presented = ""
-        cert = self.remote_facts.get("cert")
-        if cert:
-            presented = cert.sha256
+        with self._results(f"identifying the service on :{port}, its configuration "
+                           "test, reload state and renewal (read-only)") as phase:
+            items = phase.done(srv.service_scan(domain, port, emit=phase.add))
+        self.store.extend(items)
+
         with self._results("comparing configured and presented certificates, "
                            "scanning TLS service logs (read-only)") as phase:
-            items = phase.done([srv.compare_configured_vs_presented(
-                presented, emit=phase.add)] + srv.log_scan(emit=phase.add))
+            compare = srv.compare_configured_vs_presented(emit=phase.add, **self._presented())
+            inventory = srv.inventory_finding(self._presented()["presented_sha256"])
+            phase.add(inventory)
+            items = phase.done([compare, inventory] + srv.log_scan(emit=phase.add))
         self.store.extend(items)
+
+    def _presented(self) -> Dict:
+        """What the last network check saw, for srv.compare."""
+        cert, chain = self.remote_facts.get("cert"), self.remote_facts.get("chain")
+        return {"presented_sha256": cert.sha256 if cert else "",
+                "presented_chain": [c.sha256 for c in chain] if chain else None,
+                "presented_from": self.remote_facts.get("handshake_ip") or ""}
+
+    def _target_addresses(self, domain: str) -> Tuple[str, ...]:
+        """Addresses the scanned name resolved to, when the session measured it."""
+        if (self.remote_facts.get("host") or "").lower() == domain.lower():
+            return tuple(self.remote_facts.get("ips") or ())
+        return ()
 
     # ---------------- /server ----------------
     def cmd_server(self, args: List[str]) -> None:
@@ -1559,7 +1596,8 @@ class SSLDoctorCLI:
                     port = srv.cfg.tls_port      # bare domain: session's TLS port
             with self._results(f"examining nginx SSL configuration for "
                                f"'{domain}:{port}'") as phase:
-                items = phase.done(srv.nginx_scan(domain, port, emit=phase.add))
+                items = phase.done(srv.nginx_scan(domain, port, emit=phase.add,
+                                                  addresses=self._target_addresses(domain)))
         elif sub == "cert":
             if len(args) < 2:
                 self.error("usage: /server cert <remote-cert-path> [remote-key-path]")
@@ -1568,9 +1606,14 @@ class SSLDoctorCLI:
             key_path = args[2] if len(args) > 2 else ""
             self.note("key material stays on the server; only digests are compared")
             paths = [cert_path] + ([key_path] if key_path else [])
+            srv.begin_scan()          # /server compare then uses this file only
             with self._results(f"inspecting {cert_path} on the server") as phase:
                 items = phase.done(srv.scan_cert(cert_path, key_path, emit=phase.add)
                                    + srv.file_permissions(paths))
+        elif sub == "services":
+            domain, port = srv.cfg.tls_host, srv.cfg.tls_port
+            with self._results(f"identifying the service on :{port} (read-only)") as phase:
+                items = phase.done(srv.service_scan(domain, port, emit=phase.add))
         elif sub == "config":
             with self._results("reading TLS/vhost configuration (read-only)") as phase:
                 items = phase.done(srv.tls_config_scan(emit=phase.add))
@@ -1578,17 +1621,13 @@ class SSLDoctorCLI:
             with self._results("scanning service logs (read-only)") as phase:
                 items = phase.done(srv.log_scan(emit=phase.add))
         elif sub == "compare":
-            presented = ""
-            cert = self.remote_facts.get("cert")
-            if cert:
-                presented = cert.sha256
             with self._results("comparing configured and presented "
                                "certificates") as phase:
                 items = phase.done([srv.compare_configured_vs_presented(
-                    presented, emit=phase.add)])
+                    emit=phase.add, **self._presented())])
         else:
             self.error("usage: /server connect|status|overview|nginx [domain]|cert|"
-                       "config|logs|compare|disconnect")
+                       "services|config|logs|compare|disconnect")
             return
         self.store.extend(items)
 
@@ -2269,6 +2308,12 @@ class SSLDoctorCLI:
                 self.out(paint(f"       uncertain: {unc}", dim=True))
             if u.recommendation:
                 self.out(paint(f"       next: {u.recommendation}", "accent"))
+        for u in self._diagnosis.unexplained:
+            role = "error" if u.decides_verdict else "warning"
+            self.out(f"{INDENT}[{paint('UNEXPLAINED', role, bold=True)}"
+                     f" {paint(_GLYPHS['sep'], 'muted')} {u.check} {u.status}] {u.title}")
+            for e in u.evidence[:2]:
+                self.out(paint(f"       {e}", dim=True))
         for n in self._diagnosis.notes:
             self.out(paint(f"  note: {n}", "muted", dim=True))
         self.note("\ngenerate a report with /report html")
@@ -2284,8 +2329,12 @@ class SSLDoctorCLI:
         secrets = self.server.known_secrets() if self.server else []
         # Also emitted when no certificate was captured: the facts block carries
         # the handshake address and failure classification that explain why.
+        if self.server is not None and getattr(self.server, "chain_facts", None):
+            self.remote_facts.setdefault("certificate_chains", {}).update(
+                self.server.chain_facts)
         facts = netchecks.export_facts(self.remote_facts) \
-            if self.remote_facts.get("host") else None
+            if (self.remote_facts.get("host")
+                or self.remote_facts.get("certificate_chains")) else None
         return diag, meta, secrets, facts
 
     def _agent_payload(self, items: List[F.Finding]) -> Dict:
@@ -2659,6 +2708,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif argv[i] in ("--no-tui", "--plain"):
             cli.use_tui = False
             i += 1
+        elif argv[i] == "--expiry-warn-days":
+            try:
+                certpolicy.set_warn_days(argv[i + 1] if i + 1 < len(argv) else "")
+            except ValueError as exc:
+                print(f"ssl-doctor: --expiry-warn-days: {exc}", file=sys.stderr)
+                return 2
+            i += 2
+        elif argv[i].startswith("--revocation"):
+            value = argv[i].split("=", 1)[1] if "=" in argv[i] else \
+                (argv[i + 1] if i + 1 < len(argv) else "")
+            try:
+                revocation.set_mode(value)
+            except ValueError as exc:
+                print(f"ssl-doctor: --revocation: {exc}", file=sys.stderr)
+                return 2
+            i += 1 if "=" in argv[i] else 2
         elif argv[i] == "--no-remember":
             cli.no_remember = True
             i += 1

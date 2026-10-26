@@ -1,0 +1,770 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssl-doctor.dev/schemas/findings-1.1.schema.json",
+  "title": "SSL Doctor findings document",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "tool",
+    "generated_utc",
+    "summary",
+    "findings"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+$"
+    },
+    "tool": {
+      "type": "string"
+    },
+    "generated_utc": {
+      "type": "string"
+    },
+    "meta": {
+      "type": "object"
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "PASS",
+        "FAIL",
+        "WARNING",
+        "NOT TESTED"
+      ],
+      "properties": {
+        "PASS": {
+          "type": "integer"
+        },
+        "FAIL": {
+          "type": "integer"
+        },
+        "WARNING": {
+          "type": "integer"
+        },
+        "NOT TESTED": {
+          "type": "integer"
+        }
+      }
+    },
+    "diagnosis": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "overall",
+        "causes",
+        "notes"
+      ],
+      "properties": {
+        "overall": {
+          "type": "string",
+          "enum": [
+            "PASS",
+            "WARNING",
+            "FAIL"
+          ]
+        },
+        "causes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "rank",
+              "certainty",
+              "origin",
+              "summary",
+              "evidence"
+            ],
+            "properties": {
+              "rank": {
+                "type": "integer"
+              },
+              "certainty": {
+                "type": "string",
+                "enum": [
+                  "confirmed",
+                  "probable",
+                  "possible"
+                ]
+              },
+              "origin": {
+                "type": "string",
+                "enum": [
+                  "network",
+                  "server",
+                  "client",
+                  "certificate"
+                ]
+              },
+              "summary": {
+                "type": "string"
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "recommendation": {
+                "type": "string"
+              },
+              "limitations": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unresolved": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "check",
+              "status",
+              "observed",
+              "conclusion",
+              "uncertainty"
+            ],
+            "properties": {
+              "check": {
+                "type": "string",
+                "pattern": "^[a-z]+(\\.[a-z0-9_]+)+$"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "PASS",
+                  "FAIL",
+                  "WARNING",
+                  "NOT TESTED"
+                ]
+              },
+              "observation": {
+                "type": "string",
+                "enum": [
+                  "",
+                  "endpoint-certificate-difference",
+                  "endpoint-comparison-inconclusive",
+                  "sni-certificate-differs",
+                  "sni-without-probe-failed",
+                  "probe-inconclusive",
+                  "legacy-accepted-default",
+                  "legacy-accepted-relaxed-only",
+                  "legacy-accepted-unverified",
+                  "listener-unsupported",
+                  "no-local-listener",
+                  "tls12-relaxed-only"
+                ]
+              },
+              "observed": {
+                "type": "string"
+              },
+              "conclusion": {
+                "type": "string"
+              },
+              "uncertainty": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "recommendation": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "unexplained": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "check",
+              "status",
+              "title"
+            ],
+            "properties": {
+              "check": {
+                "type": "string",
+                "pattern": "^[a-z]+(\\.[a-z0-9_]+)+$"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "PASS",
+                  "FAIL",
+                  "WARNING",
+                  "NOT TESTED"
+                ]
+              },
+              "title": {
+                "type": "string"
+              },
+              "failure_kind": {
+                "type": "string",
+                "enum": [
+                  "",
+                  "connect-timeout",
+                  "negotiation-timeout",
+                  "tls-alert",
+                  "network-error",
+                  "no-version-accepted",
+                  "no-version-answered",
+                  "probe-inconclusive",
+                  "endpoint-unreachable",
+                  "verifier-unavailable",
+                  "key-encrypted",
+                  "key-unreadable",
+                  "command-failed",
+                  "permission-denied",
+                  "chain-signature",
+                  "chain-misordered",
+                  "chain-incomplete",
+                  "chain-unverified",
+                  "chain-hygiene",
+                  "chain-wrong-leaf"
+                ]
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "check",
+          "title",
+          "status",
+          "scope",
+          "evidence"
+        ],
+        "properties": {
+          "check": {
+            "type": "string",
+            "pattern": "^[a-z]+(\\.[a-z0-9_]+)+$"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PASS",
+              "FAIL",
+              "WARNING",
+              "NOT TESTED"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "local",
+              "remote-net",
+              "server"
+            ]
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "detail": {
+            "type": "string"
+          },
+          "recommendation": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "number"
+          },
+          "ts_iso": {
+            "type": "string"
+          },
+          "failure_kind": {
+            "type": "string",
+            "enum": [
+              "",
+              "connect-timeout",
+              "negotiation-timeout",
+              "tls-alert",
+              "network-error",
+              "no-version-accepted",
+              "no-version-answered",
+              "probe-inconclusive",
+              "endpoint-unreachable",
+              "verifier-unavailable",
+              "key-encrypted",
+              "key-unreadable",
+              "command-failed",
+              "permission-denied",
+              "chain-signature",
+              "chain-misordered",
+              "chain-incomplete",
+              "chain-unverified",
+              "chain-hygiene",
+              "chain-wrong-leaf"
+            ]
+          },
+          "observation": {
+            "type": "string",
+            "enum": [
+              "",
+              "endpoint-certificate-difference",
+              "endpoint-comparison-inconclusive",
+              "sni-certificate-differs",
+              "sni-without-probe-failed",
+              "probe-inconclusive",
+              "legacy-accepted-default",
+              "legacy-accepted-relaxed-only",
+              "legacy-accepted-unverified",
+              "listener-unsupported",
+              "no-local-listener",
+              "tls12-relaxed-only"
+            ]
+          },
+          "uncertainty": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "disclaimer": {
+      "type": "string"
+    },
+    "facts": {
+      "type": "object",
+      "properties": {
+        "leaf": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "subject": {
+              "type": "string"
+            },
+            "not_after": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "chain_status": {
+          "type": "string",
+          "enum": [
+            "complete",
+            "incomplete",
+            "broken",
+            "unread"
+          ]
+        },
+        "handshake_ip": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "handshake_failure": {
+          "type": "string",
+          "enum": [
+            "",
+            "connect-timeout",
+            "negotiation-timeout",
+            "tls-alert",
+            "network-error",
+            "no-version-accepted",
+            "no-version-answered",
+            "probe-inconclusive",
+            "endpoint-unreachable",
+            "verifier-unavailable",
+            "key-encrypted",
+            "key-unreadable",
+            "command-failed",
+            "permission-denied",
+            "chain-signature",
+            "chain-misordered",
+            "chain-incomplete",
+            "chain-unverified",
+            "chain-hygiene",
+            "chain-wrong-leaf"
+          ]
+        },
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "ip",
+              "state"
+            ],
+            "properties": {
+              "ip": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "negotiated",
+                  "tls-rejected",
+                  "tcp-unreachable",
+                  "timed-out",
+                  "probe-unavailable",
+                  ""
+                ]
+              },
+              "detail": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string"
+              },
+              "sni": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "family": {
+                "type": "string",
+                "enum": [
+                  "ipv4",
+                  "ipv6",
+                  ""
+                ]
+              }
+            }
+          }
+        },
+        "endpoint_comparison": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "probed": {
+              "type": "integer"
+            },
+            "comparable": {
+              "type": "integer"
+            },
+            "addresses": {
+              "type": "integer"
+            },
+            "difference": {
+              "type": "boolean"
+            },
+            "attribute": {
+              "type": "string"
+            }
+          }
+        },
+        "probe_policy": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "negotiated": {
+              "type": "string"
+            },
+            "relaxed_versions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "support": {
+              "type": "object",
+              "properties": {
+                "TLS 1.0": {
+                  "type": "string",
+                  "enum": [
+                    "",
+                    "default",
+                    "relaxed-only",
+                    "relaxed-only-unverified",
+                    "rejected",
+                    "inconclusive"
+                  ]
+                },
+                "TLS 1.1": {
+                  "type": "string",
+                  "enum": [
+                    "",
+                    "default",
+                    "relaxed-only",
+                    "relaxed-only-unverified",
+                    "rejected",
+                    "inconclusive"
+                  ]
+                },
+                "TLS 1.2": {
+                  "type": "string",
+                  "enum": [
+                    "",
+                    "default",
+                    "relaxed-only",
+                    "relaxed-only-unverified",
+                    "rejected",
+                    "inconclusive"
+                  ]
+                },
+                "TLS 1.3": {
+                  "type": "string",
+                  "enum": [
+                    "",
+                    "default",
+                    "relaxed-only",
+                    "relaxed-only-unverified",
+                    "rejected",
+                    "inconclusive"
+                  ]
+                }
+              }
+            },
+            "confirmed_legacy": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "unverified_legacy": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "default_probe": {
+              "type": "object",
+              "properties": {
+                "TLS 1.0": {
+                  "type": "string",
+                  "enum": [
+                    "accepted",
+                    "refused",
+                    "inconclusive",
+                    "unsupported",
+                    "client-limited"
+                  ]
+                },
+                "TLS 1.1": {
+                  "type": "string",
+                  "enum": [
+                    "accepted",
+                    "refused",
+                    "inconclusive",
+                    "unsupported",
+                    "client-limited"
+                  ]
+                },
+                "TLS 1.2": {
+                  "type": "string",
+                  "enum": [
+                    "accepted",
+                    "refused",
+                    "inconclusive",
+                    "unsupported",
+                    "client-limited"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "certificates": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "source",
+              "certificates"
+            ],
+            "properties": {
+              "source": {
+                "type": "string",
+                "enum": [
+                  "presented",
+                  "configured",
+                  "supplied"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "complete",
+                  "incomplete",
+                  "broken",
+                  "unread"
+                ]
+              },
+              "trust_class": {
+                "type": "string",
+                "enum": [
+                  "public",
+                  "private",
+                  "self-signed",
+                  "unknown",
+                  ""
+                ]
+              },
+              "anchor": {
+                "type": "string"
+              },
+              "revocation": {
+                "type": "string",
+                "enum": [
+                  "good",
+                  "revoked",
+                  "unavailable",
+                  "not-checked",
+                  "inconclusive",
+                  ""
+                ]
+              },
+              "certificates": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "position",
+                    "sha256"
+                  ],
+                  "properties": {
+                    "position": {
+                      "type": "integer"
+                    },
+                    "role": {
+                      "type": "string",
+                      "enum": [
+                        "leaf",
+                        "intermediate",
+                        "root",
+                        "unrelated",
+                        ""
+                      ]
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "subject": {
+                      "type": "string"
+                    },
+                    "issuer": {
+                      "type": "string"
+                    },
+                    "not_before": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "not_after": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "key_type": {
+                      "type": "string"
+                    },
+                    "key_bits": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "curve": {
+                      "type": "string"
+                    },
+                    "signature_algorithm": {
+                      "type": "string"
+                    },
+                    "ca": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "path_len": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "key_usage": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "extended_key_usage": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "ski": {
+                      "type": "string"
+                    },
+                    "aki": {
+                      "type": "string"
+                    },
+                    "link": {
+                      "type": "string",
+                      "enum": [
+                        "verified",
+                        "signature-failed",
+                        "name-mismatch",
+                        "name-only",
+                        "not-a-ca",
+                        "anchor",
+                        ""
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

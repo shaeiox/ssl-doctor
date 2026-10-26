@@ -2,10 +2,10 @@
 project: ssl-doctor
 topic: chain-diagnosis
 tags: [tls, chain, openssl, s_client, verification, windows]
-status: verified
+status: done
 trust: human
-last_done: 2026-10-24
-version: 1
+last_done: 2026-10-26
+version: 2
 ---
 
 **Problem:** Correctly diagnose missing/incorrect intermediate certificates and avoid blaming client for server chain faults.
@@ -19,3 +19,12 @@ version: 1
 - Fixed in v0.3.0: chain reading on 3.10-12, root-store crash, SAN-only enforcement.
 
 **Notes:** Evidence records which reader was used. All read-only.
+
+**v2 (2026-10-26, trust: ai-inferred; openspec complete-certificate-diagnostics P2 — v1 above unchanged):**
+- Linkage is cryptographic. `certs.assess_chain` wraps `chainval.assess`: adjacency as sent via `verify_link` (openssl verify; name → misordered WARNING; signature / not-a-ca / pathLenConstraint → FAIL).
+- Then the top: a verified self-signed top is complete. Otherwise `_paths` does bounded DFS (8 paths, depth 8) over the sent certificates plus anchors, with AKI-first candidate order and a note when same-name roots exist. Otherwise a verified multi-cert chain stays `complete` with `anchored=False` ("anchor unknown"), never "missing intermediates" (client-trust question). A single non-CA leaf is `incomplete`, naming the missing issuer, AKI and AIA.
+- Findings carry `failure_kind` chain-signature / misordered / incomplete / unverified / hygiene / wrong-leaf; `analyze` correlates on it (legacy text matching only when the kind is empty).
+- `tls.chain` now always receives the trust anchors (previously only for 1-cert chains), and `nginx.chainfile` and `cert.chainfile` do too.
+- `chain.usage`: EKU serverAuth, KU vs key type, issuers need keyCertSign; its cause explains a tls.verify "unsuitable purpose".
+- Names compare canonically (`CertInfo.subject_canon` / `issuer_canon`: casefold, collapsed whitespace).
+- Gotcha: openssl 3.x `verify -CAfile` does not add the default CApath; `-no-CApath` matters for 1.1.1.

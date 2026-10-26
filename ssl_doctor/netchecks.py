@@ -484,23 +484,51 @@ def check_tls_basic(host: str, port: int, sni: Optional[str],
         target=target), facts
 
 
+def _validation_unfinished(check: str, title: str, target: str, addr: str,
+                           exc: BaseException) -> F.Finding:
+    """A validation handshake that ended before any certificate verdict.
+
+    Timeouts and resets say nothing about the certificate, so they are NOT
+    TESTED with their failure kind; only a TLS-level rejection stays FAIL.
+    """
+    if isinstance(exc, (_ConnectTimeout, _NegotiationTimeout)):
+        kind = ("connect-timeout" if isinstance(exc, _ConnectTimeout)
+                else "negotiation-timeout")
+    else:
+        kind = _classify_negotiation_error(exc)
+    first = str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__
+    if kind == "tls-alert":
+        return F.Finding(check, title, F.FAIL, F.SCOPE_REMOTE_NET,
+                         [f"validated handshake with {addr} failed before verification: "
+                          f"{first}"], target=target, failure_kind=kind)
+    return F.Finding(
+        check, title, F.NOT_TESTED, F.SCOPE_REMOTE_NET,
+        [f"{_failure_summary(kind, addr, target.rsplit(':', 1)[-1])}: {first}",
+         "the certificate was not validated; no conclusion about it is drawn"],
+        recommendation="Repeat the scan; if the validation handshake keeps failing, "
+                       "test from another network.",
+        target=target, failure_kind=kind)
+
+
 def check_tls_validation(host: str, port: int, sni: Optional[str],
-                         timeout: float) -> F.Finding:
+                         timeout: float, connect_ip: Optional[str] = None) -> F.Finding:
     """Full validation handshake with the system trust store."""
+    title = "Certificate validation (system trust)"
     target = f"{host}:{port}"
+    addr = connect_ip or host
     if not sni:
-        return F.Finding("tls.verify", "Certificate validation (system trust)",
+        return F.Finding("tls.verify", title,
                          F.NOT_TESTED, F.SCOPE_REMOTE_NET,
                          ["no hostname available for verification"], target=target)
     ctx = _make_context(verify=True)
     try:
-        ssock = _handshake(host, port, sni, ctx, timeout)
+        ssock = _handshake(host, port, sni, ctx, timeout, connect_ip=connect_ip)
         ssock.close()
         return F.Finding(
-            "tls.verify", "Certificate validation (system trust)", F.PASS,
+            "tls.verify", title, F.PASS,
             F.SCOPE_REMOTE_NET,
             ["the presented certificate chains to a trusted root and matches "
-             f"the hostname '{sni}'"], target=target)
+             f"the hostname '{sni}'", f"validated against {addr}"], target=target)
     except ssl.SSLCertVerificationError as exc:
         code = getattr(exc, "verify_code", None)
         msg = getattr(exc, "verify_message", None) or str(exc)
@@ -519,27 +547,25 @@ def check_tls_validation(host: str, port: int, sni: Optional[str],
                 "via the correct name.",
         }.get(code, "Inspect the chain details above and correct trust/chain issues.")
         return F.Finding(
-            "tls.verify", "Certificate validation (system trust)", F.FAIL,
+            "tls.verify", title, F.FAIL,
             F.SCOPE_REMOTE_NET,
-            [f"validation failed: {plain}", f"openssl verify detail: {msg}"],
+            [f"validation failed: {plain}", f"openssl verify detail: {msg}",
+             f"validated against {addr}"],
             recommendation=advice, target=target)
     except ssl.CertificateError as exc:
         return F.Finding(
-            "tls.verify", "Certificate validation (system trust)", F.FAIL,
+            "tls.verify", title, F.FAIL,
             F.SCOPE_REMOTE_NET, [f"hostname verification failed: {exc}"],
             recommendation="The certificate does not cover this hostname.",
             target=target)
     except (ssl.SSLError, OSError) as exc:
-        return F.Finding(
-            "tls.verify", "Certificate validation (system trust)", F.FAIL,
-            F.SCOPE_REMOTE_NET, [f"validated handshake failed before verification: {exc}"],
-            target=target)
+        return _validation_unfinished("tls.verify", title, target, addr, exc)
 
 
 def check_tls_rootonly_validation(host: str, port: int, sni: Optional[str],
                                   timeout: float,
-                                  roots: Optional[List[certs.CertInfo]] = None
-                                  ) -> F.Finding:
+                                  roots: Optional[List[certs.CertInfo]] = None,
+                                  connect_ip: Optional[str] = None) -> F.Finding:
     """Validate with trusted ROOTS only - no cached/bundled intermediates.
 
     This is what a client that has never seen the intermediate experiences,
@@ -547,6 +573,7 @@ def check_tls_rootonly_validation(host: str, port: int, sni: Optional[str],
     """
     title = "Certificate validation (roots only, no cached intermediates)"
     target = f"{host}:{port}"
+    addr = connect_ip or host
     if not sni:
         return F.Finding("tls.verify.rootonly", title, F.NOT_TESTED, F.SCOPE_REMOTE_NET,
                          ["no hostname available for verification"], target=target)
@@ -559,25 +586,24 @@ def check_tls_rootonly_validation(host: str, port: int, sni: Optional[str],
     ctx.hostname_checks_common_name = False
     ctx.load_verify_locations(cadata="".join(r.pem.decode("ascii") for r in roots))
     try:
-        _handshake(host, port, sni, ctx, timeout).close()
+        _handshake(host, port, sni, ctx, timeout, connect_ip=connect_ip).close()
         return F.Finding("tls.verify.rootonly", title, F.PASS, F.SCOPE_REMOTE_NET,
                          [f"chain validates from what the server sends, against "
-                          f"{len(roots)} trusted root(s)"], target=target)
+                          f"{len(roots)} trusted root(s)", f"validated against {addr}"],
+                         target=target)
     except ssl.SSLCertVerificationError as exc:
         code = getattr(exc, "verify_code", None)
         msg = getattr(exc, "verify_message", None) or str(exc)
         return F.Finding(
             "tls.verify.rootonly", title, F.FAIL, F.SCOPE_REMOTE_NET,
             [f"validation failed: {_VERIFY_CODES.get(code, msg)}",
-             f"openssl verify detail: {msg}"],
+             f"openssl verify detail: {msg}", f"validated against {addr}"],
             recommendation=("Clients without a cached intermediate fail here. Serve the "
                             "full chain (leaf + intermediates) from the server."
                             if code in (20, 21) else ""),
             target=target)
     except (ssl.SSLError, OSError) as exc:
-        return F.Finding("tls.verify.rootonly", title, F.FAIL, F.SCOPE_REMOTE_NET,
-                         [f"validated handshake failed before verification: {exc}"],
-                         target=target)
+        return _validation_unfinished("tls.verify.rootonly", title, target, addr, exc)
 
 
 _RELAXED_CIPHER_POLICY = "ALL:@SECLEVEL=0"
@@ -1033,7 +1059,8 @@ def _probe_endpoint(host: str, port: int, sni: Optional[str], timeout: float,
     other state explains why no certificate evidence exists.
     """
     record = {"ip": ip, "state": EP_UNREACHABLE, "detail": "", "sha256": "",
-              "hostname_ok": None, "chain_status": "", "sni": sni}
+              "hostname_ok": None, "chain_status": "", "sni": sni,
+              "family": "ipv6" if ":" in ip else "ipv4"}
     ssock = None
     try:
         ctx = _make_context(verify=False)
@@ -1070,10 +1097,53 @@ def _probe_endpoint(host: str, port: int, sni: Optional[str], timeout: float,
         chain[0] = leaf
         try:
             record["chain_status"] = certs.assess_chain(
-                chain, certs.load_root_anchors() if len(chain) == 1 else None).status
+                chain, certs.load_root_anchors()).status
         except Exception:            # noqa: BLE001 - chain judgement is best effort
             record["chain_status"] = "unread"
     return record
+
+
+def _family_balanced(addresses: List[str], cap: int) -> List[str]:
+    """Up to `cap` addresses, alternating IPv4 / IPv6, so both are probed."""
+    v4 = [a for a in addresses if ":" not in a]
+    v6 = [a for a in addresses if ":" in a]
+    out = []
+    while (v4 or v6) and len(out) < cap:
+        for family in (v4, v6):
+            if family and len(out) < cap:
+                out.append(family.pop(0))
+    return out
+
+
+def _family_notes(addresses: List[str], records: List[Dict]) -> List[str]:
+    v4 = [a for a in addresses if ":" not in a]
+    v6 = [a for a in addresses if ":" in a]
+    notes = [f"DNS published {len(v4)} IPv4 and {len(v6)} IPv6 address(es)"]
+    if not v6:
+        notes.append("no IPv6 address was published")
+    for family, label in (("ipv6", "IPv6"), ("ipv4", "IPv4")):
+        own = [r for r in records if r.get("family") == family]
+        other = [r for r in records if r.get("family") != family]
+        if own and other and all(r["state"] in (EP_UNREACHABLE, EP_TIMEOUT) for r in own) \
+                and any(r["state"] == EP_NEGOTIATED for r in other):
+            notes.append(f"{label} not reachable from this network")
+    return notes
+
+
+def _family_difference(comparable: List[Dict]) -> str:
+    """Attributes in which every IPv4 endpoint differs from every IPv6 one."""
+    v4 = [r for r in comparable if r.get("family") == "ipv4"]
+    v6 = [r for r in comparable if r.get("family") == "ipv6"]
+    if not v4 or not v6:
+        return ""
+    found = []
+    for key, label in (("sha256", "certificate identity"),
+                       ("hostname_ok", "hostname coverage"),
+                       ("chain_status", "chain status")):
+        a, b = {r[key] for r in v4}, {r[key] for r in v6}
+        if len(a) == 1 and len(b) == 1 and a != b:
+            found.append(label)
+    return ", ".join(found)
 
 
 def _describe_endpoint(rec: Dict) -> str:
@@ -1085,7 +1155,7 @@ def _describe_endpoint(rec: Dict) -> str:
                         else "does NOT cover the requested name")
         if rec.get("chain_status"):
             bits.append(f"chain {rec['chain_status']}")
-        return f"{ip}: negotiated - " + ", ".join(bits)
+        return f"{ip} ({rec.get('family', '?')}): negotiated - " + ", ".join(bits)
     reason = f" ({rec['detail']})" if rec.get("detail") else ""
     return f"{ip}: {state}{reason}"
 
@@ -1113,10 +1183,10 @@ def check_multi_ip(host: str, port: int, ips: List[str], timeout: float,
                          ["DNS returned fewer than two addresses - nothing to compare"],
                          target=target)
 
-    probe_ips = uniq[:_ENDPOINT_CAP]
+    probe_ips = _family_balanced(uniq, _ENDPOINT_CAP)
     records = [_probe_endpoint(host, port, server_name, timeout, ip)
                for ip in probe_ips]
-    rows = [_describe_endpoint(r) for r in records]
+    rows = [_describe_endpoint(r) for r in records] + _family_notes(uniq, records)
     comparable = [r for r in records
                   if r["state"] == EP_NEGOTIATED and r.get("sni") == server_name]
     facts["endpoints"] = records
@@ -1157,6 +1227,9 @@ def check_multi_ip(host: str, port: int, ips: List[str], timeout: float,
             target=target, failure_kind=kind, observation=obs)
 
     differences = []
+    family_split = _family_difference(comparable)
+    if family_split:
+        rows.insert(0, f"IPv6 endpoints differ from IPv4 endpoints in: {family_split}")
     if len({r["sha256"] for r in comparable}) > 1:
         differences.append("certificate identity")
     covered = {r["hostname_ok"] for r in comparable if r["hostname_ok"] is not None}
@@ -1293,6 +1366,36 @@ def check_https(host: str, port: int, sni: Optional[str], timeout: float,
                                     "flip breaks clients.", target=target), facts
 
 
+def revocation_finding(chain: List[certs.CertInfo], host: str, port: int,
+                       sni: Optional[str], timeout: float,
+                       connect_ip: Optional[str] = None) -> Tuple[F.Finding, str]:
+    """(`tls.revocation` finding, revocation state) for the presented chain
+    (see `revocation.check_chain`)."""
+    from . import revocation as rv
+    title = "OCSP / CRL revocation status"
+    target = f"{host}:{port}"
+    r = rv.check_chain(chain, host, port, sni, timeout, connect_ip)
+    ev = [f"revocation state: {r.state}" + (f" (source: {r.source})" if r.source else ""),
+          *r.evidence]
+    if r.state == rv.GOOD:
+        f = F.Finding("tls.revocation", title, F.PASS, F.SCOPE_REMOTE_NET, ev, target=target)
+    elif r.state == rv.REVOKED:
+        f = F.Finding("tls.revocation", title, F.FAIL, F.SCOPE_REMOTE_NET, ev,
+                      recommendation="Replace the revoked certificate now; clients that "
+                                     "check revocation refuse it.", target=target)
+    elif r.stapled_defect:
+        f = F.Finding("tls.revocation", title, F.WARNING, F.SCOPE_REMOTE_NET, ev,
+                      recommendation="The server staples an OCSP response that is not "
+                                     "valid for this certificate: check OCSP stapling "
+                                     "(ssl_stapling, ssl_trusted_certificate, resolver).",
+                      target=target)
+    else:
+        f = F.Finding("tls.revocation", title, F.NOT_TESTED, F.SCOPE_REMOTE_NET, ev,
+                      target=target,
+                      failure_kind="probe-inconclusive" if r.state == rv.INCONCLUSIVE else "")
+    return f, r.state
+
+
 def check_presented_chain(facts: Dict, host: str, port: int) -> F.Finding:
     """Judge the chain the server sent; records the verdict in `facts`.
 
@@ -1310,26 +1413,32 @@ def check_presented_chain(facts: Dict, host: str, port: int) -> F.Finding:
             recommendation="Inspect manually: openssl s_client -connect "
                            f"{host}:{port} -servername <name> -showcerts",
             target=target)
-    leaf = chain[0]
-    if len(chain) == 1 and leaf.is_self_signed():
-        facts["chain_status"], facts["anchor"] = "complete", leaf.subject
-        return F.Finding("tls.chain", "Chain sent by server", F.PASS, F.SCOPE_REMOTE_NET,
-                         ["single self-signed certificate (no chain to send)"],
-                         target=target)
-    roots = certs.load_root_anchors() if len(chain) == 1 else None
-    a = certs.assess_chain(chain, roots)
+    from . import chainval
+    a = certs.assess_chain(chain, certs.load_root_anchors())
     facts["chain_status"], facts["anchor"] = a.status, a.anchor
+    status, kind, uncertainty = chainval.chain_verdict(a)
     ev = a.evidence + [f"read via: {facts.get('chain_reader') or '?'}"]
-    if a.status == "complete":
+    if status == F.PASS:
         return F.Finding("tls.chain", "Chain sent by server", F.PASS, F.SCOPE_REMOTE_NET,
                          ev, target=target)
-    rec = ("Fix the order/content of the chain file on the server: leaf first, then the "
-           "intermediate that issued it." if a.status == "broken" else
-           "Serve the full chain: put the leaf followed by the issuing intermediate(s) in "
-           "the server's certificate file (nginx: ssl_certificate). Clients without a "
-           "cached intermediate fail otherwise.")
-    return F.Finding("tls.chain", "Chain sent by server", F.WARNING, F.SCOPE_REMOTE_NET,
-                     ev, recommendation=rec, target=target)
+    rec = {
+        chainval.FAIL_SIGNATURE:
+            "The certificate after the failing position did not sign the one before it "
+            "(or may not issue certificates). Serve the intermediate(s) your CA issued "
+            "for this certificate, leaf first.",
+        chainval.FAIL_MISORDERED:
+            "Fix the order/content of the chain file on the server: leaf first, then the "
+            "intermediate that issued it.",
+        chainval.FAIL_INCOMPLETE:
+            "Serve the full chain: put the leaf followed by the issuing intermediate(s) in "
+            "the server's certificate file (nginx: ssl_certificate). Clients without a "
+            "cached intermediate fail otherwise.",
+        chainval.FAIL_HYGIENE:
+            "Remove repeated certificates from the server's certificate file.",
+    }.get(kind, "")
+    return F.Finding("tls.chain", "Chain sent by server", status, F.SCOPE_REMOTE_NET,
+                     ev, recommendation=rec, target=target, failure_kind=kind,
+                     uncertainty=uncertainty)
 
 
 def export_facts(facts: Dict) -> Dict:
@@ -1345,7 +1454,21 @@ def export_facts(facts: Dict) -> Dict:
         "endpoints": facts.get("endpoints", []),
         "endpoint_comparison": facts.get("endpoint_comparison"),
         "probe_policy": facts.get("probe_policy"),
+        "certificates": _certificate_facts(facts),
     }
+
+
+def _certificate_facts(facts: Dict) -> Dict:
+    """`facts.certificates`: the presented chain plus configured/supplied chains
+    the session recorded under facts["certificate_chains"]."""
+    from . import chainval
+    out: Dict = {}
+    if facts.get("chain"):
+        out["presented"] = chainval.certificates_fact(facts["chain"], "presented",
+                                                      certs.load_root_anchors())
+        out["presented"]["revocation"] = facts.get("revocation", "")
+    out.update(facts.get("certificate_chains") or {})
+    return out
 
 
 # ---------------------------------------------------------------- orchestrator
@@ -1431,44 +1554,30 @@ def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None
     # Leaf self-checks over the network-presented cert.
     leaf = facts.get("cert")
     if leaf:
-        if leaf.is_expired():
-            _add(F.Finding(
-                "tls.certvalid", "Presented certificate validity", F.FAIL,
-                F.SCOPE_REMOTE_NET,
-                [f"server presents an EXPIRED certificate "
-                 f"(notAfter={leaf.not_after:%Y-%m-%d}; {-leaf.days_to_expiry()} days ago)"],
-                recommendation="Renew/redeploy the certificate on the server.",
-                target=f"{host}:{port}"))
-        elif leaf.not_yet_valid():
-            _add(F.Finding(
-                "tls.certvalid", "Presented certificate validity", F.FAIL,
-                F.SCOPE_REMOTE_NET,
-                [f"server presents a certificate not valid until "
-                 f"{leaf.not_before:%Y-%m-%d}"],
-                recommendation="Check issuance and the client clock.",
-                target=f"{host}:{port}"))
-        elif (leaf.days_to_expiry() or 365) <= 30:
-            _add(F.Finding(
-                "tls.certvalid", "Presented certificate validity", F.WARNING,
-                F.SCOPE_REMOTE_NET,
-                [f"certificate expires in {leaf.days_to_expiry()} days"],
-                target=f"{host}:{port}"))
-        else:
-            _add(F.Finding(
-                "tls.certvalid", "Presented certificate validity", F.PASS,
-                F.SCOPE_REMOTE_NET,
-                [f"valid until {leaf.not_after:%Y-%m-%d} "
-                 f"({leaf.days_to_expiry()} days remaining)"],
-                target=f"{host}:{port}"))
+        from . import certpolicy
+        status, line, rec = certpolicy.leaf_validity(leaf)
+        if status == F.FAIL:
+            line = "server presents a " + line       # "...a certificate expired 3 days ago"
+        _add(F.Finding(
+            "tls.certvalid", "Presented certificate validity", status,
+            F.SCOPE_REMOTE_NET, [line],
+            recommendation=("Renew/redeploy the certificate on the server."
+                            if "expired" in line else
+                            "Check issuance and the client clock." if status == F.FAIL
+                            else rec),
+            target=f"{host}:{port}"))
 
         if server_name:
+            from . import hostnames
             ok, names = leaf.matches_hostname(server_name)
+            _ok, entry = leaf.hostname_match(server_name)
+            reason = "" if ok else hostnames.why_not(leaf.san_dns, server_name)
             _add(F.Finding(
                 "tls.hostname", f"Hostname match for '{server_name}'",
                 F.PASS if ok else F.FAIL, F.SCOPE_REMOTE_NET,
-                ["certificate covers the name" if ok else
+                [f"certificate covers the name (subjectAltName entry '{entry}')" if ok else
                  f"certificate subjectAltName ({', '.join(names) or 'none'}) does not "
-                 f"include '{server_name}'"] +
+                 f"include '{server_name}'"] + ([reason] if reason else []) +
                 ([f"no subjectAltName: CN '{leaf.common_name}' is ignored by modern "
                   "clients"] if not leaf.san_dns and leaf.common_name else []),
                 recommendation="" if ok else
@@ -1477,9 +1586,25 @@ def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None
                 target=f"{host}:{port}"))
 
         _add(check_presented_chain(facts, host, port))
+        if facts.get("chain"):
+            from . import chainval
+            presented = facts["chain"]
+            _add(chainval.usage_finding(presented, F.SCOPE_REMOTE_NET, f"{host}:{port}"))
+            validity = certpolicy.chain_validity_finding(presented, F.SCOPE_REMOTE_NET,
+                                                         f"{host}:{port}")
+            if validity is not None:
+                _add(validity)
+            _add(certpolicy.policy_finding(presented, F.SCOPE_REMOTE_NET, f"{host}:{port}",
+                                           certpolicy.anchor_ids(presented)))
+            _add(chainval.trust_finding(presented, F.SCOPE_REMOTE_NET, f"{host}:{port}",
+                                        certs.load_root_anchors()))
+            rev, facts["revocation"] = revocation_finding(presented, host, port,
+                                                          server_name, timeout, verified_ip)
+            _add(rev)
 
-    _add(check_tls_validation(host, port, server_name, timeout))
-    _add(check_tls_rootonly_validation(host, port, server_name, timeout))
+    _add(check_tls_validation(host, port, server_name, timeout, connect_ip=verified_ip))
+    _add(check_tls_rootonly_validation(host, port, server_name, timeout,
+                                       connect_ip=verified_ip))
     _add(check_protocol_matrix(host, port, server_name, timeout,
                                connect_ip=verified_ip,
                                negotiated=facts.get("protocol"), facts=facts))

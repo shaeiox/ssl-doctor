@@ -45,6 +45,14 @@ class NginxHost:
     executables: Dict[str, Exe] = field(default_factory=dict)
     path_nginx_dump: Optional[str] = None                     # `nginx -T` from PATH
     denied_dirs: List[str] = field(default_factory=list)
+    # service runtime: socket table (None = no ss/netstat), config tests by
+    # executable -> (exit status, output), journal lines by unit, renewal probe
+    # output, symlink targets
+    sockets: Optional[str] = ""
+    config_tests: Dict[str, Tuple[Optional[int], str]] = field(default_factory=dict)
+    journals: Dict[str, List[str]] = field(default_factory=dict)
+    renewal_output: str = ""
+    links: Dict[str, str] = field(default_factory=dict)
     calls: List[Tuple] = field(default_factory=list)
 
     # -- stage A
@@ -122,6 +130,26 @@ class NginxHost:
         if size > nd.MAX_FILE_BYTES:
             return nd.FileRecord(pattern, path, nd.TOOLARGE, f.mtime, size)
         return nd.FileRecord(pattern, path, nd.READ, f.mtime, size, f.content)
+
+    def listeners(self, port):
+        self.calls.append(("listeners", port))
+        return self.sockets
+
+    def config_test(self, argv):
+        self.calls.append(("config_test", tuple(argv)))
+        return self.config_tests.get(argv[0], (None, "not available in the test host"))
+
+    def journal(self, unit):
+        self.calls.append(("journal", unit))
+        return list(self.journals.get(unit, []))
+
+    def renewal(self):
+        self.calls.append(("renewal",))
+        return self.renewal_output
+
+    def realpaths(self, paths):
+        self.calls.append(("realpaths", tuple(paths)))
+        return {p: self.links.get(p, p) for p in paths if p in self.files or p in self.links}
 
     def mtimes(self, paths):
         self.calls.append(("mtimes", tuple(paths)))

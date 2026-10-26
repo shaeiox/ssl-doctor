@@ -56,3 +56,14 @@ One line per settled choice: `YYYY-MM: chosen > rejected — why`.
 2026-10: new check id nginx.path_resolution (contract 1.6) > folding resolution into nginx.certref — the defect is exactly that resolution and content were not separable.
 2026-10: full-screen shell + console mouse mode (Quick Edit off only while reading) on conhost/winpty > forcing line mode on all Windows consoles — keeps one presentation and drag-to-copy; line mode stays the fallback where VT output or a console is missing.
 
+2026-10: overall verdict counts unexplained FAIL/WARNING findings (rules declare `explains`) > verdict from matched causes only — an expired intermediate gave PASS/exit 0; transport and SSH-session FAILs cap at WARNING so a bad password is never a server FAIL.
+2026-10: signature/key checks via the system `openssl` (local analysis of public PEM, keys only touched by remote openssl) > `cryptography` package — keeps the CLI stdlib-only; missing openssl → NOT TESTED `verifier-unavailable`, never PASS.
+2026-10: unregistered check ids reported by `contract.unregistered_checks()` > a `check` enum in the 1.7 schema — an enum would make 1.7 consumers reject later 1.x documents.
+2026-10: nginx.chainfile FAIL for a DER file > PASS because it parses — nginx's ssl_certificate loads only PEM, so the configured file can never be served.
+2026-10: cert.cafile treats intermediates in a service CA file (ssl_trusted_certificate) as normal > warning on every non-root — nginx uses them to verify OCSP responses/client certs; only a supplied root file warns on non-roots.
+2026-10: a verified chain whose top issuer is not a local root stays chain_status complete (anchor unknown) > 'not complete' as first specified — a missing root is a client trust question; calling it incomplete re-creates the old 'blame the server for missing intermediates' defect.
+2026-10: chain defects as failure_kind (chain-signature/misordered/incomplete/unverified/hygiene/wrong-leaf) > correlating on evidence text — a duplicate-only file was being read as 'missing intermediates'.
+2026-10: wildcard public-suffix guard from an embedded list of common multi-label suffixes + 'at least two labels below *' > bundling the full Public Suffix List — keeps the CLI stdlib-only and small; documented as a limitation.
+2026-10: expiry threshold as a per-process setting (certpolicy.set_warn_days) restored per agent job > threading a parameter through every check — agents run jobs sequentially; the CLI sets it once.
+2026-10: chain.trust private/unknown for any chain → unresolved entry, not a cause > a probable 'no trusted root' cause — the checking machine is not necessarily the client; an internal-CA server would always be blamed.
+2026-10: stapled OCSP fetched with a separate `openssl s_client -status -msg` handshake and validated with `openssl ocsp -respin` > parsing s_client's text dump — the text cannot prove the signature; the DER can.

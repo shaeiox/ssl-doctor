@@ -1,5 +1,247 @@
 # Changelog
 
+## Unreleased — trustworthy verdicts (complete-certificate-diagnostics)
+
+A failing check can no longer disappear from the overall result, and checks
+that could not be completed are no longer reported as certificate or key
+failures. Findings contract **1.7** (additive; 1.0–1.6 documents keep
+validating).
+
+### Changed
+
+- **The overall result counts every failing check.** It used to come from
+  matched root causes only, so an endpoint serving an *expired intermediate*
+  (`tls.verify` FAIL behind a valid leaf) was diagnosed `PASS` and `-c` exited
+  0. A FAIL that no cause rule explains is now listed in
+  `diagnosis.unexplained` and makes the result FAIL (exit 1). An unexplained
+  warning makes it WARNING. **Scans that used to be PASS with a failing or
+  warning check now report FAIL or WARNING.** Failures of the network path
+  (timeouts, resets) and of SSL Doctor's own session (SSH login, remote command
+  execution) count as WARNING, never FAIL.
+- The HTML report rebuilds the same verdict as the JSON document, including
+  unexplained findings.
+
+### Fixed
+
+- **An encrypted private key on the server was reported as a confirmed
+  key/certificate mismatch.** The pairing hashed the empty output of a failed
+  `openssl pkey` and compared it with the certificate. The key's state is now
+  classified first (readable, encrypted, unreadable, missing, unsupported) from
+  its structure, without reading it into the output. Every openssl step is
+  judged by its exit status, and a digest of empty input is never compared.
+  Encrypted, unreadable and unextractable keys give `srv.keymatch` NOT TESTED
+  (`key-encrypted`, `key-unreadable`, `command-failed`). A real mismatch is
+  still FAIL.
+- `/cert match`: a DER-encoded encrypted key was FAIL "private key
+  unreadable", and a certificate whose public key could not be extracted was
+  FAIL "does NOT belong". Both are NOT TESTED now. A missing or unreadable key
+  file is NOT TESTED too, and plain DER keys work with OpenSSL 1.1.1.
+- **A validation-handshake timeout was a certificate failure.** `tls.verify` /
+  `tls.verify.rootonly` that stall or are reset before a verdict are NOT TESTED
+  with the failure kind. They raise no certificate cause, and the diagnosis
+  says validation was inconclusive. A TLS-level rejection stays FAIL. Both
+  validations now connect to the address the TCP check verified, and name it.
+
+### Added (phase 7: revocation, IPv4/IPv6)
+
+- `tls.revocation`: the OCSP response the server staples is fetched (a
+  dedicated `openssl s_client -status` handshake to the verified address, since
+  Python's ssl module cannot request stapling). It is validated with
+  `openssl ocsp`: the signature must verify against the issuer, the response
+  must name this certificate, and it must be within its time window. States are
+  `good`, `revoked`, `unavailable`, `not-checked` and `inconclusive`, with
+  their source. A revoked certificate is a confirmed cause and opens the
+  service's `revoked` alert. An invalid stapled response is a server warning.
+- `--revocation=staple|online|off` (default `staple`) and the agent job
+  option `options.revocation`. `online` asks the CA's OCSP responder, then the
+  CRL, for the leaf and each intermediate (privacy note in the README).
+- Endpoint comparison probes both address families when DNS publishes both,
+  alternating within the cap of 4. Each endpoint is labelled `ipv4` / `ipv6`,
+  and the evidence names a difference between the families, or a family that
+  is unreachable from this network (never a certificate difference).
+  `facts.endpoints[].family` is part of contract 1.7.
+
+### Added (phase 6: service discovery and runtime state)
+
+- `srv.service`: the process listening on the TLS port, from `ss` / `netstat`.
+  An unsupported terminator (for example Caddy) or no local listener is
+  reported, and nginx-derived causes are then not raised for that endpoint.
+- `srv.configtest`: the service's own configuration test (`nginx -t`,
+  `apachectl -t` / `httpd -t`, `haproxy -c`), run only for trusted root-owned
+  binaries and only in test mode, with the real exit status and a bounded
+  summary. A failure caused only by this account's permissions is NOT TESTED,
+  not FAIL. `nginx -T` was run before, but its result was discarded.
+- Apache httpd and HAProxy: detected from their process titles, with
+  configuration read with includes (bounded, candidate evidence). The vhost or
+  bind for the domain is reported with its certificate/key/chain paths and
+  their states; the certificate and key checks run on files that can be opened.
+- `srv.reload`: certificate and key modification times compared with the
+  newest worker, plus reload errors from the service journal. "A reload is
+  needed" is reported; SSL Doctor never reloads.
+- `srv.renewal`: certbot, acme.sh or lego, reported as managing a certificate
+  only when its configuration names the configured path (symlinks resolved),
+  together with its timer or cron entry. Cron file contents are never read.
+- `/server services`, also part of `/scan --with-server` and the server agent.
+- A command audit test proves that no state-changing command is executed.
+
+### Fixed (phase 5: server certificate deployment)
+
+- **The configured-vs-served comparison no longer uses a stale file.** A
+  fingerprint from an earlier `/server cert` was compared after a later scan
+  that could not read its certificate. Each scan now starts a fresh context,
+  and the comparison is NOT TESTED when this scan read nothing.
+- **RSA + ECDSA configurations.** Every `ssl_certificate` / `ssl_certificate_key`
+  pair of the selected block is resolved, validated and paired, and a count
+  mismatch is a FAIL. `srv.compare` matches the served certificate against
+  each pair, so an ECDSA certificate served from a dual block is no longer a
+  mismatch.
+- The server block is selected by listen address as well as name, as nginx
+  does for `listen 10.0.0.5:443` next to `listen 443`.
+
+### Added (phase 5)
+
+- `srv.compare` also compares the full served chain with the configured file
+  and names the first differing position (missing / added / replaced). A
+  mismatch is FAIL only against the running instance's configuration.
+- `srv.perms` runs in every nginx scan (and so in `/scan` and the server
+  agent), judged by role: a private key readable by other users warns, and a
+  file the nginx master's account cannot read fails. Only `stat` and `id` are
+  run.
+- `srv.keystartup`: an encrypted key without a usable `ssl_password_file` is a
+  FAIL (nginx could not start). The passphrase file is state-checked, never
+  read.
+- `srv.inventory`: every TLS server block's certificate, with the selected and
+  served ones flagged, and other blocks that also cover the domain.
+- Causes for a missing configured file, an unstartable encrypted key,
+  unreadable files, a served chain that differs from the file, and an
+  alternative certificate.
+
+### Added (phase 4: structured facts, causes, reports)
+
+- `facts.certificates` is filled for the presented chain (`presented`), every
+  configured chain file read on the server (`configured:<path>`, also in
+  server-agent documents) and `/cert inspect` files (`supplied:<path>`). Each
+  entry carries status, trust class, anchor and per-certificate role, dates,
+  key, signature, CA flag, KU/EKU, SKI/AKI and link verification. There is no
+  key material.
+- Service alerts: new conditions `chain_certificate_invalid` (an expired or
+  not-yet-valid certificate in the presented chain) and `revoked`. Alert
+  evaluation now keys on `facts.leaf`, so server-agent documents with
+  configured-chain facts neither alert nor hide a later leaf change.
+- Named causes for an anchor that expired and for a non-CA or forged link.
+  For a private or unknown trust class judged against this machine's store, an
+  *unresolved* entry is raised instead of a cause (this machine may not be the
+  client). An encrypted key is named in the notes, with no mismatch concluded.
+- `/diagnose`, the HTML report and `agent-report.md` (new subsection 5.8)
+  list unexplained findings. The agent report no longer says the overall
+  status comes from causes only.
+
+### Fixed (phase 3: trust, lifecycle, policy, hostnames)
+
+- **An expired certificate configured on the server was `srv.cert` PASS.** The
+  configured certificate is now judged like the presented one: expired, not
+  yet valid, or not covering the domain is FAIL, with a server cause.
+- **Every certificate's dates count.** `chain.validity` checks each certificate
+  after the leaf. An expired intermediate behind a valid leaf now gets a
+  confirmed cause naming the intermediate (it was overall PASS before phase 0,
+  and unexplained since). An intermediate that expires before the leaf warns.
+- Hostname coverage is a single matcher for `tls.hostname`, `cert.hostname`,
+  `tls.sni`, endpoint comparison and the domain profile. It adds IDN (A-label),
+  IP-only-for-IP, partial-label and public-suffix wildcard rules, and names the
+  matching entry.
+
+### Added (phase 3)
+
+- `chain.trust`: trust class `public` / `private` / `self-signed` / `unknown`
+  from verified paths, evaluated offline. The evidence names the trust store and
+  its anchor count, or the service CA file that anchors a private chain. An
+  expired anchor and an empty store are reported as such.
+- `cert.policy` (`policy 1`): weak RSA/DSA keys, unusual EC curves, MD5/SHA-1
+  signatures (a root's own self-signature is reported, not judged).
+- `--expiry-warn-days 1-365` (default 30). Agent jobs carry
+  `options.expiry_warn_days`; the service sends each target's
+  `expiry_threshold_days`, and the agent declines an out-of-range value.
+
+### Fixed (phase 2: verified chains)
+
+- **Chains are verified, not matched by name.** Each link of `tls.chain`,
+  `nginx.chainfile` and `cert.chainfile` must verify with `openssl verify`: the
+  next certificate's key signed it, it is a CA, and `pathLenConstraint` holds.
+  A forged intermediate (same name and key identifier, different key) and a
+  non-CA "intermediate" used to give `complete` / PASS; they are now FAIL
+  (`chain-signature`) with a cause that says the chain does not verify. A
+  wrong or misordered intermediate stays a WARNING. Without `openssl`, links
+  are name-only and the chain is never PASS.
+- Names compare by RFC 5280 rules (case and whitespace).
+- Chain findings carry their defect class in `failure_kind`, and the diagnosis
+  uses it instead of evidence text. A file that only repeats a certificate is
+  no longer reported as "does not send the full chain".
+
+### Added (phase 2)
+
+- Anchoring: a verified self-signed top, or every path to a trusted root (with
+  cross-signed CAs, up to 8 paths), chosen by key identifier when roots share
+  a name, and noted. `tls.chain` now uses the trust anchors for every chain,
+  not only single certificates. A verified chain whose root this machine lacks
+  stays complete, marked "anchor unknown". A missing intermediate is named
+  with its key identifier and AIA URL; nothing is fetched.
+- `chain.usage`: the leaf must allow TLS server authentication (EKU and a Key
+  Usage that fits its key type), and issuers need `keyCertSign`, for presented,
+  configured and supplied chains. Its cause replaces the generic "validation
+  failed" for an unsuitable-purpose error.
+- A certificate counts as self-signed only when its own key verifiably signed
+  it. Equal names are reported as "self-issued name, not self-signed".
+
+### Fixed (phase 1: strict certificate files)
+
+- **Truncated and corrupt PEM files no longer pass.** A trailing block without
+  its END line was ignored (`cert.parse` PASS, "1 certificate"), and a block
+  with invalid Base64 still gave PASS plus a warning. Every BEGIN must now have
+  its END, and every block must decode as X.509. Otherwise `cert.parse` (and
+  `nginx.chainfile` for a configured file) is FAIL, naming the block.
+- **A repeated certificate is a duplicate, not a broken chain.** Duplicates are
+  listed ("position 3 duplicates position 1") and left out of linkage.
+- **A certificate whose subject equals its issuer is a root only if its own key
+  signed it.** Self-signatures and issuer signatures are checked with the system
+  `openssl verify`, isolated from the system trust store.
+- `nginx.chainfile` is FAIL when the file starts with a CA certificate (nginx
+  serves the first certificate) and when it is DER-encoded (nginx loads only
+  PEM). An unrelated certificate in the file is a WARNING.
+
+### Added (phase 1)
+
+- Formats are detected from content: PEM, DER, PKCS#7, PKCS#12, private keys
+  and CSRs, whatever the file is called, each with a conversion hint. Key
+  blocks are counted and never read.
+- Each certificate record carries its key type, size and curve, signature
+  algorithm, Basic Constraints, Key Usage, Extended Key Usage, SKI/AKI, AIA and
+  CRL distribution points. Every file and chain finding lists each certificate
+  with its role.
+- `/cert cafile <file>` and `cert.cafile` for nginx `ssl_trusted_certificate` /
+  `ssl_client_certificate`. In a service CA file, intermediates are normal and
+  only listed.
+- Configured certificate files are read over SSH as base64 (exact bytes, at
+  most 1 MiB), falling back to `cat`.
+
+### Added
+
+- Findings contract 1.7: check ids for the coming certificate and service
+  checks; failure kinds `verifier-unavailable`, `key-encrypted`,
+  `key-unreadable`, `command-failed`, `permission-denied`; optional
+  `facts.certificates` and `diagnosis.unexplained`;
+  `contract.unregistered_checks()`. Validation keeps accepting check ids from
+  later 1.x versions.
+- `tests/baseline/`: the recorded test-id list and `record.py --check`, which
+  fails when a baseline test disappears, starts skipping or fails.
+
+### Verification
+
+- Integration gate: no private-key line, passphrase or SSH password reaches
+  any export (terminal, JSON, HTML, agent report, agent upload); an end-to-end
+  `/scan --with-server` names an expired intermediate and a missing reload and
+  exits 1. All 45 audited checks are now covered by passing tests
+  (`openspec/changes/complete-certificate-diagnostics/verification.md`).
+
 ## v0.10.1 — mouse-wheel scrolling on Windows consoles
 
 The full-screen shell scrolls with the mouse wheel in cmd, PowerShell and Git

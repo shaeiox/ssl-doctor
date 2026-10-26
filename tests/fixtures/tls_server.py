@@ -5,6 +5,7 @@ Modes:
     full-chain  server sends leaf + issuing intermediate
     wrong-chain server sends leaf + an intermediate that did not issue it
     cn-only     server sends a CN-only leaf (no SAN) + intermediate
+    expired-intermediate  server sends leaf + an expired copy of its intermediate
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from typing import List
 
 from .pki import PKI
 
-MODES = ("leaf-only", "full-chain", "wrong-chain", "cn-only")
+MODES = ("leaf-only", "full-chain", "wrong-chain", "cn-only", "expired-intermediate")
 
 
 def _free_port() -> int:
@@ -29,10 +30,14 @@ def _free_port() -> int:
 class TLSServer:
     """Context manager: `with TLSServer(pki, "leaf-only") as srv: srv.port`."""
 
-    def __init__(self, pki: PKI, mode: str) -> None:
+    def __init__(self, pki: PKI, mode: str, chain: str = "", status_file: str = "") -> None:
+        """`chain`: a PEM file of extra certificates to send after the leaf,
+        replacing the mode's intermediates.  `status_file`: a DER OCSP
+        response the server staples."""
         if mode not in MODES:
             raise ValueError(f"unknown mode {mode!r}")
-        self.pki, self.mode = pki, mode
+        self.pki, self.mode, self.chain = pki, mode, chain
+        self.status_file = status_file
         self.host = "127.0.0.1"
         self.port = 0
         self._proc = None
@@ -44,14 +49,19 @@ class TLSServer:
             chain = p.intermediate
         elif self.mode == "wrong-chain":
             chain = p.other_intermediate
+        elif self.mode == "expired-intermediate":
+            chain = p.expired_intermediate
         elif self.mode == "cn-only":
             cert, key, chain = p.cn_only, p.cn_only_key, p.intermediate
         # -no-CAfile/-no-CApath: otherwise OpenSSL completes the chain from its
         # trust store and a "leaf-only" server silently sends intermediates.
         argv = ["openssl", "s_server", "-quiet", "-www", "-no-CAfile", "-no-CApath",
                 "-accept", f"{self.host}:{self.port}", "-cert", cert, "-key", key]
+        chain = self.chain or chain
         if chain:
             argv += ["-cert_chain", chain]
+        if self.status_file:
+            argv += ["-status_file", self.status_file]
         return argv
 
     def __enter__(self) -> "TLSServer":

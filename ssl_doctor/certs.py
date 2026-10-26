@@ -9,6 +9,7 @@ logged, or returned - only SHA-256 digests of the DER public key.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import re
@@ -18,7 +19,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from . import findings as F
 
@@ -45,6 +46,13 @@ def _fmt_name(rdns) -> str:
         for key, value in rdn:
             parts.append(f"{_NAME_ATTRS.get(key, key)}={value}")
     return ", ".join(parts)
+
+
+def canonical_name(rdns) -> Tuple[Tuple[str, str], ...]:
+    """RFC 5280 / RFC 4518 style name for comparison: attribute values
+    case-folded with internal whitespace collapsed, regardless of string type."""
+    return tuple((key, " ".join(str(value).casefold().split()))
+                 for rdn in rdns or () for key, value in rdn)
 
 
 def _parse_time(value: str) -> Optional[datetime]:
@@ -86,13 +94,39 @@ class CertInfo:
     sha1: str = ""
     signature_algorithm: str = ""   # via openssl, when available
     public_key: str = ""            # e.g. "RSA 2048 bit" via openssl
-    is_ca: Optional[bool] = None    # best effort from filename/context
+    # Fields below are filled from `openssl x509 -text`; `extensions_read`
+    # says whether that happened, so "no extension" and "not read" differ.
+    extensions_read: bool = False
+    key_type: str = ""              # RSA | EC | Ed25519 | Ed448 | DSA | <openssl name>
+    key_bits: Optional[int] = None
+    curve: str = ""                 # EC only, e.g. "P-256" or "prime256v1"
+    is_ca: Optional[bool] = None    # Basic Constraints CA:TRUE; None = not read
+    basic_constraints: bool = False  # the extension is present
+    path_len: Optional[int] = None
+    key_usage: List[str] = field(default_factory=list)          # RFC 5280 names
+    ext_key_usage: List[str] = field(default_factory=list)      # e.g. serverAuth
     ski: str = ""                   # subject key identifier (hex, via openssl)
     aki: str = ""                   # authority key identifier (hex, via openssl)
+    aia_ca_issuers: List[str] = field(default_factory=list)
+    ocsp_urls: List[str] = field(default_factory=list)
+    crl_urls: List[str] = field(default_factory=list)
     pem: bytes = b""
+    position: int = 0               # 1-based place in its file or chain; 0 = unknown
+    subject_canon: Tuple[Tuple[str, str], ...] = ()     # see canonical_name()
+    issuer_canon: Tuple[Tuple[str, str], ...] = ()
+
+    def issued_name_of(self, parent: "CertInfo") -> bool:
+        """Does this certificate name `parent` as its issuer (canonical compare)?"""
+        if self.issuer_canon and parent.subject_canon:
+            return self.issuer_canon == parent.subject_canon
+        return bool(self.issuer) and self.issuer == parent.subject
+
+    def self_issued_name(self) -> bool:
+        return self.issued_name_of(self)
 
     def is_self_signed(self) -> bool:
-        return bool(self.subject) and self.subject == self.issuer
+        # names only: whether its own key signed it is chainval.self_signed()
+        return bool(self.subject) and self.self_issued_name()
 
     def days_to_expiry(self) -> Optional[int]:
         if not self.not_after:
@@ -109,30 +143,19 @@ class CertInfo:
         return datetime.now(timezone.utc) < self.not_before
 
     def matches_hostname(self, hostname: str) -> Tuple[bool, List[str]]:
-        """Return (match, names_checked).  Simple wildcard-aware matching.
+        """Return (match, names_checked) - see `hostnames.covers` for the rules.
 
         Only subjectAltName entries count: modern clients ignore the CN.
         """
-        names = list(self.san_dns)
-        host = hostname.lower().rstrip(".")
-        for pattern in names:
-            p = pattern.lower()
-            if p == host:
-                return True, names
-            if p.startswith("*."):
-                suffix = p[1:]  # ".example.com"
-                if host.endswith(suffix) and host.count(".") == pattern.count("."):
-                    return True, names
-        try:
-            import ipaddress
+        ok, _entry = self.hostname_match(hostname)
+        if ok and _entry in self.san_ip:
+            return True, self.san_ip
+        return ok, list(self.san_dns)
 
-            ip = ipaddress.ip_address(host)
-            for name in self.san_ip:
-                if ipaddress.ip_address(name) == ip:
-                    return True, self.san_ip or names
-        except ValueError:
-            pass
-        return False, names
+    def hostname_match(self, hostname: str) -> Tuple[bool, str]:
+        """(covered, the SAN entry that covers `hostname`)."""
+        from . import hostnames
+        return hostnames.covers(self.san_dns, self.san_ip, hostname)
 
     def one_liner(self) -> str:
         exp = self.not_after.strftime("%Y-%m-%d") if self.not_after else "?"
@@ -151,6 +174,8 @@ def _decode_with_stdlib(pem: bytes) -> CertInfo:
     info = CertInfo(pem=pem)
     info.subject = _fmt_name(raw.get("subject"))
     info.issuer = _fmt_name(raw.get("issuer"))
+    info.subject_canon = canonical_name(raw.get("subject"))
+    info.issuer_canon = canonical_name(raw.get("issuer"))
     cn = [v for rdn in (raw.get("subject") or ()) for k, v in rdn if k == "commonName"]
     info.common_name = cn[-1] if cn else ""
     icn = [v for rdn in (raw.get("issuer") or ()) for k, v in rdn if k == "commonName"]
@@ -201,33 +226,96 @@ def _openssl(*args: str, input_data: bytes = b"", timeout: int = 10) -> Tuple[in
         return 124, "", "openssl timed out"
 
 
-def _enrich_with_openssl(info: CertInfo) -> None:
-    """Fill signature algorithm / public key fields via the openssl CLI."""
-    if not shutil.which("openssl"):
-        return
-    rc, out, _ = _openssl("x509", "-noout", "-text", input_data=info.pem)
-    if rc != 0:
-        return
+_KEY_USAGE_NAMES = {
+    "Digital Signature": "digitalSignature", "Non Repudiation": "nonRepudiation",
+    "Content Commitment": "nonRepudiation", "Key Encipherment": "keyEncipherment",
+    "Data Encipherment": "dataEncipherment", "Key Agreement": "keyAgreement",
+    "Certificate Sign": "keyCertSign", "CRL Sign": "cRLSign",
+    "Encipher Only": "encipherOnly", "Decipher Only": "decipherOnly",
+}
+_EKU_NAMES = {
+    "TLS Web Server Authentication": "serverAuth",
+    "TLS Web Client Authentication": "clientAuth", "Code Signing": "codeSigning",
+    "E-mail Protection": "emailProtection", "Time Stamping": "timeStamping",
+    "OCSP Signing": "OCSPSigning", "Any Extended Key Usage": "anyExtendedKeyUsage",
+}
+_KEY_TYPES = {"rsaEncryption": "RSA", "rsassaPss": "RSA-PSS", "id-ecPublicKey": "EC",
+              "ED25519": "Ed25519", "ED448": "Ed448", "dsaEncryption": "DSA"}
+
+
+def _text_extensions(text: str) -> dict:
+    """`X509v3 extensions` of `openssl x509 -text` as {name: [body lines]}."""
+    lines = text.splitlines()
+    try:
+        start = next(i for i, ln in enumerate(lines) if ln.strip() == "X509v3 extensions:")
+    except StopIteration:
+        return {}
+    exts: dict = {}
+    indent, current = None, None
+    for ln in lines[start + 1:]:
+        if not ln.strip():
+            continue
+        depth = len(ln) - len(ln.lstrip())
+        if indent is None:
+            indent = depth
+        if depth < indent:
+            break                                   # end of the extension block
+        if depth == indent:
+            current = ln.strip().split(":")[0].replace("X509v3 ", "").strip()
+            exts[current] = []
+        elif current is not None:
+            exts[current].append(ln.strip())
+    return exts
+
+
+def _apply_openssl_text(info: CertInfo, out: str) -> None:
     m = re.search(r"Signature Algorithm:\s*([^\n]+)", out)
     if m:
         info.signature_algorithm = m.group(1).strip()
-    m = re.search(r"Public-Key:\s*\(([^)]+)\)", out)
-    algo = ""
     m2 = re.search(r"Public Key Algorithm:\s*([^\n]+)", out)
-    if m2:
-        algo = m2.group(1).strip().replace("Public-Key", "").strip()
-    if m:
-        bits = m.group(1).strip()
-        short = {"rsaEncryption": "RSA", "id-ecPublicKey": "ECDSA", "ED25519": "Ed25519"}.get(algo, algo)
-        info.public_key = f"{short} {bits}".strip()
-    if info.is_ca is None:
-        info.is_ca = "CA:TRUE" in out
-    m = re.search(r"Subject Key Identifier:\s*\n\s*([0-9A-Fa-f:]+)", out)
-    if m:
-        info.ski = m.group(1).replace(":", "").lower()
-    m = re.search(r"Authority Key Identifier:\s*\n\s*(?:keyid:)?([0-9A-Fa-f:]+)", out)
-    if m:
-        info.aki = m.group(1).replace(":", "").lower()
+    algo = m2.group(1).strip() if m2 else ""
+    info.key_type = _KEY_TYPES.get(algo, algo)
+    m = re.search(r"Public-Key:\s*\((\d+) bit\)", out)
+    info.key_bits = int(m.group(1)) if m else {"Ed25519": 256, "Ed448": 456}.get(info.key_type)
+    m = re.search(r"NIST CURVE:\s*(\S+)", out) or re.search(r"ASN1 OID:\s*(\S+)", out)
+    info.curve = m.group(1) if (m and info.key_type == "EC") else ""
+    if info.key_bits:
+        short = "ECDSA" if info.key_type == "EC" else info.key_type
+        info.public_key = f"{short} {info.key_bits} bit"
+    exts = _text_extensions(out)
+    bc = exts.get("Basic Constraints")
+    info.basic_constraints = bc is not None
+    body = " ".join(bc or [])
+    info.is_ca = "CA:TRUE" in body
+    m = re.search(r"pathlen:(\d+)", body)
+    info.path_len = int(m.group(1)) if m else None
+    info.key_usage = [_KEY_USAGE_NAMES.get(n.strip(), n.strip())
+                      for n in " ".join(exts.get("Key Usage", [])).split(",") if n.strip()]
+    info.ext_key_usage = [_EKU_NAMES.get(n.strip(), n.strip()) for n in
+                          " ".join(exts.get("Extended Key Usage", [])).split(",") if n.strip()]
+    ski = "".join(exts.get("Subject Key Identifier", [])[:1])
+    info.ski = ski.replace(":", "").lower()
+    aki = "".join(exts.get("Authority Key Identifier", [])[:1])
+    info.aki = aki.replace("keyid:", "").replace(":", "").lower() \
+        if re.fullmatch(r"(keyid:)?[0-9A-Fa-f:]+", aki) else ""
+    for line in exts.get("Authority Information Access", []):
+        url = line.split("URI:", 1)[1].strip() if "URI:" in line else ""
+        if line.startswith("CA Issuers") and url:
+            info.aia_ca_issuers.append(url)
+        elif line.startswith("OCSP") and url:
+            info.ocsp_urls.append(url)
+    info.crl_urls = [ln.split("URI:", 1)[1].strip() for ln in
+                     exts.get("CRL Distribution Points", []) if ln.startswith("URI:")]
+    info.extensions_read = True
+
+
+def _enrich_with_openssl(info: CertInfo) -> None:
+    """Fill key, signature and extension fields via the openssl CLI."""
+    if not shutil.which("openssl"):
+        return
+    rc, out, _ = _openssl("x509", "-noout", "-text", input_data=info.pem)
+    if rc == 0:
+        _apply_openssl_text(info, out)
 
 
 def decode_pem(pem: bytes, enrich: bool = True) -> CertInfo:
@@ -241,56 +329,168 @@ def decode_der(der: bytes, enrich: bool = True) -> CertInfo:
     return decode_pem(der_to_pem(der), enrich=enrich)
 
 
-def load_cert_file(path: str) -> Tuple[List[CertInfo], Optional[str]]:
-    """Load one or more PEM certificates (or a single DER cert) from a file.
+FMT_PEM = "PEM"
+FMT_DER = "DER"
+FMT_PKCS7 = "PKCS#7"
+FMT_PKCS12 = "PKCS#12"
+FMT_KEY = "private key"
+FMT_CSR = "certificate signing request"
+FMT_EMPTY = "empty"
+FMT_UNKNOWN = "unrecognized"
 
-    Returns (certs, error).  Unparseable/unsupported formats return an error
-    string instead of raising.
+_PEM_LABEL_RE = re.compile(rb"-----BEGIN ([A-Z0-9 ]+)-----")
+_CERT_BEGIN = b"-----BEGIN CERTIFICATE-----"
+_CERT_END = b"-----END CERTIFICATE-----"
+# OID 1.2.840.113549.1.7.2 (pkcs7-signedData): a DER PKCS#7 certificate bundle
+_PKCS7_SIGNED_OID = bytes.fromhex("06092a864886f70d010702")
+_B64_RE = re.compile(rb"^[A-Za-z0-9+/]*={0,2}$")
+
+_FORMAT_HINTS = {
+    FMT_PKCS7: "PKCS#7 bundles are not certificates in PEM form. Extract them with: "
+               "openssl pkcs7 -print_certs -in <file> -out certs.pem",
+    FMT_PKCS12: "PKCS#12 bundles are not inspected directly (they hold a private key). "
+                "Export the certificate only, e.g.: "
+                "openssl pkcs12 -in <file> -clcerts -nokeys -out cert.pem",
+    FMT_KEY: "this is a private key, not a certificate. Key material is never "
+             "displayed; use '/cert match <cert> <key>' to verify pairing.",
+    FMT_CSR: "this is a certificate signing request (CSR), not a certificate",
+    FMT_EMPTY: "file is empty",
+    FMT_UNKNOWN: "unrecognized format (expected PEM or DER certificate)",
+}
+
+
+@dataclass
+class ParsedCertificates:
+    """Everything a certificate input holds, strictly parsed.
+
+    `problems` are fatal: a file with any problem never counts as parsed,
+    even when other blocks decoded.  Key blocks are counted, never read.
     """
+    format: str
+    certs: List[CertInfo] = field(default_factory=list)
+    problems: List[str] = field(default_factory=list)
+    key_blocks: int = 0
+    other_blocks: List[str] = field(default_factory=list)   # PEM labels ignored
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.certs) and not self.problems
+
+    def error(self) -> Optional[str]:
+        if self.problems:
+            return "; ".join(self.problems)
+        if not self.certs:
+            return _FORMAT_HINTS.get(self.format, _FORMAT_HINTS[FMT_UNKNOWN])
+        return None
+
+
+def _decode_block(index: int, body: bytes) -> Tuple[Optional[CertInfo], str]:
+    """One PEM certificate block -> (certificate, problem)."""
+    lines = [ln.strip() for ln in body.split(b"\n") if ln.strip()]
+    if any(b":" in ln for ln in lines):
+        return None, f"block {index}: has PEM headers, which a certificate must not carry"
+    joined = b"".join(lines)
+    if not _B64_RE.match(joined) or len(joined) % 4:
+        return None, f"block {index}: invalid Base64"
+    try:
+        der = base64.b64decode(joined, validate=True)
+        return decode_der(der), ""
+    except Exception:  # noqa: BLE001 - any decoder error means malformed ASN.1
+        return None, f"block {index}: not a valid X.509 certificate (malformed ASN.1)"
+
+
+def _der_format(data: bytes) -> str:
+    elems = _der_elements(data, limit=2)
+    if not elems:
+        return FMT_UNKNOWN
+    if elems[0] == (0x06, _PKCS7_SIGNED_OID[2:]):
+        return FMT_PKCS7
+    state = key_state(data)
+    if state == KEY_ENCRYPTED and len(elems) >= 2 and elems[0] == (0x02, b"\x03"):
+        return FMT_PKCS12
+    if state in (KEY_ENCRYPTED, KEY_READABLE):
+        return FMT_KEY
+    return FMT_UNKNOWN
+
+
+def parse_cert_bytes(data: bytes) -> ParsedCertificates:
+    """Classify `data` by content and decode every certificate it holds."""
+    if not data.strip():
+        return ParsedCertificates(FMT_EMPTY)
+    labels = [m.group(1).decode() for m in _PEM_LABEL_RE.finditer(data)]
+    if not labels:
+        try:
+            cert = decode_der(data)
+            cert.position = 1
+            return ParsedCertificates(FMT_DER, [cert])
+        except Exception:  # noqa: BLE001 - not a DER certificate; say what it is
+            return ParsedCertificates(_der_format(data))
+    out = ParsedCertificates(FMT_PEM)
+    out.key_blocks = sum(1 for lb in labels if lb.endswith("PRIVATE KEY"))
+    out.other_blocks = [lb for lb in labels
+                        if lb != "CERTIFICATE" and not lb.endswith("PRIVATE KEY")]
+    pos, index, terminated = 0, 0, 0
+    while True:
+        begin = data.find(_CERT_BEGIN, pos)
+        if begin == -1:
+            break
+        index += 1
+        body_start = begin + len(_CERT_BEGIN)
+        end = data.find(_CERT_END, body_start)
+        next_begin = data.find(b"-----BEGIN", body_start)
+        if end == -1 or (next_begin != -1 and next_begin < end):
+            out.problems.append(f"block {index} is not terminated "
+                                "(no -----END CERTIFICATE----- line)")
+            pos = body_start if next_begin == -1 else next_begin
+            if next_begin == -1:
+                break
+            continue
+        terminated += 1
+        cert, problem = _decode_block(index, data[body_start:end])
+        if cert is not None:
+            cert.position = index
+            out.certs.append(cert)
+        else:
+            out.problems.append(problem)
+        pos = end + len(_CERT_END)
+    stray_ends = data.count(_CERT_END) - terminated
+    if stray_ends > 0:
+        out.problems.append(f"{stray_ends} -----END CERTIFICATE----- line(s) without "
+                            "a matching BEGIN")
+    if index == 0:
+        if "PKCS7" in labels:
+            out.format = FMT_PKCS7
+        elif out.key_blocks and not out.other_blocks:
+            out.format = FMT_KEY
+        elif any("CERTIFICATE REQUEST" in lb for lb in labels):
+            out.format = FMT_CSR
+        else:
+            out.format = FMT_UNKNOWN
+    return out
+
+
+def parse_cert_file(path: str) -> ParsedCertificates:
     try:
         with open(path, "rb") as fh:
             data = fh.read()
     except OSError as exc:
-        return [], f"cannot read file: {exc}"
+        return ParsedCertificates(FMT_UNKNOWN, problems=[f"cannot read file: {exc}"])
+    return parse_cert_bytes(data)
 
-    if not data.strip():
-        return [], "file is empty"
 
-    blocks = extract_pem_blocks(data)
-    certs: List[CertInfo] = []
-    if blocks:
-        for b in blocks:
-            try:
-                certs.append(decode_pem(b))
-            except Exception as exc:  # corrupted block mid-file
-                return certs, f"failed to parse one PEM block: {exc}"
-        return certs, None
+def load_cert_file(path: str) -> Tuple[List[CertInfo], Optional[str]]:
+    """Certificates in a file, and the reason when it is not cleanly parsed.
 
-    # No PEM blocks: maybe a single DER file.
-    try:
-        certs.append(decode_der(data))
-        return certs, None
-    except Exception:  # noqa: BLE001 - not DER either; reported as "not a certificate" below
-        pass
-
-    ext = os.path.splitext(path)[1].lower()
-    if ext in (".pfx", ".p12", ".pkcs12"):
-        return [], (
-            "PKCS#12 bundles are not inspected directly (they may contain a "
-            "private key). Export the certificate only, e.g.: "
-            "openssl pkcs12 -in bundle.pfx -clcerts -nokeys -out cert.pem"
-        )
-    if b"PRIVATE KEY" in data:
-        return [], (
-            "file looks like a private key, not a certificate. Key material is "
-            "never displayed; use '/cert match <cert> <key>' to verify pairing."
-        )
-    return [], "unrecognized format (expected PEM or DER certificate)"
+    Kept for callers that only need the certificates; `parse_cert_file`
+    returns the full picture (format, problems, ignored key blocks).
+    """
+    parsed = parse_cert_file(path)
+    return parsed.certs, parsed.error()
 
 
 def issued_by(child: CertInfo, parent: CertInfo) -> Tuple[bool, str]:
     """Did `parent` issue `child`?  Returns (verdict, method used)."""
-    if child.issuer != parent.subject:
+    if not child.issued_name_of(parent):
         return False, "issuer/subject name"
     if child.aki and parent.ski:
         return child.aki == parent.ski, "issuer/subject name + key identifier"
@@ -345,50 +545,51 @@ class ChainAssessment:
     anchor: str = ""                # DN of the root the client must trust
     broken_at: int = 0              # 1-based position whose issuer is wrong
     evidence: List[str] = field(default_factory=list)
+    # "position 3 duplicates position 1": repeated certificates, left out of linkage
+    duplicates: List[str] = field(default_factory=list)
+    # contract failure kind for a defect (chain-signature, chain-misordered,
+    # chain-incomplete); "" when the chain is complete
+    failure: str = ""
+    name_only: bool = False         # some link matched by name only (no verifier)
+    anchored: Optional[bool] = None  # top reached a trusted anchor; None = no anchors given
+    paths: List[str] = field(default_factory=list)   # every anchored path found
+    anchor_cert: Optional["CertInfo"] = None          # the certificate that anchored it
+
+
+def dedupe(chain: List[CertInfo]) -> Tuple[List[CertInfo], List[str]]:
+    """(chain without repeated certificates, one note per repetition).
+
+    Positions are file/chain positions (1-based); certificates without one get
+    their index here, so notes and linkage evidence name the same places.
+    """
+    first_at: Dict[str, int] = {}
+    unique: List[CertInfo] = []
+    notes: List[str] = []
+    for i, c in enumerate(chain, 1):
+        if not c.position:
+            c.position = i
+        if c.sha256 in first_at:
+            notes.append(f"position {c.position} duplicates position {first_at[c.sha256]}")
+            continue
+        first_at[c.sha256] = c.position
+        unique.append(c)
+    return unique, notes
 
 
 def assess_chain(chain: List[CertInfo],
                  roots: Optional[List[CertInfo]] = None) -> ChainAssessment:
     """Judge a presented/configured chain without using intermediate caches.
 
-    `roots` are trusted root anchors (self-signed).  When None, completeness
-    of a chain topped by a CA certificate is assumed and stated as such.
+    `roots` are trusted root anchors.  Links are verified cryptographically
+    (see `chainval.assess`); this wrapper keeps the historic entry point.
     """
-    label = lambda c: c.common_name or c.subject  # noqa: E731
-    for i in range(len(chain) - 1):
-        ok, method = issued_by(chain[i], chain[i + 1])
-        if not ok:
-            return ChainAssessment(
-                "broken", broken_at=i + 1,
-                evidence=[f"position {i + 1}: '{label(chain[i])}' is not issued by "
-                          f"position {i + 2} ('{label(chain[i + 1])}') [{method}]"])
-    top = chain[-1]
-    names = " -> ".join(label(c) for c in chain)
-    if top.is_self_signed():
-        return ChainAssessment("complete", top.subject,
-                               evidence=[f"{len(chain)} certificate(s), linked, ends at a "
-                                         f"self-signed root ({names})"])
-    if roots is not None:
-        issuer = next((r for r in roots if issued_by(top, r)[0]), None)
-        if issuer:
-            return ChainAssessment("complete", issuer.subject,
-                                   evidence=[f"{len(chain)} certificate(s), linked "
-                                             f"({names}); anchored by trusted root "
-                                             f"'{label(issuer)}'"])
-    if len(chain) > 1:
-        # Linked chain: the top issued the cert below it, so it is a CA and
-        # its issuer is the expected root.  Not finding that root
-        # locally is a trust question (validation reports it), not proof that
-        # the server omitted certificates.
-        note = ("root anchor list unavailable on this machine" if roots is None else
-                f"its issuer '{top.issuer}' is not among this machine's trusted roots")
-        return ChainAssessment("complete", top.issuer,
-                               evidence=[f"{len(chain)} certificate(s), linked ({names})",
-                                         f"top certificate is a CA; {note}"])
-    return ChainAssessment("incomplete",
-                           evidence=[f"{len(chain)} certificate(s) ({names})",
-                                     "intermediate certificate(s) not sent: the chain ends "
-                                     f"at a non-CA certificate issued by '{top.issuer}'"])
+    from . import chainval      # chainval builds on this module
+    return chainval.assess(chain, roots)
+
+
+def _inventory(chain: List[CertInfo]) -> List[str]:
+    from . import chainval
+    return chainval.inventory_lines(chain, chainval.classify_roles(chain))
 
 
 def inspect_cert_file(path: str, hostname: str = "",
@@ -403,12 +604,23 @@ def inspect_cert_file(path: str, hostname: str = "",
             emit(f)
         return f
 
-    certs, err = load_cert_file(path)
-    if err and not certs:
-        _add(
-            F.Finding("cert.parse", f"Parse certificate file {os.path.basename(path)}",
-                    F.FAIL, F.SCOPE_LOCAL, [err], target=target)
-        )
+    parsed = parse_cert_file(path)
+    certs = parsed.certs
+    name = os.path.basename(path)
+    if not parsed.ok:
+        # a partly decodable file is still broken: no PASS for any of it
+        ev = (list(parsed.problems) or [parsed.error() or "no certificate found"])
+        if parsed.problems and certs:
+            ev.append(f"{len(certs)} certificate block(s) decoded; the file is not usable "
+                      "as it is")
+        if not certs and parsed.format not in (FMT_UNKNOWN, FMT_EMPTY):
+            ev.insert(0, f"detected format: {parsed.format}")
+        _add(F.Finding("cert.parse", f"Parse certificate file {name}", F.FAIL,
+                       F.SCOPE_LOCAL, ev, target=target,
+                       recommendation="" if not parsed.problems else
+                       "The file is truncated or corrupt. Re-create it from the "
+                       "certificates your CA issued, each a complete "
+                       "-----BEGIN/END CERTIFICATE----- block."))
         return out
 
     first = certs[0]
@@ -419,11 +631,18 @@ def inspect_cert_file(path: str, hostname: str = "",
         f"subject={first.subject}; issuer={first.issuer}"
     )
     _add(
-        F.Finding("cert.parse", f"Parsed certificate file {os.path.basename(path)}",
+        F.Finding("cert.parse", f"Parsed certificate file {name}",
                 F.PASS, F.SCOPE_LOCAL,
                 [
                     desc,
+                    f"format: {parsed.format}",
                     f"certificates in file: {len(certs)}",
+                    *( ["a private-key block is present and was not read"
+                        + (f" ({parsed.key_blocks} blocks)" if parsed.key_blocks > 1 else "")]
+                       if parsed.key_blocks else [] ),
+                    *( [f"other PEM blocks ignored: {', '.join(parsed.other_blocks)}"]
+                       if parsed.other_blocks else [] ),
+                    *( _inventory(certs) if len(certs) > 1 else [] ),
                     f"SHA-256 fingerprint: {first.sha256}",
                     f"SHA-1 fingerprint:   {first.sha1}",
                     f"serial: {first.serial}",
@@ -436,50 +655,52 @@ def inspect_cert_file(path: str, hostname: str = "",
     )
 
     # Validity window.
-    if first.is_expired():
-        _add(F.Finding(
-            "cert.validity", "Certificate validity dates", F.FAIL, F.SCOPE_LOCAL,
-            [f"certificate expired {-first.days_to_expiry()} days ago "
-             f"(notAfter={first.not_after:%Y-%m-%d %H:%M UTC})"],
-            recommendation="Renew the certificate and deploy the new file to the server.",
-            target=target))
-    elif first.not_yet_valid():
-        _add(F.Finding(
-            "cert.validity", "Certificate validity dates", F.FAIL, F.SCOPE_LOCAL,
-            [f"certificate is not valid until {first.not_before:%Y-%m-%d %H:%M UTC}"],
-            recommendation="Check the client system clock and the certificate issuance date.",
-            target=target))
-    else:
-        days = first.days_to_expiry()
-        if days is not None and days <= 30:
+    from . import certpolicy        # certpolicy builds on this module
+    status, line, rec = certpolicy.leaf_validity(first)
+    _add(F.Finding("cert.validity", "Certificate validity dates", status, F.SCOPE_LOCAL,
+                   [line], recommendation=rec, target=target))
+
+    # Self-signed?  Only a verified self-signature counts; equal names do not.
+    if first.self_issued_name():
+        from . import chainval
+        verdict = chainval.self_signed(first)
+        if verdict:
             _add(F.Finding(
-                "cert.validity", "Certificate validity dates", F.WARNING, F.SCOPE_LOCAL,
-                [f"certificate expires in {days} days ({first.not_after:%Y-%m-%d})"],
-                recommendation="Renew the certificate soon.",
+                "cert.selfsigned", "Issued by a trusted CA?", F.WARNING, F.SCOPE_LOCAL,
+                ["this is a self-signed certificate (its own key signed it, verified)"],
+                recommendation="Clients will not trust this unless it is imported into "
+                               "their trust store. Use a CA-issued certificate for "
+                               "production.",
+                target=target))
+        elif verdict is False:
+            _add(F.Finding(
+                "cert.selfsigned", "Issued by a trusted CA?", F.WARNING, F.SCOPE_LOCAL,
+                ["self-issued name, not self-signed: subject equals issuer, but another "
+                 "key signed this certificate"],
+                recommendation="Find the CA certificate that issued it; this certificate "
+                               "cannot serve as its own trust anchor.",
                 target=target))
         else:
             _add(F.Finding(
-                "cert.validity", "Certificate validity dates", F.PASS, F.SCOPE_LOCAL,
-                [f"certificate is currently valid; {days} days remaining"],
-                target=target))
-
-    # Self-signed?
-    if first.is_self_signed():
-        _add(F.Finding(
-            "cert.selfsigned", "Issued by a trusted CA?", F.WARNING, F.SCOPE_LOCAL,
-            ["subject and issuer are identical: this is a self-signed certificate"],
-            recommendation="Clients will not trust this unless it is imported into their "
-                           "trust store. Use a CA-issued certificate for production.",
-            target=target))
+                "cert.selfsigned", "Issued by a trusted CA?", F.WARNING, F.SCOPE_LOCAL,
+                ["subject and issuer are identical"],
+                uncertainty=["the self-signature could not be verified (openssl not "
+                             "available)"],
+                target=target, failure_kind="verifier-unavailable"))
 
     # Hostname coverage.
     if hostname:
+        from . import hostnames
         ok, names = first.matches_hostname(hostname)
+        _ok, entry = first.hostname_match(hostname)
+        reason = "" if ok else hostnames.why_not(first.san_dns, hostname)
         _add(F.Finding(
             "cert.hostname", f"Hostname match for '{hostname}'",
             F.PASS if ok else F.FAIL, F.SCOPE_LOCAL,
             [f"checked against subjectAltName: {', '.join(names) or '(none)'}",
-             "match" if ok else f"certificate does not cover '{hostname}'"] +
+             f"match (subjectAltName entry '{entry}')" if ok else
+             f"certificate does not cover '{hostname}'"] +
+            ([reason] if reason else []) +
             ([f"no subjectAltName: CN '{first.common_name}' is ignored by modern clients"]
              if not first.san_dns and first.common_name else []),
             recommendation="" if ok else
@@ -487,39 +708,129 @@ def inspect_cert_file(path: str, hostname: str = "",
             "using a name the certificate covers.",
             target=target))
 
+    from . import chainval      # chainval builds on this module
+    _add(chainval.usage_finding(certs, F.SCOPE_LOCAL, target))
+    validity = certpolicy.chain_validity_finding(certs, F.SCOPE_LOCAL, target)
+    if validity is not None:
+        _add(validity)
+    _add(certpolicy.policy_finding(certs, F.SCOPE_LOCAL, target,
+                                   certpolicy.anchor_ids(certs)))
+    _add(chainval.trust_finding(certs, F.SCOPE_LOCAL, target, load_root_anchors()))
+
     # Chain structure inside the file.
     if len(certs) > 1:
-        problems = []
-        ordered_ok = True
-        for i in range(len(certs) - 1):
-            if certs[i].issuer != certs[i + 1].subject:
-                ordered_ok = False
-                problems.append(
-                    f"position {i + 1}: issuer '{certs[i].issuer}' does not match "
-                    f"subject of next certificate '{certs[i + 1].subject}'")
-        leaf = certs[0]
-        if leaf.subject == leaf.issuer:
-            problems.append("first certificate in file is self-signed (first entry should be the server/leaf certificate)")
-        if not ordered_ok:
-            problems.append("certificates are out of order (server certificate first, then intermediates)")
-        if problems:
-            _add(F.Finding(
-                "cert.chainfile", "Certificate chain file structure", F.WARNING, F.SCOPE_LOCAL,
-                [f"{len(certs)} certificates in file", *problems],
-                recommendation="Order the file as: server certificate, then intermediate "
-                               "certificate(s). The root certificate may be omitted.",
-                target=target))
-        else:
+        roles, wrong_leaf, structure = chainval.file_structure(certs)
+        a = assess_chain(certs, load_root_anchors())
+        status, kind, uncertainty = chainval.chain_verdict(a)
+        if wrong_leaf:
+            # what the file is for is unknown locally, so a CA first is a warning
+            status = F.FAIL if status == F.FAIL else F.WARNING
+            kind = kind if status == F.FAIL else chainval.FAIL_WRONG_LEAF
+        elif status == F.PASS and structure:
+            status, kind = F.WARNING, chainval.FAIL_HYGIENE
+        if status == F.PASS:
             _add(F.Finding(
                 "cert.chainfile", "Certificate chain file structure", F.PASS, F.SCOPE_LOCAL,
                 [f"{len(certs)} certificates, correctly ordered "
-                 f"({' -> '.join(c.common_name or c.subject for c in certs)})"],
+                 f"({' -> '.join(c.common_name or c.subject for c in certs)})",
+                 *a.evidence],
                 target=target))
+        else:
+            _add(F.Finding(
+                "cert.chainfile", "Certificate chain file structure", status, F.SCOPE_LOCAL,
+                [f"{len(certs)} certificates in file", *a.evidence, *wrong_leaf, *structure],
+                recommendation="Order the file as: server certificate, then intermediate "
+                               "certificate(s) that issued it, each once. The root "
+                               "certificate may be omitted.",
+                target=target, failure_kind=kind, uncertainty=uncertainty))
 
-    if err:
-        _add(F.Finding("cert.parse", "Additional data in file", F.WARNING,
-                           F.SCOPE_LOCAL, [err], target=target))
     return out
+
+
+# ---------------------------------------------------------------- key state
+
+KEY_READABLE = "readable"
+KEY_ENCRYPTED = "encrypted"
+KEY_UNREADABLE = "unreadable"       # exists, but this account may not read it
+KEY_MISSING = "missing"
+KEY_UNSUPPORTED = "unsupported"     # not a key openssl can load here
+
+_PLAIN_KEY_PEM = re.compile(rb"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----")
+# OID 1.2.840.113549.1.7.1 (pkcs7-data): the outer content type of a PKCS#12 PFX
+_PKCS7_DATA_OID = bytes.fromhex("06092a864886f70d010701")
+
+
+def _der_elements(data: bytes, limit: int = 3) -> List[Tuple[int, bytes]]:
+    """First `limit` (tag, value) pairs inside the outer DER SEQUENCE.
+
+    Only the structure is inspected; nothing is decoded or kept beyond the
+    caller's classification.  Returns [] when `data` is not a DER SEQUENCE.
+    """
+    def tlv(buf: bytes, i: int):
+        if i + 2 > len(buf):
+            return None
+        tag, length, i = buf[i], buf[i + 1], i + 2
+        if length & 0x80:
+            n = length & 0x7F
+            if n == 0 or n > 4 or i + n > len(buf):
+                return None
+            length, i = int.from_bytes(buf[i:i + n], "big"), i + n
+        if i + length > len(buf):
+            return None
+        return tag, buf[i:i + length], i + length
+
+    outer = tlv(data, 0)
+    if outer is None or outer[0] != 0x30:
+        return []
+    body, pos, out = outer[1], 0, []
+    while len(out) < limit:
+        item = tlv(body, pos)
+        if item is None:
+            break
+        out.append((item[0], item[1]))
+        pos = item[2]
+    return out
+
+
+def key_state(data: bytes) -> str:
+    """Classify private-key bytes without loading the key.
+
+    `encrypted` covers legacy PEM (`Proc-Type: 4,ENCRYPTED`), PKCS#8
+    `ENCRYPTED PRIVATE KEY` PEM, DER `EncryptedPrivateKeyInfo` and PKCS#12
+    (whose key bags are always passphrase-protected).  `readable` means the
+    bytes look like an unencrypted key; openssl may still refuse it.
+    """
+    head = data[:4096]
+    if b"-----BEGIN ENCRYPTED PRIVATE KEY-----" in head:
+        return KEY_ENCRYPTED
+    if _PLAIN_KEY_PEM.search(head):
+        return KEY_ENCRYPTED if b"Proc-Type: 4,ENCRYPTED" in head else KEY_READABLE
+    if b"-----BEGIN" in head:
+        # OPENSSH and other PEM labels: not loadable by `openssl pkey`
+        return KEY_UNSUPPORTED
+    elems = _der_elements(data)
+    if len(elems) >= 2:
+        (t1, v1), (t2, v2) = elems[0], elems[1]
+        if t1 == 0x02 and v1 == b"\x03" and t2 == 0x30 and v2.startswith(_PKCS7_DATA_OID):
+            return KEY_ENCRYPTED                    # PKCS#12 PFX, version 3
+        if t1 == 0x30 and t2 == 0x04:
+            return KEY_ENCRYPTED                    # EncryptedPrivateKeyInfo
+        if t1 == 0x02:
+            return KEY_READABLE                     # PKCS#8 / RSA / EC private key
+    return KEY_UNSUPPORTED
+
+
+def key_file_state(path: str) -> str:
+    """`key_state` of a local file, or why it could not be read."""
+    try:
+        with open(path, "rb") as fh:
+            return key_state(fh.read(1 << 20))
+    except FileNotFoundError:
+        return KEY_MISSING
+    except PermissionError:
+        return KEY_UNREADABLE
+    except OSError:
+        return KEY_UNREADABLE
 
 
 def _public_key_sha256_from_pem_bytes(pem: bytes) -> Tuple[Optional[str], str]:
@@ -537,79 +848,74 @@ def match_cert_key(cert_path: str, key_path: str,
                    emit: Optional[Callable[[Finding], None]] = None) -> List[Finding]:
     """Verify a private key belongs to a certificate.
 
-    Never prints or logs key material.  Encrypted keys are rejected unless
-    they can be read without a passphrase (we never prompt for one).
+    Never prints or logs key material.  PASS and FAIL need both public-key
+    digests; anything that prevents deriving one (an encrypted, unreadable or
+    unsupported key, a failed openssl call) is NOT TESTED, never a mismatch.
+    Passphrases are never asked for.
     """
-    out: List[Finding] = []
+    title = "Certificate/private-key match"
 
-    def _add(f: Finding) -> Finding:
-        list.append(out, f)
+    def result(status: str, evidence: List[str], target: str, **kw) -> List[Finding]:
+        f = F.Finding("cert.keymatch", title, status, F.SCOPE_LOCAL, evidence,
+                      target=target, **kw)
         if emit is not None:
             emit(f)
-        return f
+        return [f]
+
+    def not_tested(reason: str, target: str, kind: str = "", **kw) -> List[Finding]:
+        return result(F.NOT_TESTED,
+                      [reason, "the pairing could not be tested; this is not a mismatch"],
+                      target, failure_kind=kind, **kw)
 
     if not shutil.which("openssl"):
-        _f = F.Finding("cert.keymatch", "Certificate/private-key match", F.NOT_TESTED,
-                      F.SCOPE_LOCAL, ["openssl binary not available"])
-        if emit is not None:
-            emit(_f)
-        return [_f]
+        return not_tested("openssl binary not available", cert_path, "verifier-unavailable")
+    state = key_file_state(key_path)
+    if state == KEY_MISSING:
+        return not_tested(f"key file not found: {key_path}", key_path)
+    if state == KEY_UNREADABLE:
+        return not_tested(f"key file cannot be read by this account: {key_path}",
+                          key_path, "key-unreadable")
+    if state == KEY_ENCRYPTED:
+        return not_tested("the private key is passphrase-encrypted; ssl-doctor never "
+                          "prompts for passphrases, so the match cannot be checked",
+                          key_path, "key-encrypted",
+                          detail="Decrypt a copy in a secure location and compare again "
+                                 "with /cert match.")
+    if state == KEY_UNSUPPORTED:
+        return not_tested("the file is not a private key openssl can load", key_path)
+
     certs, err = load_cert_file(cert_path)
     if not certs:
-        _f = F.Finding("cert.keymatch", "Certificate/private-key match", F.FAIL,
-                      F.SCOPE_LOCAL, [err or "cannot parse certificate file"],
-                      target=cert_path)
-        if emit is not None:
-            emit(_f)
-        return [_f]
-
-    cert_fp, e1 = _public_key_sha256_from_pem_bytes(certs[0].pem)
-    try:
-        with open(key_path, "rb") as fh:
-            key_data = fh.read()
-    except OSError as exc:
-        _f = F.Finding("cert.keymatch", "Certificate/private-key match", F.FAIL,
-                      F.SCOPE_LOCAL, [f"cannot read key file: {exc}"], target=key_path)
-        if emit is not None:
-            emit(_f)
-        return [_f]
-
-    if b"ENCRYPTED" in key_data[:200]:
-        _add(F.Finding("cert.keymatch", "Certificate/private-key match", F.NOT_TESTED,
-                           F.SCOPE_LOCAL,
-                           ["the private key is passphrase-encrypted; ssl-doctor never "
-                            "prompts for passphrases, so the match cannot be checked"],
-                           detail="Decrypt a copy in a secure location and compare again "
-                                  "with /cert match.",
-                           target=key_path))
-        return out
-
-    key_rc, key_der, key_err = _openssl_raw("pkey", "-pubout", "-outform", "DER",
-                                            input_data=key_data)
-    if key_rc != 0:
+        return not_tested(f"certificate unusable: {err or 'cannot parse certificate file'}",
+                          cert_path)
+    cert_fp, cert_err = _public_key_sha256_from_pem_bytes(certs[0].pem)
+    if not cert_fp:
+        return not_tested(f"the certificate's public key could not be derived"
+                          f"{': ' + cert_err.splitlines()[-1] if cert_err else ''}",
+                          cert_path, "command-failed")
+    with open(key_path, "rb") as fh:
+        key_data = fh.read()
+    key_rc, key_der, key_err = _openssl_raw("pkey", "-passin", "pass:", "-pubout",
+                                            "-outform", "DER", input_data=key_data)
+    if key_rc != 0 and not key_data.lstrip().startswith(b"-----"):
+        # openssl 1.1.1 does not detect DER input on its own
+        key_rc, key_der, key_err = _openssl_raw("pkey", "-inform", "DER", "-passin",
+                                                "pass:", "-pubout", "-outform", "DER",
+                                                input_data=key_data)
+    if key_rc != 0 or not key_der:
         msg = key_err.strip().splitlines()
-        hint = msg[-1] if msg else "openssl could not read the key"
-        _f = F.Finding("cert.keymatch", "Certificate/private-key match", F.FAIL,
-                      F.SCOPE_LOCAL, [f"private key unreadable: {hint}"],
-                      target=key_path)
-        if emit is not None:
-            emit(_f)
-        return out + [_f]
+        return not_tested(f"the key's public key could not be derived: "
+                          f"{msg[-1] if msg else 'openssl could not read the key'}",
+                          key_path, "command-failed")
     key_fp = hashlib.sha256(key_der).hexdigest()
 
-    if cert_fp and cert_fp == key_fp:
-        _add(F.Finding(
-            "cert.keymatch", "Certificate/private-key match", F.PASS, F.SCOPE_LOCAL,
-            ["public key embedded in the certificate matches this private key",
-             f"public-key SHA-256: {key_fp}"],
-            target=cert_path))
-    else:
-        ev = [f"certificate public-key SHA-256: {cert_fp}", f"private key public SHA-256: {key_fp}"]
-        _add(F.Finding(
-            "cert.keymatch", "Certificate/private-key match", F.FAIL, F.SCOPE_LOCAL,
-            ev + ["the private key does NOT belong to this certificate"],
-            recommendation="The server may be serving one certificate while holding the "
-                           "key of another (common after renewals). Point the web server "
-                           "at the matching pair.",
-            target=cert_path))
-    return out
+    if cert_fp == key_fp:
+        return result(F.PASS, ["public key embedded in the certificate matches this "
+                               "private key", f"public-key SHA-256: {key_fp}"], cert_path)
+    return result(
+        F.FAIL, [f"certificate public-key SHA-256: {cert_fp}",
+                 f"private key public SHA-256: {key_fp}",
+                 "the private key does NOT belong to this certificate"], cert_path,
+        recommendation="The server may be serving one certificate while holding the "
+                       "key of another (common after renewals). Point the web server "
+                       "at the matching pair.")
