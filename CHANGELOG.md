@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — no faults reported on healthy systems (fix-diagnostic-false-positives)
+
+Findings contract stays **1.7**; no schema change.
+
+### Changed
+
+- **BREAKING for scripts that use the exit code:** a failing check about the
+  machine running SSL Doctor (`local.*`, for example `local.clockskew` or
+  `local.certutil`) that no root cause explains now makes the overall result
+  WARNING instead of FAIL, so a batch run exits 0. The overall result and exit
+  code describe the endpoint and its server. The finding stays listed under
+  unexplained findings, and a confirmed client cause still gives FAIL (exit 1).
+
 ## v0.11.0 — trustworthy certificate verdicts
 
 Chains are verified by signature, not by names; every certificate in a chain

@@ -67,3 +67,5 @@ One line per settled choice: `YYYY-MM: chosen > rejected — why`.
 2026-10: expiry threshold as a per-process setting (certpolicy.set_warn_days) restored per agent job > threading a parameter through every check — agents run jobs sequentially; the CLI sets it once.
 2026-10: chain.trust private/unknown for any chain → unresolved entry, not a cause > a probable 'no trusted root' cause — the checking machine is not necessarily the client; an internal-CA server would always be blamed.
 2026-10: stapled OCSP fetched with a separate `openssl s_client -status -msg` handshake and validated with `openssl ocsp -respin` > parsing s_client's text dump — the text cannot prove the signature; the DER can.
+2026-10: unexplained local.* FAIL counts as WARNING in the overall verdict (U1-b) > a separate client verdict (needs schema 1.8) or unchanged — the verdict and exit code describe the endpoint; confirmed client causes still FAIL.
+2026-10: clock-skew server-time reference valid for 120 s after the response (U2) > measuring at local-check time — /local after /tls compared an old Date header with the current clock.

@@ -13,10 +13,10 @@ from fixtures.pki import HOSTNAME, get_pki, openssl_available
 from fixtures.scan import trust_env
 from fixtures.tls_server import TLSServer
 
-from ssl_doctor import cli, findings as F
+from ssl_doctor import cli, local, findings as F
 
 
-def batch_scan(mode):
+def batch_scan(mode, patches=()):
     """Exit status and diagnosis of a batch `/scan` against a fixture server."""
     seen = {}
     real_diagnose = cli.SSLDoctorCLI.cmd_diagnose
@@ -27,7 +27,10 @@ def batch_scan(mode):
 
     with TLSServer(get_pki(), mode) as srv, trust_env(("root",)), \
             contextlib.redirect_stdout(io.StringIO()), \
-            mock.patch.object(cli.SSLDoctorCLI, "cmd_diagnose", capture):
+            mock.patch.object(cli.SSLDoctorCLI, "cmd_diagnose", capture), \
+            contextlib.ExitStack() as stack:
+        for patch in patches:
+            stack.enter_context(patch)
         status = cli.main(["--no-tui", "-c",
                            f"/scan {srv.host}:{srv.port} --sni {HOSTNAME} --client-only"])
     return status, seen.get("diagnosis")
@@ -54,6 +57,15 @@ class BatchExitCode(unittest.TestCase):
         status, d = batch_scan("leaf-only")
         self.assertEqual(d.overall, F.FAIL)
         self.assertEqual(status, 1)
+
+    def test_client_machine_failure_alone_exits_zero(self):
+        skew = F.Finding("local.clockskew", "System clock vs server clock", F.FAIL,
+                         F.SCOPE_LOCAL, ["this machine is 400s ahead of the remote server's clock"])
+        status, d = batch_scan("full-chain", patches=[mock.patch.object(
+            local, "check_os_and_clock", return_value=[skew])])
+        self.assertEqual(d.overall, F.WARNING)
+        self.assertIn("local.clockskew", [u.check for u in d.unexplained])
+        self.assertEqual(status, 0)
 
 
 if __name__ == "__main__":

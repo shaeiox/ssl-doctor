@@ -86,9 +86,11 @@ class Unexplained:
 
     @property
     def decides_verdict(self) -> bool:
-        """A FAIL of the endpoint itself, not of the path or of our session."""
+        """A FAIL of the endpoint itself, not of the path, of our session, or of
+        the machine running SSL Doctor (`local.*`, decision U1)."""
         return (self.status == F.FAIL and self.failure_kind not in TRANSPORT_FAILURE_KINDS
-                and self.check not in _SESSION_CHECKS)
+                and self.check not in _SESSION_CHECKS
+                and not self.check.startswith("local."))
 
     def to_dict(self) -> Dict:
         return {"check": self.check, "status": self.status, "title": self.title,
