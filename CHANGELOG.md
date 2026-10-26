@@ -25,6 +25,15 @@ Findings contract stays **1.7**; no schema change.
   NOT TESTED `permission-denied`, naming the files and keeping "syntax is ok".
   A non-zero exit with no recognised error is NOT TESTED `command-failed`.
 
+- **certbot keys are no longer reported as readable by other users.**
+  `srv.perms` read the configured path without following links, so certbot's
+  `live/<name>/privkey.pem` symlink was judged as mode 777. Mode, owner, group
+  and the service account's access are now judged on the file the path
+  resolves to, and the evidence names both (`link -> target`). A directory the
+  account cannot enter gives NOT TESTED `permission-denied`; an ACL on the file
+  is noted as not evaluated. The recommendation names the file and the exact
+  `chmod`/`chown`, and never removes the service account's read access.
+
 ## v0.11.0 — trustworthy certificate verdicts
 
 Chains are verified by signature, not by names; every certificate in a chain

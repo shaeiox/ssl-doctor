@@ -1466,12 +1466,22 @@ class ServerSession:
         return self.permissions([(p, "certificate" if i == 0 else "key")
                                  for i, p in enumerate(paths)])
 
+    # Metadata only: the path's own type, where it resolves to, the resolved
+    # file's owner/group/mode/type, and whether an ACL is set (`ls` marks it '+').
+    _PERM_SCRIPT = (
+        'p={path}; '
+        'printf "@@SSLDOCTOR link %s\\n" "$(stat -c %F -- "$p" 2>/dev/null)"; '
+        'printf "@@SSLDOCTOR target %s\\n" "$(readlink -f -- "$p" 2>/dev/null)"; '
+        'printf "@@SSLDOCTOR stat %s\\n" "$(stat -L -c \'%U %G %a %F\' -- "$p" 2>&1)"; '
+        'printf "@@SSLDOCTOR acl %s\\n" "$(ls -ldL -- "$p" 2>/dev/null | cut -c11 | tr -d \' .\' | sed s/^$/-/)"')
+
     def permissions(self, entries: List[Tuple[str, str]],
                     reader: str = "") -> List[F.Finding]:
         """`srv.perms` per (path, role): owner, group, mode - never the content.
 
         The role comes from the directive, not the file name.  `reader` is the
         account that loads the files (nginx's master); "" or root = not judged.
+        A symbolic link is judged on the file it resolves to.
         """
         if (err := self._need_conn()):
             return [err]
@@ -1483,47 +1493,75 @@ class ServerSession:
         out: List[F.Finding] = []
         for path, role in entries:
             name = os.path.basename(path)
-            rc, so, se, fatal = self.run(f"stat -c '%U %G %a %F' -- {q(path)} 2>&1 "
-                                         "|| echo MISSING")
-            line = so.strip().splitlines()[0] if so.strip() else ""
-            if fatal or not line or "MISSING" in so or rc != 0:
+            title = f"Permissions on {name}"
+            _rc, so, se, fatal = self.run(self._PERM_SCRIPT.replace("{path}", q(path)))
+            found: Dict[str, str] = {}
+            for line in so.splitlines():
+                if line.startswith("@@SSLDOCTOR "):
+                    key, _, value = line[len("@@SSLDOCTOR "):].partition(" ")
+                    found.setdefault(key, value.strip())
+            line = found.get("stat", "")
+            if fatal or not line or "No such file" in line:
                 out.append(F.Finding(
-                    "srv.perms", f"Permissions on {name}", F.NOT_TESTED, F.SCOPE_SERVER,
+                    "srv.perms", title, F.NOT_TESTED, F.SCOPE_SERVER,
                     [f"{path}: {line or se.strip() or fatal or 'unreadable / missing'}"],
                     target=path, failure_kind="command-failed"))
                 continue
+            if "Permission denied" in line:
+                out.append(F.Finding(
+                    "srv.perms", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                    [f"{path}: {line}", "a directory on the path cannot be entered by this "
+                     "account, so the file's permissions could not be read"],
+                    target=path, failure_kind="permission-denied"))
+                continue
             user, group, mode = (line.split(" ", 3) + ["", "", ""])[:3]
+            is_link = found.get("link") == "symbolic link"
+            judged = found.get("target") if is_link and found.get("target") else path
             try:
                 bits = int(mode, 8)
             except ValueError:
                 bits = None
-            ev = [f"{path} ({role}): owner={user} group={group} mode={mode}"]
+            shown = f"{path} -> {judged}" if is_link else path
+            ev = [f"{shown} ({role}): owner={user} group={group} mode={mode}"]
+            uncertainty = (["an ACL is set on the file: additional access it grants was "
+                            "not evaluated"] if found.get("acl") == "+" else [])
             if bits is None:
-                out.append(F.Finding("srv.perms", f"Permissions on {name}", F.NOT_TESTED,
+                out.append(F.Finding("srv.perms", title, F.NOT_TESTED,
                                      F.SCOPE_SERVER, ev + ["mode could not be read"],
                                      target=path))
                 continue
             problems, warnings = [], []
             if role == "key" and bits & 0o004:
-                warnings.append("private key readable by other users")
+                warnings.append("private key readable by other users"
+                                + (f": {judged}" if is_link else ""))
             if reader and reader != "root":
                 readable = ((user == reader and bits & 0o400)
                             or (group in groups and bits & 0o040) or bits & 0o004)
                 if not readable:
-                    problems.append(f"service account {reader} cannot read {path}")
+                    problems.append(f"service account {reader} cannot read {judged}")
                 else:
                     ev.append(f"readable by the service account {reader}")
             status = F.FAIL if problems else F.WARNING if warnings else F.PASS
             out.append(F.Finding(
-                "srv.perms", f"Permissions on {name}", status, F.SCOPE_SERVER,
+                "srv.perms", title, status, F.SCOPE_SERVER,
                 ev + problems + warnings,
-                recommendation=("Make the file readable by the account the service runs "
-                                "as (owner or group), without opening it to others."
-                                if problems else
-                                "Restrict private keys: chmod 600/640 root:<service group>."
-                                if warnings else ""),
-                target=path))
+                recommendation=self._perm_advice(judged, user, group, reader, groups,
+                                                 bool(problems), bool(warnings)),
+                target=path, uncertainty=uncertainty))
         return out
+
+    @staticmethod
+    def _perm_advice(path: str, owner: str, group: str, reader: str, groups: List[str],
+                     unreadable: bool, exposed: bool) -> str:
+        """A change for the judged file that never takes read access from the
+        account that loads it (root reads every file)."""
+        if not (unreadable or exposed):
+            return ""
+        if not reader or reader in ("root", owner):
+            return f"Restrict the file to its owner: chmod 600 {path}."
+        via = group if group in groups else (groups[0] if groups else "<service group>")
+        return (f"Give {reader} read access through its group without opening the file "
+                f"to others: chown {owner}:{via} {path} && chmod 640 {path}.")
 
     def tls_config_scan(self, emit: Optional[Callable[[F.Finding], None]] = None) -> List[F.Finding]:
         """Find configured certs/vhosts. Read-only; degrades without privileges."""

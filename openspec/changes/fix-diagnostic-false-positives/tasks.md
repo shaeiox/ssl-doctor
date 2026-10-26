@@ -27,15 +27,15 @@
 
 ## 3. `srv.perms` on the resolved target (F)
 
-- [ ] 3.1 Probe with link type, `readlink -f`, `stat -L` and the ACL marker in one command, with `Permission denied` from `stat -L` → NOT TESTED `permission-denied` (design D4); verify with `FakeSession` on real scratch files in `tests/test_server_deployment.Permissions`:
+- [x] 3.1 Probe with link type, `readlink -f`, `stat -L` and the ACL marker in one command, with `Permission denied` from `stat -L` → NOT TESTED `permission-denied` (design D4); verify with `FakeSession` on real scratch files in `tests/test_server_deployment.Permissions`:
   - certbot-style `live/` → `archive/` symlink to 0600 → PASS, naming link and target;
   - symlink to 0644 → WARNING naming the target;
   - non-root master with a 0600 root target → FAIL;
   - untraversable parent → NOT TESTED (skipped as root, with the reason).
-- [ ] 3.2 ACL presence as an uncertainty, plus a specific recommendation naming the target path, mode and service group; verify:
+- [x] 3.2 ACL presence as an uncertainty, plus a specific recommendation naming the target path, mode and service group; verify:
   - a test with a mocked `ls -ldL` output carrying `+`;
   - the 0644 recommendation names the file and `0600`/`0640`.
-- [ ] 3.3 Verify `Permissions.test_no_content_is_read` still passes, and that the command audit shows only metadata commands
+- [x] 3.3 Verify `Permissions.test_no_content_is_read` still passes, and that the command audit shows only metadata commands
 
 ## 4. `srv.inventory` by identity and listener (C)
 

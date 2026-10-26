@@ -175,9 +175,70 @@ class Permissions(unittest.TestCase):
         real = session.run
         with mock.patch.object(session, "run",
                                side_effect=lambda c: commands.append(c) or real(c)):
-            session.permissions([(get_pki().leaf_key, "key")])
+            session.permissions([(get_pki().leaf_key, "key")], reader="nobody")
         self.assertTrue(commands)
-        self.assertTrue(all(c.startswith(("stat ", "id ")) for c in commands), commands)
+        # metadata only: stat, readlink, ls -d and id - nothing that opens the file
+        for c in commands:
+            self.assertNotRegex(c, r"\b(cat|head|tail|base64|openssl|grep|dd|od)\b", c)
+
+    def certbot_layout(self, mode):
+        """live/shop/privkey.pem -> ../../archive/shop/privkey1.pem (certbot)."""
+        os.makedirs(os.path.join(self.dir, "archive", "shop"))
+        os.makedirs(os.path.join(self.dir, "live", "shop"))
+        target = self.copy(get_pki().leaf_key, os.path.join("archive", "shop",
+                                                            "privkey1.pem"), mode)
+        link = os.path.join(self.dir, "live", "shop", "privkey.pem")
+        os.symlink("../../archive/shop/privkey1.pem", link)
+        return link, target
+
+    def test_regression_f_certbot_symlink_is_judged_on_its_target(self):
+        link, target = self.certbot_layout(0o600)
+        [f] = server.LocalSession().permissions([(link, "key")])
+        self.assertEqual(f.status, F.PASS, f.evidence)
+        self.assertIn(f"{link} -> {target}", f.evidence[0])
+        self.assertIn("mode=600", f.evidence[0])
+
+    def test_symlink_to_a_world_readable_key_warns_naming_the_target(self):
+        link, target = self.certbot_layout(0o644)
+        [f] = server.LocalSession().permissions([(link, "key")])
+        self.assertEqual(f.status, F.WARNING)
+        self.assertIn(f"private key readable by other users: {target}", f.evidence)
+        self.assertIn(f"chmod 600 {target}", f.recommendation)
+
+    def test_service_account_access_is_judged_on_the_target(self):
+        link, _target = self.certbot_layout(0o600)
+        [f] = server.LocalSession().permissions([(link, "key")], reader="nobody")
+        self.assertEqual(f.status, F.FAIL, f.evidence)
+        self.assertTrue(any("service account nobody cannot read" in e for e in f.evidence))
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root traverses every directory; runs as a non-root user")
+    def test_untraversable_parent_is_not_tested(self):
+        locked = os.path.join(self.dir, "private")
+        os.makedirs(locked)
+        key = self.copy(get_pki().leaf_key, os.path.join("private", "site.key"), 0o600)
+        os.chmod(locked, 0o000)
+        self.addCleanup(os.chmod, locked, 0o700)
+        [f] = server.LocalSession().permissions([(key, "key")])
+        self.assertEqual((f.status, f.failure_kind), (F.NOT_TESTED, "permission-denied"))
+
+    def test_acl_is_an_uncertainty_not_a_verdict(self):
+        key = self.copy(get_pki().leaf_key, "site.key", 0o600)
+        session = server.LocalSession()
+        real = session.run
+
+        def with_acl(cmd):
+            rc, so, se, fatal = real(cmd)
+            return rc, so.replace("@@SSLDOCTOR acl -", "@@SSLDOCTOR acl +"), se, fatal
+        with mock.patch.object(session, "run", side_effect=with_acl):
+            [f] = session.permissions([(key, "key")])
+        self.assertEqual(f.status, F.PASS)
+        self.assertTrue(any("ACL" in u for u in f.uncertainty), f.uncertainty)
+
+    def test_recommendation_names_the_file_and_mode(self):
+        key = self.copy(get_pki().leaf_key, "site.key", 0o644)
+        [f] = server.LocalSession().permissions([(key, "key")])
+        self.assertIn(f"chmod 600 {key}", f.recommendation)
 
 
 @unittest.skipUnless(openssl_available(), "openssl binary not available")
