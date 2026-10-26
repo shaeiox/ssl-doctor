@@ -30,7 +30,7 @@ import sys
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
-from . import certs, chainval
+from . import certpolicy, certs, chainval
 from . import findings as F
 from . import nginx_discovery
 
@@ -1116,9 +1116,43 @@ class ServerSession:
                 return line.split("=", 1)[1].strip(), ""
         return "", (fatal or err.strip()[:200] or f"key-state probe exited {rc}")
 
+    @staticmethod
+    def _judge_configured_cert(openssl_out: str, domain: str) -> Tuple[str, List[str], str]:
+        """(status, evidence, recommendation) from `openssl x509` output: the
+        validity window, and the subjectAltName against `domain` when given."""
+        info = certs.CertInfo()
+        for ln in openssl_out.splitlines():
+            ln = ln.strip()
+            if ln.startswith("notBefore="):
+                info.not_before = certs._parse_time(ln.split("=", 1)[1])
+            elif ln.startswith("notAfter="):
+                info.not_after = certs._parse_time(ln.split("=", 1)[1])
+            elif ln.startswith(("DNS:", "IP Address:")):
+                for entry in (e.strip() for e in ln.split(",")):
+                    kind, _, value = entry.partition(":")
+                    if kind == "DNS":
+                        info.san_dns.append(value)
+                    elif kind == "IP Address":
+                        info.san_ip.append(value)
+        status, line, rec = certpolicy.leaf_validity(info)
+        evidence = [line]
+        if domain:
+            ok, entry = info.hostname_match(domain)
+            if ok:
+                evidence.append(f"covers '{domain}' (subjectAltName entry '{entry}')")
+            else:
+                evidence.append(f"does not cover '{domain}': subjectAltName "
+                                f"{', '.join(info.san_dns + info.san_ip) or '(none)'}")
+                if status != F.FAIL:
+                    rec = ("Install a certificate whose subjectAltName includes this "
+                           "domain.")
+                status = F.FAIL
+        return status, evidence, rec
+
     def scan_cert(self, cert_path: str, key_path: str = "",
                   emit: Optional[Callable[[F.Finding], None]] = None,
-                  states: Optional[Dict[str, str]] = None) -> List[F.Finding]:
+                  states: Optional[Dict[str, str]] = None,
+                  domain: Optional[str] = None) -> List[F.Finding]:
         """Inspect a certificate (and optionally key pairing) ON the server.
 
         File access is checked first: a missing or unreadable file is NOT
@@ -1128,6 +1162,7 @@ class ServerSession:
             if emit is not None:
                 emit(err)
             return [err]
+        domain = self.cfg.tls_host if domain is None else domain
         if states is None:
             states = self.nginx_probe().file_states([p for p in (cert_path, key_path) if p])
         cert_state = states.get(cert_path, "unsupported")
@@ -1176,9 +1211,11 @@ class ServerSession:
             elif ln and not ln.startswith("rc="):
                 ev.append(ln)
         self.last_remote_cert_sha256 = fp
+        status, verdict, rec = self._judge_configured_cert(so, domain)
         _add(F.Finding(
-            "srv.cert", f"Server certificate {cert_path}", F.PASS, F.SCOPE_SERVER,
-            ev + ([f"sha256: {fp}"] if fp else []), target=cert_path))
+            "srv.cert", f"Server certificate {cert_path}", status, F.SCOPE_SERVER,
+            ev + ([f"sha256: {fp}"] if fp else []) + verdict,
+            recommendation=rec, target=cert_path))
 
         if key_path and key_state != "readable":
             label = ("file not found" if key_state == "missing"
@@ -1386,6 +1423,8 @@ class ServerSession:
             if emit is not None:
                 emit(err)
             return [err]
+        self._nginx_domain = domain
+        self._service_cas = None      # CA certificates of the block's CA files
         out: List[F.Finding] = []
         sources = ""
 
@@ -1561,9 +1600,12 @@ class ServerSession:
                                    F.SCOPE_SERVER, [f"{name} {resolved} [{source}]: {label}"],
                                    target=resolved))
                     continue
-                _add(chainval.ca_file_finding(certs.parse_cert_bytes(data), resolved,
-                                              F.SCOPE_SERVER, chainval.CA_SERVICE,
+                parsed = certs.parse_cert_bytes(data)
+                _add(chainval.ca_file_finding(parsed, resolved, F.SCOPE_SERVER,
+                                              chainval.CA_SERVICE,
                                               source=f"{name}, {source}"))
+                if parsed.ok and getattr(self, "_service_cas", None) is None:
+                    self._service_cas = (parsed.certs, f"{name} {resolved}")
 
     def _certificate_checks(self, d, values, out, _add, emit) -> List[F.Finding]:
         """nginx.path_resolution, then validation of the files that could be opened.
@@ -1613,10 +1655,20 @@ class ServerSession:
             key_path = key["resolved"] if key else ""
             self.last_configured_chain = []
             _add(self._chainfile_finding(cert_path))
-            if self.last_configured_chain:
-                _add(chainval.usage_finding(self.last_configured_chain, F.SCOPE_SERVER,
-                                            cert_path))
+            configured = self.last_configured_chain
+            if configured:
+                _add(chainval.usage_finding(configured, F.SCOPE_SERVER, cert_path))
+                validity = certpolicy.chain_validity_finding(configured, F.SCOPE_SERVER,
+                                                             cert_path)
+                if validity is not None:
+                    _add(validity)
+                _add(certpolicy.policy_finding(configured, F.SCOPE_SERVER, cert_path,
+                                               certpolicy.anchor_ids(configured)))
+                _add(chainval.trust_finding(configured, F.SCOPE_SERVER, cert_path,
+                                            certs.load_root_anchors(),
+                                            private=getattr(self, "_service_cas", None)))
             out.extend(self.scan_cert(cert_path, key_path, emit=emit,
+                                      domain=getattr(self, "_nginx_domain", None),
                                       states={cert_path: cert_state,
                                               **({key_path: key_state} if key_path else {})}))
             self.nginx_cert_path, self.nginx_key_path = cert_path, key_path

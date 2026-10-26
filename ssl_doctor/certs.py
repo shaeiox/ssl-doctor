@@ -143,30 +143,19 @@ class CertInfo:
         return datetime.now(timezone.utc) < self.not_before
 
     def matches_hostname(self, hostname: str) -> Tuple[bool, List[str]]:
-        """Return (match, names_checked).  Simple wildcard-aware matching.
+        """Return (match, names_checked) - see `hostnames.covers` for the rules.
 
         Only subjectAltName entries count: modern clients ignore the CN.
         """
-        names = list(self.san_dns)
-        host = hostname.lower().rstrip(".")
-        for pattern in names:
-            p = pattern.lower()
-            if p == host:
-                return True, names
-            if p.startswith("*."):
-                suffix = p[1:]  # ".example.com"
-                if host.endswith(suffix) and host.count(".") == pattern.count("."):
-                    return True, names
-        try:
-            import ipaddress
+        ok, _entry = self.hostname_match(hostname)
+        if ok and _entry in self.san_ip:
+            return True, self.san_ip
+        return ok, list(self.san_dns)
 
-            ip = ipaddress.ip_address(host)
-            for name in self.san_ip:
-                if ipaddress.ip_address(name) == ip:
-                    return True, self.san_ip or names
-        except ValueError:
-            pass
-        return False, names
+    def hostname_match(self, hostname: str) -> Tuple[bool, str]:
+        """(covered, the SAN entry that covers `hostname`)."""
+        from . import hostnames
+        return hostnames.covers(self.san_dns, self.san_ip, hostname)
 
     def one_liner(self) -> str:
         exp = self.not_after.strftime("%Y-%m-%d") if self.not_after else "?"
@@ -564,6 +553,7 @@ class ChainAssessment:
     name_only: bool = False         # some link matched by name only (no verifier)
     anchored: Optional[bool] = None  # top reached a trusted anchor; None = no anchors given
     paths: List[str] = field(default_factory=list)   # every anchored path found
+    anchor_cert: Optional["CertInfo"] = None          # the certificate that anchored it
 
 
 def dedupe(chain: List[CertInfo]) -> Tuple[List[CertInfo], List[str]]:
@@ -665,32 +655,10 @@ def inspect_cert_file(path: str, hostname: str = "",
     )
 
     # Validity window.
-    if first.is_expired():
-        _add(F.Finding(
-            "cert.validity", "Certificate validity dates", F.FAIL, F.SCOPE_LOCAL,
-            [f"certificate expired {-first.days_to_expiry()} days ago "
-             f"(notAfter={first.not_after:%Y-%m-%d %H:%M UTC})"],
-            recommendation="Renew the certificate and deploy the new file to the server.",
-            target=target))
-    elif first.not_yet_valid():
-        _add(F.Finding(
-            "cert.validity", "Certificate validity dates", F.FAIL, F.SCOPE_LOCAL,
-            [f"certificate is not valid until {first.not_before:%Y-%m-%d %H:%M UTC}"],
-            recommendation="Check the client system clock and the certificate issuance date.",
-            target=target))
-    else:
-        days = first.days_to_expiry()
-        if days is not None and days <= 30:
-            _add(F.Finding(
-                "cert.validity", "Certificate validity dates", F.WARNING, F.SCOPE_LOCAL,
-                [f"certificate expires in {days} days ({first.not_after:%Y-%m-%d})"],
-                recommendation="Renew the certificate soon.",
-                target=target))
-        else:
-            _add(F.Finding(
-                "cert.validity", "Certificate validity dates", F.PASS, F.SCOPE_LOCAL,
-                [f"certificate is currently valid; {days} days remaining"],
-                target=target))
+    from . import certpolicy        # certpolicy builds on this module
+    status, line, rec = certpolicy.leaf_validity(first)
+    _add(F.Finding("cert.validity", "Certificate validity dates", status, F.SCOPE_LOCAL,
+                   [line], recommendation=rec, target=target))
 
     # Self-signed?  Only a verified self-signature counts; equal names do not.
     if first.self_issued_name():
@@ -722,12 +690,17 @@ def inspect_cert_file(path: str, hostname: str = "",
 
     # Hostname coverage.
     if hostname:
+        from . import hostnames
         ok, names = first.matches_hostname(hostname)
+        _ok, entry = first.hostname_match(hostname)
+        reason = "" if ok else hostnames.why_not(first.san_dns, hostname)
         _add(F.Finding(
             "cert.hostname", f"Hostname match for '{hostname}'",
             F.PASS if ok else F.FAIL, F.SCOPE_LOCAL,
             [f"checked against subjectAltName: {', '.join(names) or '(none)'}",
-             "match" if ok else f"certificate does not cover '{hostname}'"] +
+             f"match (subjectAltName entry '{entry}')" if ok else
+             f"certificate does not cover '{hostname}'"] +
+            ([reason] if reason else []) +
             ([f"no subjectAltName: CN '{first.common_name}' is ignored by modern clients"]
              if not first.san_dns and first.common_name else []),
             recommendation="" if ok else
@@ -737,6 +710,12 @@ def inspect_cert_file(path: str, hostname: str = "",
 
     from . import chainval      # chainval builds on this module
     _add(chainval.usage_finding(certs, F.SCOPE_LOCAL, target))
+    validity = certpolicy.chain_validity_finding(certs, F.SCOPE_LOCAL, target)
+    if validity is not None:
+        _add(validity)
+    _add(certpolicy.policy_finding(certs, F.SCOPE_LOCAL, target,
+                                   certpolicy.anchor_ids(certs)))
+    _add(chainval.trust_finding(certs, F.SCOPE_LOCAL, target, load_root_anchors()))
 
     # Chain structure inside the file.
     if len(certs) > 1:

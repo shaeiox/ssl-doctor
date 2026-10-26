@@ -281,7 +281,8 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
             if broken else
             "The server does not send the full chain (missing intermediates) - "
             "clients without a cached intermediate fail",
-            ev, rec, explains=("tls.chain", "nginx.chainfile", "tls.verify.rootonly"))
+            ev, rec, explains=("tls.chain", "nginx.chainfile", "tls.verify.rootonly",
+                               "chain.trust"))
     if chain_hygiene:
         add("possible", "server",
             "The certificate chain repeats certificates or carries unrelated ones - "
@@ -344,6 +345,31 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
                 f"The certificate {where} is outside its validity period",
                 val.evidence, val.recommendation, bump=0, explains=(val.check,))
 
+    chain_dates = [f for f in _by_check(items, "chain.validity") if f.status == F.FAIL]
+    if chain_dates:
+        f = chain_dates[-1]
+        add("confirmed", "certificate",
+            "A certificate in the chain is outside its validity period - "
+            + f.evidence[0], f.evidence, f.recommendation, explains=("chain.validity",))
+    srv_cert = _first(server, "srv.cert")
+    srv_dates = srv_cert and srv_cert.status == F.FAIL and any(
+        k in e for e in srv_cert.evidence
+        for k in ("expired", "not valid until", "does not cover"))
+    if srv_dates:
+        judged = [e for e in srv_cert.evidence
+                  if any(k in e for k in ("expired", "not valid until", "does not cover"))]
+        add("confirmed", "server",
+            "The certificate file configured on the server is unusable for this domain - "
+            + "; ".join(judged), srv_cert.evidence, srv_cert.recommendation,
+            explains=("srv.cert",))
+    policy = [f for f in _by_check(items, "cert.policy") if f.status == F.FAIL]
+    if policy:
+        f = policy[-1]
+        add("confirmed", "certificate",
+            "A certificate uses a weak key or a deprecated signature algorithm "
+            f"({f.evidence[0].split(':', 1)[0]})", f.evidence, f.recommendation,
+            explains=("cert.policy",))
+
     skew = _first(local, "local.clockskew")
     if skew and skew.status == F.FAIL and verify and verify.status == F.FAIL:
         add("probable", "client",
@@ -404,20 +430,21 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
                     "trusted by this machine (private/internal CA?)",
                     ev, "Import the issuing root CA into the trust store of the "
                         "affected clients, or use a publicly trusted certificate.",
-                    explains=("tls.verify", "tls.verify.rootonly", "local.certutil"))
+                    explains=("tls.verify", "tls.verify.rootonly", "local.certutil", "chain.trust"))
             else:
                 add("probable", "certificate",
                     "Validation cannot find the issuer: the server may omit "
                     "intermediates, or the root CA is not trusted here",
-                    ev, verify.recommendation, explains=("tls.verify", "tls.verify.rootonly", "local.certutil"))
+                    ev, verify.recommendation, explains=("tls.verify", "tls.verify.rootonly", "local.certutil", "chain.trust"))
         elif "self signed" in joined:
             # confirmed only when the presented chain itself shows it
             direct = bool(chainwl and "self-signed" in " ".join(chainwl.evidence))
             add("confirmed" if direct else "probable", "server",
                 "The server presents a self-signed certificate that clients do "
                 "not trust",
-                verify.evidence, verify.recommendation, explains=("tls.verify", "tls.verify.rootonly", "local.certutil"))
-        elif "expired" in joined and netval and netval.status == F.FAIL:
+                verify.evidence, verify.recommendation, explains=("tls.verify", "tls.verify.rootonly", "local.certutil", "chain.trust"))
+        elif ("expired" in joined or "not yet valid" in joined) and (
+                (netval and netval.status == F.FAIL) or chain_dates):
             explained.update(("tls.verify", "tls.verify.rootonly"))  # validity rule
         elif ("mismatch" in joined or "not cover" in joined) and namefail:
             explained.update(("tls.verify", "tls.verify.rootonly"))  # hostname rule
@@ -431,7 +458,7 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
         else:
             add("probable", "certificate",
                 "Certificate validation failed against the system trust store",
-                verify.evidence, verify.recommendation, explains=("tls.verify", "tls.verify.rootonly", "local.certutil"))
+                verify.evidence, verify.recommendation, explains=("tls.verify", "tls.verify.rootonly", "local.certutil", "chain.trust"))
 
     # ---- local certificate file problems ---------------------------------------
     keymatch_local = _first(local, "cert.keymatch")

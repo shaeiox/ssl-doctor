@@ -50,6 +50,14 @@ sample this openssl cannot build skips the calling test with the reason):
     case-chain.pem   child of "CN=Case CA" + the same key re-issued as "CN=CASE ca"
     aia-leaf.pem     leaf issued by the intermediate with an AIA caIssuers URL
     forged-chain.pem leaf + forged-int.pem
+    expired-leaf.pem     the leaf re-issued for 2020-01-01..2021-01-01
+    future-leaf.pem      the leaf re-issued for 2099-01-01..2100-01-01
+    future-int-chain.pem leaf + the intermediate re-issued from 2099
+    short-int-chain.pem  leaf + the intermediate re-issued to expire in 5 days
+    rsa1024-leaf.pem     a 1024-bit RSA leaf issued by the intermediate
+    sha1-int-chain.pem   leaf + the intermediate re-signed by the root with SHA-1
+    sha1-root.pem        a self-signed root whose own signature is SHA-1
+    lookalike-chain.pem  leaf + a self-signed root *named* like a public CA
 """
 
 from __future__ import annotations
@@ -405,6 +413,74 @@ def _aia_leaf(pki: "PKI", out: str) -> None:
     os.replace(path, out)
 
 
+def _dated(name: str, ca: str, ext: str, start: str, end: str):
+    def build(pki: "PKI", out: str) -> None:
+        _issue_dated(pki.dir, name, ca, ext, out, start, end)
+    return build
+
+
+def _leaf_ext() -> str:
+    return _LEAF_EXT + f"subjectAltName=DNS:{HOSTNAME}\n"
+
+
+def _days_from_now(days: int) -> str:
+    import datetime
+    when = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days)
+    return when.strftime("%Y%m%d%H%M%SZ")
+
+
+def _short_int_chain(pki: "PKI", out: str) -> None:
+    short = pki.path("int_short.pem")
+    _issue_dated(pki.dir, "int", "root", _CA_EXT, short, _days_from_now(-1),
+                 _days_from_now(5))
+    _cat(_file("leaf"), lambda p: _read(short))(pki, out)
+
+
+def _future_int_chain(pki: "PKI", out: str) -> None:
+    future = pki.path("int_future.pem")
+    _issue_dated(pki.dir, "int", "root", _CA_EXT, future, "20990101000000Z",
+                 "21000101000000Z")
+    _cat(_file("leaf"), lambda p: _read(future))(pki, out)
+
+
+def _rsa1024_leaf(pki: "PKI", out: str) -> None:
+    d = pki.dir
+    _run("req", "-newkey", "rsa:1024", "-nodes", "-keyout", "rsa1024.key", "-out",
+         "rsa1024.csr", "-subj", f"/CN={HOSTNAME}", cwd=d)
+    with open(os.path.join(d, "rsa1024.ext"), "w") as fh:
+        fh.write(_leaf_ext())
+    _run("x509", "-req", "-in", "rsa1024.csr", "-CA", "int.pem", "-CAkey", "int.key",
+         "-CAcreateserial", "-out", out, "-days", "30", "-extfile", "rsa1024.ext", cwd=d)
+
+
+def _sha1_int_chain(pki: "PKI", out: str) -> None:
+    d = pki.dir
+    sha1 = pki.path("int_sha1.pem")
+    _run("x509", "-req", "-sha1", "-in", "int.csr", "-CA", "root.pem", "-CAkey",
+         "root.key", "-CAcreateserial", "-out", sha1, "-days", "30",
+         "-extfile", "int.ext", cwd=d)
+    _cat(_file("leaf"), lambda p: _read(sha1))(pki, out)
+
+
+def _sha1_root(pki: "PKI", out: str) -> None:
+    _run("req", "-x509", "-sha1", "-newkey", "rsa:2048", "-nodes", "-keyout",
+         "sha1_root.key", "-out", out, "-days", "30", "-subj", "/CN=SSLDoctor SHA1 Root",
+         "-addext", "basicConstraints=critical,CA:TRUE",
+         "-addext", "keyUsage=critical,keyCertSign,cRLSign", cwd=pki.dir)
+
+
+def _lookalike_chain(pki: "PKI", out: str) -> None:
+    d = pki.dir
+    _run("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "lookalike.key",
+         "-out", "lookalike_root.pem", "-days", "30",
+         "-subj", "/C=US/O=DigiCert Inc/CN=DigiCert Global Root G2",
+         "-addext", "basicConstraints=critical,CA:TRUE",
+         "-addext", "keyUsage=critical,keyCertSign,cRLSign", cwd=d)
+    leaf = _issue_sample(pki, "lookalike_leaf", f"/CN={HOSTNAME}", "lookalike_root.pem",
+                         "lookalike.key", _leaf_ext())
+    _cat(lambda p: _read(leaf), lambda p: _read(p.path("lookalike_root.pem")))(pki, out)
+
+
 _SAMPLES = {
     "truncated.pem": _cat(_file("leaf"), _truncated_int),
     "corrupt.pem": _cat(_file("leaf"), _corrupt_int, _file("root")),
@@ -437,6 +513,16 @@ _SAMPLES = {
     "case-chain.pem": _case_chain,
     "aia-leaf.pem": _aia_leaf,
     "forged-chain.pem": _cat(_file("leaf"), lambda p: _read(p.sample("forged-int.pem"))),
+    "expired-leaf.pem": _dated("leaf", "int", _leaf_ext(), "20200101000000Z",
+                               "20210101000000Z"),
+    "future-leaf.pem": _dated("leaf", "int", _leaf_ext(), "20990101000000Z",
+                              "21000101000000Z"),
+    "future-int-chain.pem": _future_int_chain,
+    "short-int-chain.pem": _short_int_chain,
+    "rsa1024-leaf.pem": _rsa1024_leaf,
+    "sha1-int-chain.pem": _sha1_int_chain,
+    "sha1-root.pem": _sha1_root,
+    "lookalike-chain.pem": _lookalike_chain,
 }
 
 

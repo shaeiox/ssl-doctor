@@ -42,6 +42,32 @@ validating).
   says validation was inconclusive. A TLS-level rejection stays FAIL. Both
   validations now connect to the address the TCP check verified, and name it.
 
+### Fixed (phase 3: trust, lifecycle, policy, hostnames)
+
+- **An expired certificate configured on the server was `srv.cert` PASS.** The
+  configured certificate is now judged like the presented one: expired, not
+  yet valid, or not covering the domain is FAIL, with a server cause.
+- **Every certificate's dates count.** `chain.validity` checks each certificate
+  after the leaf. An expired intermediate behind a valid leaf now gets a
+  confirmed cause naming the intermediate (it was overall PASS before phase 0,
+  and unexplained since). An intermediate that expires before the leaf warns.
+- Hostname coverage is a single matcher for `tls.hostname`, `cert.hostname`,
+  `tls.sni`, endpoint comparison and the domain profile. It adds IDN (A-label),
+  IP-only-for-IP, partial-label and public-suffix wildcard rules, and names the
+  matching entry.
+
+### Added (phase 3)
+
+- `chain.trust`: trust class `public` / `private` / `self-signed` / `unknown`
+  from verified paths, evaluated offline. The evidence names the trust store and
+  its anchor count, or the service CA file that anchors a private chain. An
+  expired anchor and an empty store are reported as such.
+- `cert.policy` (`policy 1`): weak RSA/DSA keys, unusual EC curves, MD5/SHA-1
+  signatures (a root's own self-signature is reported, not judged).
+- `--expiry-warn-days 1-365` (default 30). Agent jobs carry
+  `options.expiry_warn_days`; the service sends each target's
+  `expiry_threshold_days`, and the agent declines an out-of-range value.
+
 ### Fixed (phase 2: verified chains)
 
 - **Chains are verified, not matched by name.** Each link of `tls.chain`,

@@ -38,15 +38,15 @@
 
 ## 4. P3: Trust, lifecycle, policy and hostname rules
 
-- [ ] 4.1 Trust evaluation naming the store and anchor count, transport-independent (CCV #22, CTC #25) as `chain.trust`; verify the public, private (`ssl_trusted_certificate`), public-looking unknown and verifier-unavailable fixtures
-- [ ] 4.2 Anchor validity and empty/unreadable store (CTC #42); verify the expired root → WARNING with limitation, and the empty store → NOT TESTED
-- [ ] 4.3 Client trust-gap rule (CTC "client trust-store gaps are not blamed on the server"); verify the existing `test_complete_chain_untrusted_root_is_not_missing_intermediate` passes
-- [ ] 4.4 Per-certificate validity as `chain.validity` and leaf ids (CLP #13, #41); verify the expired and not-yet-valid fixtures, live and configured
-- [ ] 4.5 `srv.cert` judges dates and SAN (CTC #7, R4); verify `test_regression_r4_expired_on_disk_leaf` via `LocalSession`
-- [ ] 4.6 Configurable expiry threshold `--expiry-warn-days` and agent job parameter, 1–365, evidence names it (CLP #40); verify boundary tests 30/14/0/400
-- [ ] 4.7 Key and algorithm policy `policy 1` as `cert.policy` (CLP #14, #43, U6); verify the RSA-1024, P-256, Ed25519, SHA-1 intermediate and SHA-1 root fixtures
-- [ ] 4.8 Single hostname matcher with IDN, IP-SAN, case, trailing dot, wildcard and public-suffix rules (CHC #23, #24); verify the hostname matrix test, and that `tls.hostname`, `cert.hostname`, `tls.sni` and the domain profile use it
-- [ ] 4.9 Document the policy table and threshold option in README; verify the documented option runs
+- [x] 4.1 Trust evaluation naming the store and anchor count, transport-independent (CCV #22, CTC #25) as `chain.trust`; verify the public, private (`ssl_trusted_certificate`), public-looking unknown and verifier-unavailable fixtures
+- [x] 4.2 Anchor validity and empty/unreadable store (CTC #42); verify the expired root → WARNING with limitation, and the empty store → NOT TESTED
+- [x] 4.3 Client trust-gap rule (CTC "client trust-store gaps are not blamed on the server"); verify the existing `test_complete_chain_untrusted_root_is_not_missing_intermediate` passes
+- [x] 4.4 Per-certificate validity as `chain.validity` and leaf ids (CLP #13, #41); verify the expired and not-yet-valid fixtures, live and configured
+- [x] 4.5 `srv.cert` judges dates and SAN (CTC #7, R4); verify `test_regression_r4_expired_on_disk_leaf` via `LocalSession`
+- [x] 4.6 Configurable expiry threshold `--expiry-warn-days` and agent job parameter, 1–365, evidence names it (CLP #40); verify boundary tests 30/14/0/400
+- [x] 4.7 Key and algorithm policy `policy 1` as `cert.policy` (CLP #14, #43, U6); verify the RSA-1024, P-256, Ed25519, SHA-1 intermediate and SHA-1 root fixtures
+- [x] 4.8 Single hostname matcher with IDN, IP-SAN, case, trailing dot, wildcard and public-suffix rules (CHC #23, #24); verify the hostname matrix test, and that `tls.hostname`, `cert.hostname`, `tls.sni` and the domain profile use it
+- [x] 4.9 Document the policy table and threshold option in README; verify the documented option runs
 
 ## 5. P4: Structured facts and diagnosis rules
 

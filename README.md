@@ -21,6 +21,7 @@ python3 ssldoctor.py -c "/scan example.com --with-server" -c "/report both out"
 |---|---|
 | `-c "<command>"` | run a command non-interactively (repeatable); exit code `1` when the overall diagnosis is `FAIL`, otherwise `0` (see [Overall result](#overall-result)) |
 | `--timeout <seconds>` | network timeout (default 8 s; `/timeout` changes it in a session) |
+| `--expiry-warn-days <1-365>` | warn when any certificate expires within this many days (default 30; agents take it per job from the service's target setting) |
 | `--no-tui` (or `--plain`) | line-oriented REPL instead of the full-screen shell |
 | `--no-remember` | never offer to remember servers and never use saved passwords (also `SSL_DOCTOR_REMEMBER=off`) |
 | `--typewriter`, `--typewriter-speed <cps>` | type output out gradually on an interactive terminal (also `/typewriter on\|off\|speed <n>`) |
@@ -251,6 +252,9 @@ wrong endpoint).
 | Check id | What it proves |
 |---|---|
 | `tls.chain` | The chain the server **actually sends**, judged on its own. Each link is **verified cryptographically** with `openssl verify`: the next certificate's key must have signed it, and it must be a CA (Basic Constraints, `pathLenConstraint`). Names and key identifiers only pick the candidate. `complete`: PASS, evidence "signatures verified", every path to a trusted root listed (cross-signed chains give several), and a verified chain whose root this machine lacks stays complete ("anchor unknown"). `incomplete`: WARNING, naming the missing issuer, its key identifier and the AIA URL. `broken`: a wrong or misordered issuer is a WARNING, while a failed signature, a non-CA issuer or an exceeded path length is a FAIL. Duplicates are a WARNING. Without `openssl` the links are matched by name only and the chain is never PASS. `NOT TESTED` when the chain can't be read; it never assumes "leaf only". |
+| `chain.validity` | Dates of every certificate after the leaf: expired or not yet valid is FAIL, and an intermediate that expires before the leaf is WARNING ("the chain stops validating on …"). |
+| `chain.trust` | Trust class from verified paths only, never from issuer names: `public` (anchored in this machine's system store, named with its anchor count), `private` (only through a CA file the service references, such as `ssl_trusted_certificate`), `self-signed`, or `unknown`. An expired anchor warns, with the limitation that other clients may build another path. |
+| `cert.policy` | Key and signature policy (`policy 1`, below). |
 | `chain.usage` | The leaf may authenticate a TLS server (EKU `serverAuth` or unrestricted; Key Usage that fits its key type), and every issuer with a Key Usage includes `keyCertSign`. A client-only certificate is FAIL with its own cause. |
 | `tls.verify` | Validation against this machine's full trust store, including any cached intermediates (what *this* machine sees). |
 | `tls.verify.rootonly` | Validation against trusted **roots only**, with no cached or bundled intermediates (what a client that has never seen the intermediate sees). PASS on `tls.verify` with FAIL here means the server is missing its intermediate. |
@@ -390,6 +394,26 @@ JSON reports follow the versioned **findings contract** (currently `1.7`;
 schemas in [`schemas/`](schemas/), reference in
 [`docs/findings-contract.md`](docs/findings-contract.md)). Minor versions only
 add fields, so 1.0–1.6 documents keep validating.
+
+### Certificate policy (`policy 1`)
+
+| Rule | Result |
+|---|---|
+| RSA (and RSA-PSS) key below 2048 bits | FAIL |
+| DSA key | FAIL |
+| EC key on a curve other than P-256, P-384 or P-521 | WARNING |
+| Ed25519 / Ed448 | PASS |
+| MD5- or SHA-1-based signature on any certificate except a root's own self-signature | FAIL |
+| Any certificate expiring within the warning threshold (`--expiry-warn-days`, default 30) | WARNING |
+
+Hostname coverage follows modern clients: subjectAltName only (the CN is
+ignored), case-insensitive, internationalised names as A-labels. An IP
+matches only an IP entry. A wildcard covers exactly one whole left-most label,
+never the bare domain, never a partial label (`w*.`), and never a public suffix
+such as `*.co.uk`. That last check uses a built-in list of common suffixes, not
+the full Public Suffix List. The configured certificate on the server
+(`srv.cert`) is judged by the same dates and name rules as the one the server
+presents.
 
 ### Overall result
 

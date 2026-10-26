@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-26 · done: complete-certificate-diagnostics P0+P1 (commit 0e0a930) and P2 verified chains on branch feat/complete-certificate-diagnostics · next: P3 trust, lifecycle, policy, hostname (tasks 4.x) · blocker: none
+> resume 2026-10-26 · done: complete-certificate-diagnostics P0–P3 on branch feat/complete-certificate-diagnostics (commits 0e0a930, ac1b8ce, P3) · next: P4 structured facts + diagnosis rules (tasks 5.x) · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-25 · v2] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ done 2026-10-26 · v2] → projects/ssl-doctor/chain-diagnosis.md
@@ -20,5 +20,5 @@
 - copy-to-clipboard → drag-to-copy, /copy, Ctrl-Y; native Win32/X11 clipboard, tools, OSC 52; Windows ReadConsoleInputW mouse   [✓ done 2026-10-25 · v3] → projects/ssl-doctor/copy-to-clipboard.md
 - ui-design-system → Theme, full-screen shell, result frames, streaming into frames, centred banner, chat composer   [✓ done 2026-10-25 · v8] → projects/ssl-doctor/ui-design-system.md
 - remembered-servers → SSH server profiles + passwords in OS vault (Win Credential Manager / Secret Service), host-key bound; ADR-001 Accepted, implemented   [⚠ in-progress 2026-10-25 · v4] → projects/ssl-doctor/remembered-servers.md
-- certificate-diagnostics → 45-check audit remediation: verdict/unexplained, key states, verify transport, contract 1.7, phases P0–P7   [⚠ in-progress 2026-10-26 · v2] → projects/ssl-doctor/certificate-diagnostics.md
+- certificate-diagnostics → 45-check audit remediation: verdict/unexplained, key states, verify transport, contract 1.7, phases P0–P7   [⚠ in-progress 2026-10-26 · v3] → projects/ssl-doctor/certificate-diagnostics.md
 - _decisions → One-line decision log: colours, frames, static input, report pills   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/_decisions.md

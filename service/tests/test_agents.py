@@ -120,6 +120,22 @@ class ReadOnlyServerAgentTests(unittest.TestCase):
 
 
 @unittest.skipUnless(pgfixture.available(), "PostgreSQL binaries not available")
+class JobOptionTests(unittest.TestCase):
+
+    def test_target_expiry_threshold_reaches_the_agent(self):
+        state, _ = enroll("client")
+        tid = target_for(state, 443)
+        cl = agent.AgentClient(SVC.url, state["credential"])
+        with SVC.client() as c:
+            r = c.put(f"/v1/targets/{tid}/monitoring",
+                      json={"interval_seconds": 86400, "expiry_threshold_days": 14})
+            self.assertEqual(r.status_code, 200, r.text)
+            c.post(f"/v1/targets/{tid}/scans")
+        job = cl.next_job(wait=5)
+        self.assertEqual(job["options"], {"expiry_warn_days": 14})
+        self.assertNotIn("expiry_threshold_days", job["target"])
+
+
 class RevocationTests(unittest.TestCase):
 
     def test_revoked_agent_upload_refused_and_nothing_stored(self):

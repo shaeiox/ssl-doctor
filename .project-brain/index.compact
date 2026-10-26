@@ -10,7 +10,7 @@
 @src index.md  @gen 2026-10-26  @updated 2026-10-26
 
 P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
-  ~ 2026-10-26 next: P3 trust, lifecycle, policy, hostname (tasks 4.x) · blocker: none
+  ~ 2026-10-26 next: P4 structured facts + diagnosis rules (tasks 5.x) · blocker: none
   architecture-and-scope ✓v 2026-10-25 v2
   chain-diagnosis ✓d 2026-10-26 v2
   server-ssh-nginx ✓d 2026-10-25 v4
@@ -23,5 +23,5 @@ P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
   copy-to-clipboard ✓d 2026-10-25 v3
   ui-design-system ✓d 2026-10-25 v8
   remembered-servers ⚠ 2026-10-25 v4
-  certificate-diagnostics ⚠ 2026-10-26 v2
+  certificate-diagnostics ⚠ 2026-10-26 v3
   _decisions ✓v 2026-10-24 v1

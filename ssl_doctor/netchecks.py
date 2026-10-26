@@ -1463,44 +1463,30 @@ def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None
     # Leaf self-checks over the network-presented cert.
     leaf = facts.get("cert")
     if leaf:
-        if leaf.is_expired():
-            _add(F.Finding(
-                "tls.certvalid", "Presented certificate validity", F.FAIL,
-                F.SCOPE_REMOTE_NET,
-                [f"server presents an EXPIRED certificate "
-                 f"(notAfter={leaf.not_after:%Y-%m-%d}; {-leaf.days_to_expiry()} days ago)"],
-                recommendation="Renew/redeploy the certificate on the server.",
-                target=f"{host}:{port}"))
-        elif leaf.not_yet_valid():
-            _add(F.Finding(
-                "tls.certvalid", "Presented certificate validity", F.FAIL,
-                F.SCOPE_REMOTE_NET,
-                [f"server presents a certificate not valid until "
-                 f"{leaf.not_before:%Y-%m-%d}"],
-                recommendation="Check issuance and the client clock.",
-                target=f"{host}:{port}"))
-        elif (leaf.days_to_expiry() or 365) <= 30:
-            _add(F.Finding(
-                "tls.certvalid", "Presented certificate validity", F.WARNING,
-                F.SCOPE_REMOTE_NET,
-                [f"certificate expires in {leaf.days_to_expiry()} days"],
-                target=f"{host}:{port}"))
-        else:
-            _add(F.Finding(
-                "tls.certvalid", "Presented certificate validity", F.PASS,
-                F.SCOPE_REMOTE_NET,
-                [f"valid until {leaf.not_after:%Y-%m-%d} "
-                 f"({leaf.days_to_expiry()} days remaining)"],
-                target=f"{host}:{port}"))
+        from . import certpolicy
+        status, line, rec = certpolicy.leaf_validity(leaf)
+        if status == F.FAIL:
+            line = "server presents a " + line       # "...a certificate expired 3 days ago"
+        _add(F.Finding(
+            "tls.certvalid", "Presented certificate validity", status,
+            F.SCOPE_REMOTE_NET, [line],
+            recommendation=("Renew/redeploy the certificate on the server."
+                            if "expired" in line else
+                            "Check issuance and the client clock." if status == F.FAIL
+                            else rec),
+            target=f"{host}:{port}"))
 
         if server_name:
+            from . import hostnames
             ok, names = leaf.matches_hostname(server_name)
+            _ok, entry = leaf.hostname_match(server_name)
+            reason = "" if ok else hostnames.why_not(leaf.san_dns, server_name)
             _add(F.Finding(
                 "tls.hostname", f"Hostname match for '{server_name}'",
                 F.PASS if ok else F.FAIL, F.SCOPE_REMOTE_NET,
-                ["certificate covers the name" if ok else
+                [f"certificate covers the name (subjectAltName entry '{entry}')" if ok else
                  f"certificate subjectAltName ({', '.join(names) or 'none'}) does not "
-                 f"include '{server_name}'"] +
+                 f"include '{server_name}'"] + ([reason] if reason else []) +
                 ([f"no subjectAltName: CN '{leaf.common_name}' is ignored by modern "
                   "clients"] if not leaf.san_dns and leaf.common_name else []),
                 recommendation="" if ok else
@@ -1511,8 +1497,16 @@ def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None
         _add(check_presented_chain(facts, host, port))
         if facts.get("chain"):
             from . import chainval
-            _add(chainval.usage_finding(facts["chain"], F.SCOPE_REMOTE_NET,
-                                        f"{host}:{port}"))
+            presented = facts["chain"]
+            _add(chainval.usage_finding(presented, F.SCOPE_REMOTE_NET, f"{host}:{port}"))
+            validity = certpolicy.chain_validity_finding(presented, F.SCOPE_REMOTE_NET,
+                                                         f"{host}:{port}")
+            if validity is not None:
+                _add(validity)
+            _add(certpolicy.policy_finding(presented, F.SCOPE_REMOTE_NET, f"{host}:{port}",
+                                           certpolicy.anchor_ids(presented)))
+            _add(chainval.trust_finding(presented, F.SCOPE_REMOTE_NET, f"{host}:{port}",
+                                        certs.load_root_anchors()))
 
     _add(check_tls_validation(host, port, server_name, timeout, connect_ip=verified_ip))
     _add(check_tls_rootonly_validation(host, port, server_name, timeout,

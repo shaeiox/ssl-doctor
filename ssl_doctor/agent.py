@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, Optional, Tuple
 
-from . import __version__, local, netchecks, report, server
+from . import __version__, certpolicy, local, netchecks, report, server
 from .analyze import diagnose
 
 DEFAULT_STATE = os.path.expanduser("~/.ssl-doctor/agent.json")
@@ -132,7 +132,19 @@ def handle_job(client: AgentClient, role: str, job: Dict[str, Any]) -> str:
         client.decline(job["job_id"], f"agent role '{role}' cannot run '{kind}' jobs")
         return "declined"
     t = job["target"]
-    doc = RUNNERS[kind](t["host"], int(t["port"]), t.get("sni"))
+    options = job.get("options") or {}
+    try:
+        warn = certpolicy.parse_warn_days(options.get("expiry_warn_days",
+                                                      certpolicy.DEFAULT_WARN_DAYS))
+    except ValueError as exc:
+        client.decline(job["job_id"], f"invalid job option: {exc}")
+        return "declined"
+    previous = certpolicy.warn_days()
+    certpolicy.set_warn_days(warn)
+    try:
+        doc = RUNNERS[kind](t["host"], int(t["port"]), t.get("sni"))
+    finally:
+        certpolicy.set_warn_days(previous)
     client.upload(job["job_id"], doc)
     return "done"
 

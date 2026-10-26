@@ -5,7 +5,7 @@ tags: [audit, verdict, keys, chain, openspec, contract-1.7]
 status: in-progress
 trust: ai-inferred
 last_done: 2026-10-26
-version: 2
+version: 3
 ---
 
 **Problem:** The 45-requirement audit (2026-10-26) found false verdicts. An encrypted server key was a *confirmed* mismatch (sha256 of empty `openssl pkey` output). An expired intermediate gave overall PASS and exit 0. A verify timeout was a certificate cause. Chains were linked by names only, the on-disk certificate's dates were never judged, and PEM parsing was lenient. Plan: openspec change `complete-certificate-diagnostics` (P0–P7, 63 tasks, decisions U1–U7 approved with their defaults).
@@ -51,3 +51,17 @@ version: 2
 - Spec amendment: a service CA file with intermediates is PASS (nginx documents intermediates in `ssl_trusted_certificate`).
 - Not verified here: OpenSSL 1.1.1 (only 3.0.13 installed). Apache `SSLCACertificateFile` waits for 7.2.
 - Tests: `test_cert_file_inspection`, `test_certificate_records`, `test_chainval`, `test_chain_file_structure`, `test_ca_bundle`; pki `sample(name)` factory.
+
+**v3 (P3 done, trust: ai-inferred):**
+- `ssl_doctor/hostnames.py`: one matcher (`covers`, `why_not`) behind `CertInfo.matches_hostname` / `hostname_match`. Rules: IDN to A-label, IPs only against iPAddress entries, one-label wildcard, no partial or non-left-most wildcard, no wildcard over `*.tld` or an embedded multi-label public-suffix list (not the full PSL).
+- `ssl_doctor/certpolicy.py`:
+  - `leaf_validity` uses the module-level threshold (`set_warn_days` / `parse_warn_days`, 1–365, default 30). CLI `--expiry-warn-days` exits 2 on a bad value; the agent takes `job.options.expiry_warn_days` and restores the threshold afterwards; the service `next_job` sends the target's `expiry_threshold_days`.
+  - `chain_validity_finding` (non-leaf certificates; an intermediate expiring before the leaf → "chain stops validating on").
+  - `policy_finding` ("policy 1"; an anchor's own self-signature is not judged).
+- `chainval.trust_finding`: public / private / self-signed / unknown, offline. Public needs the anchor in the store (`_in`, matched by sha256 or subject + SKI). Private comes from service CA files (`ServerSession._service_cas`, set in `_ca_file_checks`). An expired anchor warns with uncertainty; an empty store is NOT TESTED. `ChainAssessment.anchor_cert` was added.
+- `srv.cert` is judged from its `openssl x509` output (dates + SAN against the scanned domain via `_judge_configured_cert`). `nginx_scan` stores `_nginx_domain`.
+- `analyze` causes: chain.validity FAIL (also explains tls.verify "expired"), srv.cert dates/SAN, cert.policy FAIL. Verify and chain causes also explain chain.trust.
+- Gotchas:
+  - fixtures live 30 days, so a leaf is always within the default threshold (WARNING); threshold tests build their own dates.
+  - `openssl x509 -req -sha1` still signs on 3.0.
+- Service suite: 77 tests. 1 failure is pre-existing (`test_unreadable_nginx_config_is_not_tested_with_reason`, fails as root, also on 2f70fb0).

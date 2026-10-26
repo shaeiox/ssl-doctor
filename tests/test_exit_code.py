@@ -39,7 +39,10 @@ class BatchExitCode(unittest.TestCase):
     def test_regression_r2_expired_intermediate_exit(self):
         status, d = batch_scan("expired-intermediate")
         self.assertEqual(d.overall, F.FAIL)
-        self.assertIn("tls.verify", [u.check for u in d.unexplained])
+        # P0 kept it in `unexplained`; since P3 chain.validity names the cause
+        self.assertTrue(any("outside its validity period" in c.summary
+                            and c.certainty == "confirmed" for c in d.causes),
+                        [c.summary for c in d.causes])
         self.assertEqual(status, 1)
 
     def test_full_valid_chain_exits_zero(self):

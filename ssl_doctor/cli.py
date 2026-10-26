@@ -32,6 +32,7 @@ from . import APP_NAME, __version__
 from . import findings as F
 from . import textcells
 from .analyze import diagnose
+from . import certpolicy
 from . import certs as certmod
 from . import chainval
 from . import local as localmod
@@ -2672,6 +2673,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif argv[i] in ("--no-tui", "--plain"):
             cli.use_tui = False
             i += 1
+        elif argv[i] == "--expiry-warn-days":
+            try:
+                certpolicy.set_warn_days(argv[i + 1] if i + 1 < len(argv) else "")
+            except ValueError as exc:
+                print(f"ssl-doctor: --expiry-warn-days: {exc}", file=sys.stderr)
+                return 2
+            i += 2
         elif argv[i] == "--no-remember":
             cli.no_remember = True
             i += 1

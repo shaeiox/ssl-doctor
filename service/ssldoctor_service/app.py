@@ -578,9 +578,12 @@ def create_app(db: Database) -> FastAPI:
                     "FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *",
                     (a.agent_id, a.org_id)).fetchone()
                 if j:
-                    t = conn.execute("SELECT host, port, sni FROM app.targets WHERE id = %s",
+                    t = conn.execute("SELECT host, port, sni, expiry_threshold_days "
+                                     "FROM app.targets WHERE id = %s",
                                      (j["target_id"],)).fetchone()
-                    return {"job_id": str(j["id"]), "kind": j["kind"], "target": t}
+                    warn = t.pop("expiry_threshold_days", None)
+                    return {"job_id": str(j["id"]), "kind": j["kind"], "target": t,
+                            "options": ({"expiry_warn_days": warn} if warn else {})}
             if time.monotonic() >= deadline:
                 return Response(status_code=204)
             time.sleep(0.25)

@@ -426,7 +426,7 @@ def _assess(chain: List[CertInfo], roots: Optional[List[CertInfo]]):
     ss = self_signed(top)
     if ss or (ss is None and top.self_issued_name()):
         a = ChainAssessment("complete", top.subject, name_only=name_only or ss is None,
-                            anchored=True,
+                            anchored=True, anchor_cert=top,
                             evidence=[f"{len(chain)} certificate(s), {linked}, ends at a "
                                       f"self-signed root ({names})"
                                       if len(chain) > 1 else
@@ -461,7 +461,7 @@ def _assess(chain: List[CertInfo], roots: Optional[List[CertInfo]]):
             ev += [n for n in notes if "share the name" in n]
             return ChainAssessment("complete", anchor.subject, anchored=True,
                                    name_only=name_only or not verified, evidence=ev,
-                                   paths=rows)
+                                   paths=rows, anchor_cert=anchor)
     if len(chain) > 1:
         note = ("root anchor list unavailable on this machine" if roots is None else
                 f"its issuer '{top.issuer}' is not among this machine's trusted roots "
@@ -556,4 +556,98 @@ def usage_finding(chain: List[CertInfo], scope: str, target: str):
                                         "the domain.", target=target)
     return F.Finding("chain.usage", title, F.PASS, scope,
                      ok + ["every issuer with a Key Usage may sign certificates"],
+                     target=target)
+
+
+# ---------------------------------------------------------------- trust classification
+
+TRUST_PUBLIC = "public"
+TRUST_PRIVATE = "private"
+TRUST_SELF_SIGNED = "self-signed"
+TRUST_UNKNOWN = "unknown"
+
+
+def store_label(roots: List[CertInfo]) -> str:
+    """Which trust configuration the system anchors came from, for evidence."""
+    import ssl
+    paths = ssl.get_default_verify_paths()
+    where = paths.cafile or paths.capath or "the platform's default store"
+    return f"system trust store of this machine ({where}; {len(roots)} root anchor(s))"
+
+
+def _in(cert: Optional[CertInfo], anchors: List[CertInfo]) -> bool:
+    if cert is None:
+        return False
+    return any(cert.sha256 == r.sha256 or (cert.subject_canon == r.subject_canon
+                                           and cert.ski and cert.ski == r.ski)
+               for r in anchors)
+
+
+def trust_finding(chain: List[CertInfo], scope: str, target: str,
+                  roots: List[CertInfo], private: Optional[Tuple[List[CertInfo], str]] = None,
+                  now=None):
+    """`chain.trust`: which trust configuration (if any) anchors this chain.
+
+    Evaluated offline from the certificates and anchors, so a network failure
+    never changes it.  The class comes from verified paths only - an issuer
+    *name* that looks public proves nothing.
+    """
+    from datetime import datetime, timezone
+    from . import findings as F
+    title = "Trust anchor and trust class"
+    now = now or datetime.now(timezone.utc)
+    if not chain:
+        return F.Finding("chain.trust", title, F.NOT_TESTED, scope,
+                         ["no certificate to evaluate"], target=target)
+    if not available():
+        return F.Finding("chain.trust", title, F.NOT_TESTED, scope,
+                         ["trust class: unknown", "signatures cannot be verified "
+                          "(openssl not available), so no trust anchor can be established"],
+                         target=target, failure_kind="verifier-unavailable")
+    if not roots and not private:
+        return F.Finding("chain.trust", title, F.NOT_TESTED, scope,
+                         ["no trust anchors available: the system trust store could not "
+                          "be read or is empty"], target=target)
+    store = store_label(roots)
+    a = assess(chain, roots) if roots else None
+    if a and a.status == "complete" and a.anchored and not a.name_only             and _in(a.anchor_cert, roots):
+        anchor = a.anchor_cert
+        ev = [f"trust class: {TRUST_PUBLIC}", f"anchor: '{_label(anchor)}' in the {store}",
+              *a.paths]
+        if anchor.not_after and anchor.not_after < now:
+            return F.Finding(
+                "chain.trust", title, F.WARNING, scope,
+                ev + [f"anchor expired on {anchor.not_after:%Y-%m-%d}"],
+                uncertainty=["this is the trust store of the checking machine: clients "
+                             "with other stores may build a different path, and some "
+                             "ignore an anchor's expiry"],
+                recommendation="Serve a chain that leads to a current root (for example "
+                               "the CA's newer cross-signed intermediate).",
+                target=target)
+        return F.Finding("chain.trust", title, F.PASS, scope, ev, target=target)
+    if private:
+        cas, source = private
+        pa = assess(chain, cas)
+        if pa.status == "complete" and pa.anchored and not pa.name_only:
+            return F.Finding(
+                "chain.trust", title, F.WARNING, scope,
+                [f"trust class: {TRUST_PRIVATE}",
+                 f"anchor: '{_label(pa.anchor_cert)}' from {source}",
+                 f"not anchored in the {store}"],
+                recommendation="Clients trust this chain only if that CA is installed "
+                               "in their trust store.", target=target)
+    leaf = chain[0]
+    if len(chain) == 1 and self_signed(leaf):
+        return F.Finding("chain.trust", title, F.WARNING, scope,
+                         [f"trust class: {TRUST_SELF_SIGNED}",
+                          f"'{_label(leaf)}' signed itself and is not in the {store}"],
+                         recommendation="Clients will not trust it unless it is imported "
+                                        "into their trust store.", target=target)
+    reason = ("the chain does not verify" if a and a.status == "broken" else
+              "no verified path to an anchor of the " + store)
+    return F.Finding("chain.trust", title, F.WARNING, scope,
+                     [f"trust class: {TRUST_UNKNOWN}", reason,
+                      f"top issuer: '{chain[-1].issuer}'"],
+                     recommendation="If this is an internal CA, install its root on the "
+                                    "clients; otherwise serve the chain your CA issued.",
                      target=target)
