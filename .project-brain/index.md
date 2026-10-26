@@ -21,4 +21,5 @@
 - ui-design-system → Theme, full-screen shell, result frames, streaming into frames, centred banner, chat composer   [✓ done 2026-10-25 · v8] → projects/ssl-doctor/ui-design-system.md
 - remembered-servers → SSH server profiles + passwords in OS vault (Win Credential Manager / Secret Service), host-key bound; ADR-001 Accepted, implemented   [⚠ in-progress 2026-10-25 · v4] → projects/ssl-doctor/remembered-servers.md
 - certificate-diagnostics → 45-check audit remediation: verdict/unexplained, key states, verify transport, contract 1.7, phases P0–P7   [⚠ in-progress 2026-10-26 · v3] → projects/ssl-doctor/certificate-diagnostics.md
+- cert-analysis-internals → certs/chainval/certpolicy/hostnames internals: strict parsing, verify_link, roles, trust class, policy, gotchas   [⚠ in-progress 2026-10-26 · v1] → projects/ssl-doctor/cert-analysis-internals.md
 - _decisions → One-line decision log: colours, frames, static input, report pills   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/_decisions.md

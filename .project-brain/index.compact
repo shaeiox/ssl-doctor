@@ -24,4 +24,5 @@ P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
   ui-design-system ✓d 2026-10-25 v8
   remembered-servers ⚠ 2026-10-25 v4
   certificate-diagnostics ⚠ 2026-10-26 v3
+  cert-analysis-internals ⚠ 2026-10-26 v1
   _decisions ✓v 2026-10-24 v1
