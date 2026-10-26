@@ -69,12 +69,12 @@
 
 ## 7. P6: Service discovery and runtime state
 
-- [ ] 7.1 Listener-owner probe with `ss` / `netstat` fallback, mapped to services (TSD #31); verify the fake `ss` output tests for nginx, caddy, owner-not-visible and no-listener
-- [ ] 7.2 Apache httpd and HAProxy detection and path extraction under the trusted-binary rule (TSD, SCD #32/#33); verify an Apache vhost fixture, a HAProxy `crt` fixture and an untrusted binary not executed
-- [ ] 7.3 `srv.configtest` keeping the exit status and a redacted stderr summary; permission-only failure → NOT TESTED (TSD #36, design D8); verify `nginx -t` rc=1, rc=0, permission-only and untrusted-binary cases
-- [ ] 7.4 `srv.reload` from certificate/key mtime vs worker start and journal/error-log lines (TSD #37); verify the newer-certificate, reloaded, journal-error and unknown cases
-- [ ] 7.5 `srv.renewal` discovery for certbot/acme.sh/lego, timers and cron, linked by path (TSD #45); verify the linked, installed-but-unlinked and nothing-found cases
-- [ ] 7.6 Command audit test over a full server scan (TSD "never a state change"); verify no executed command matches the forbidden patterns
+- [x] 7.1 Listener-owner probe with `ss` / `netstat` fallback, mapped to services (TSD #31); verify the fake `ss` output tests for nginx, caddy, owner-not-visible and no-listener
+- [x] 7.2 Apache httpd and HAProxy detection and path extraction under the trusted-binary rule (TSD, SCD #32/#33); verify an Apache vhost fixture, a HAProxy `crt` fixture and an untrusted binary not executed
+- [x] 7.3 `srv.configtest` keeping the exit status and a redacted stderr summary; permission-only failure → NOT TESTED (TSD #36, design D8); verify `nginx -t` rc=1, rc=0, permission-only and untrusted-binary cases
+- [x] 7.4 `srv.reload` from certificate/key mtime vs worker start and journal/error-log lines (TSD #37); verify the newer-certificate, reloaded, journal-error and unknown cases
+- [x] 7.5 `srv.renewal` discovery for certbot/acme.sh/lego, timers and cron, linked by path (TSD #45); verify the linked, installed-but-unlinked and nothing-found cases
+- [x] 7.6 Command audit test over a full server scan (TSD "never a state change"); verify no executed command matches the forbidden patterns
 
 ## 8. P7: Network extras (may run in parallel with 6–7 once 5 is done)
 

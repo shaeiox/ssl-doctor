@@ -143,6 +143,7 @@ incomplete, `local.rootca` reports `NOT TESTED` instead of blaming the client.
 /server config set files --conf /opt/pvm/nginx/conf/nginx.conf
                                         point discovery at a main configuration for "files"
 /server config clear                    back to automatic discovery
+/server services                        who serves the TLS port, config test, reload state, renewal
 /server config                          scan readable TLS/vhost configuration
 /server logs                            recent TLS-related service log entries
 /server compare                         configured certificate vs served certificate
@@ -173,6 +174,21 @@ two pairs, and it includes CA files from `ssl_trusted_certificate` /
 | key state (prints one token: readable / encrypted / unreadable / …) | `head -c 4096 <key> \| grep -q …`, `openssl asn1parse -inform DER -in <key> \| head -n 4 \| grep -q …`, `openssl pkey -in <key> -passin pass: -noout` |
 | key pairing (public-key digests only) | `openssl x509 -noout -pubkey -in <cert> \| openssl pkey -pubin -outform DER \| sha256sum` and `openssl pkey -in <key> -passin pass: -pubout -outform DER \| sha256sum`, each step reporting its own failure |
 | ownership and mode | `stat -c '%U %G %a %F' -- <file>`, and `id -Gn <account>` for the nginx master's account |
+
+For the service itself (`/server services`, and part of `/scan --with-server`):
+
+| Purpose | Command |
+|---|---|
+| who listens on the TLS port | `ss -H -ltnp` (fallback `netstat -ltnp`) |
+| processes, worker start times | `ps -eo pid=,ppid=,user=,etimes=,args=` |
+| native configuration test (test mode only, trusted root-owned binary only, real exit status kept) | `<nginx> [-p …] [-c …] -t`, `apache2ctl -t` / `httpd -t [-f …]`, `haproxy -c -f …` |
+| Apache / HAProxy configuration | the same framed `base64` read as nginx, with Include/IncludeOptional (at most 3 levels, 60 files) |
+| reload evidence | `stat -c '%Y %n'` of the certificate and key, `journalctl -u <unit> -n 200 --no-pager -q` |
+| renewal tooling | `command -v certbot acme.sh lego`; certificate-path lines of `/etc/letsencrypt/renewal/*.conf` and acme.sh domain configs; `systemctl list-timers`; names (not contents) of cron files that mention them; `readlink -f` |
+
+Nothing is reloaded, restarted or signalled: a test asserts that no executed
+command contains `reload`, `restart`, `graceful`, `kill`, `-s <signal>`,
+`systemctl start/stop/restart/reload` or `sudo`.
 
 Signatures, chains and policy are then judged on this machine from the
 certificate bytes; key bytes never leave the server. A passphrase file

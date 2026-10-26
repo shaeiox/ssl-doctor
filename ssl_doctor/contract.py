@@ -88,6 +88,11 @@ OBSERVATIONS: Dict[str, str] = {
     "legacy-accepted-unverified":
         "deprecated TLS versions answered only under a relaxed cipher policy and the "
         "default-policy probe could not establish ordinary-client compatibility",
+    # 1.7: what the socket table says about the TLS port
+    "listener-unsupported":
+        "the TLS port is served by a process SSL Doctor does not analyse",
+    "no-local-listener":
+        "nothing on the analysed host listens on the TLS port",
     "tls12-relaxed-only":
         "TLS 1.2 answers only when legacy cipher suites are offered, so a "
         "default-configured client is refused",

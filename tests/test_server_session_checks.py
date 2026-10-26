@@ -71,6 +71,8 @@ class EveryCheckRuns(unittest.TestCase):
         "nginx_scan": lambda s, emit: s.nginx_scan("files.example.com", emit=emit),
         "compare_configured_vs_presented":
             lambda s, emit: s.compare_configured_vs_presented("ab" * 32, emit=emit),
+        "service_scan": lambda s, emit: s.service_scan("files.example.com", emit=emit),
+        "inventory_finding": lambda s, emit: [s.inventory_finding("ab" * 32)],
     }
     REPLIES = {
         "success": (0, IDENTITY, "", ""),

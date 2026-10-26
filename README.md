@@ -382,7 +382,7 @@ Via a read-only SSH session (`/server connect` or `/scan --server-only` /
 | `/server config show\|set\|clear [name]` | Per-server nginx settings: `set --cert <path> --key <path> [--conf <path>] [--prefix <path>]` saves manual paths for the connected (or named) remembered server and uses them on every later connection; `clear` returns to automatic discovery; bare `/server config` is the TLS-configuration inventory |
 | `/servers` | Remembered servers: name, `user@host:port`, auth, whether a password is saved, last use (never the password) |
 | `/server forget <name>\|--all` · `/server forget-password <name>` | Forget a remembered server and its saved password, or only the password |
-| `/server overview · nginx · cert · config · logs · compare` | The read-only server-side checks listed above |
+| `/server overview · nginx · cert · services · config · logs · compare` | The read-only server-side checks listed above; `services` names the process on the TLS port (nginx, Apache httpd, HAProxy, or an unsupported one), records the real exit status of the service's own configuration test, compares certificate/key times with the running workers (reload needed?), and finds certbot / acme.sh / lego renewal that manages the configured certificate |
 | `/diagnose` | Correlate everything into ranked causes (confirmed / probable / possible) with evidence + remediation |
 | `/report [html\|json\|both] [path]` | Self-contained HTML and/or machine-readable JSON |
 | `/report agent [dir]` | AI-ready export of the latest completed scan: `agent-report.md` (paste into any AI model; ends with a built-in analysis prompt) and `agent-report.json` (findings contract), in `./ssl-doctor-agent-report-<timestamp>/` or `dir`. Nothing is sent anywhere |

@@ -113,6 +113,7 @@ def run_server_checks(host: str, port: int, sni: Optional[str],
     _dns, ips = netchecks.check_dns(host, timeout)
     items = sess.overview() + sess.webserver_detection() + sess.nginx_scan(
         domain, port, addresses=tuple(ips))
+    items += sess.service_scan(domain, port)
     _hs, hs_facts = netchecks.check_tls_basic(host, port, domain, timeout)
     presented = hs_facts["cert"].sha256 if hs_facts.get("cert") else ""
     chain = hs_facts.get("chain")

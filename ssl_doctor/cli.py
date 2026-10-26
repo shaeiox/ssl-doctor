@@ -1186,6 +1186,7 @@ class SSLDoctorCLI:
             ("/server forget-password <name>", "delete only the saved password"),
             ("/server status", "show SSH session state"),
             ("/server overview", "remote OS / web-server identification"),
+            ("/server services", "who serves the TLS port, config test, reload state, renewal"),
             ("/server nginx [domain[:port]]", "examine nginx SSL config: vhost match, protocols, ciphers, cert/key"),
             ("/server cert <file> [key]", "inspect cert (and key pairing) on the server"),
             ("/server config", "scan readable web-server TLS/vhost configuration"),
@@ -1521,6 +1522,11 @@ class SSLDoctorCLI:
                                               addresses=self._target_addresses(domain)))
         self.store.extend(items)
 
+        with self._results(f"identifying the service on :{port}, its configuration "
+                           "test, reload state and renewal (read-only)") as phase:
+            items = phase.done(srv.service_scan(domain, port, emit=phase.add))
+        self.store.extend(items)
+
         with self._results("comparing configured and presented certificates, "
                            "scanning TLS service logs (read-only)") as phase:
             compare = srv.compare_configured_vs_presented(emit=phase.add, **self._presented())
@@ -1604,6 +1610,10 @@ class SSLDoctorCLI:
             with self._results(f"inspecting {cert_path} on the server") as phase:
                 items = phase.done(srv.scan_cert(cert_path, key_path, emit=phase.add)
                                    + srv.file_permissions(paths))
+        elif sub == "services":
+            domain, port = srv.cfg.tls_host, srv.cfg.tls_port
+            with self._results(f"identifying the service on :{port} (read-only)") as phase:
+                items = phase.done(srv.service_scan(domain, port, emit=phase.add))
         elif sub == "config":
             with self._results("reading TLS/vhost configuration (read-only)") as phase:
                 items = phase.done(srv.tls_config_scan(emit=phase.add))
@@ -1617,7 +1627,7 @@ class SSLDoctorCLI:
                     emit=phase.add, **self._presented())])
         else:
             self.error("usage: /server connect|status|overview|nginx [domain]|cert|"
-                       "config|logs|compare|disconnect")
+                       "services|config|logs|compare|disconnect")
             return
         self.store.extend(items)
 

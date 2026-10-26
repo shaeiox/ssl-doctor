@@ -5,7 +5,7 @@ tags: [ssh, nginx, apache, vhost, config, hostkeys, permissions]
 status: done
 trust: human
 last_done: 2026-10-26
-version: 5
+version: 6
 ---
 
 **Problem:** Diagnose server-side TLS config via read-only SSH without sudo/config edits.
@@ -41,3 +41,12 @@ version: 5
 - `srv.inventory` (`inventory_finding(presented)`, ≤ 20 blocks) flags selected / served / covers.
 - `analyze`: causes for path FAIL, keystartup FAIL, perms FAIL (confirmed only with a confirmed configuration), a compare chain difference (not reloaded), and an inventory warning (possible).
 - `docs/command-used.md` lists the exact certificate/key commands.
+
+**v6 (P6, trust: ai-inferred):**
+- `ssl_doctor/services.py` holds pure parsers: ps, ss/netstat listeners, Apache vhosts + includes, HAProxy `bind … crt` + crt-base, config-test classification (permission-only → "permission"), reload state (mtime > newest worker start → stale), renewal sections.
+- `ServerSession.service_scan` orchestrates over probe primitives `listeners`, `config_test(argv)` (`out=$(cmd 2>&1); rc=$?` keeps the exit status), `journal`, `renewal`, `realpaths` (SSH probe and the `NginxHost` fixture).
+- Gotchas:
+  - Debian `apache2 -t` needs apache2ctl's envvars, so `apache2ctl -t` runs instead.
+  - Cron is listed by file name only (lines may hold API keys).
+- `srv.service` observations `listener-unsupported` / `no-local-listener` gate nginx causes off.
+- Command audit test: in-memory host + real LocalSession.

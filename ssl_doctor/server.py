@@ -30,7 +30,7 @@ import sys
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
-from . import certpolicy, certs, chainval
+from . import certpolicy, certs, chainval, services
 from . import findings as F
 from . import nginx_discovery
 
@@ -826,6 +826,76 @@ class _SshNginxProbe:
         return [line.strip() for line in out.splitlines()
                 if nginx_discovery.SAFE_PATH.match(line.strip())]
 
+    # -- service runtime (listeners, config test, journal, renewal) --------
+    def listeners(self, port: int):
+        """`ss -ltnp` (or `netstat -ltnp`) output; None when neither exists."""
+        rc, out = self._run(
+            "if command -v ss >/dev/null 2>&1; then ss -H -ltnp 2>/dev/null; "
+            "elif command -v netstat >/dev/null 2>&1; then netstat -ltnp 2>/dev/null; "
+            "else echo '@@SSLDOCTOR NONE'; fi | head -c 65536")
+        if rc == 255 or "@@SSLDOCTOR NONE" in out.splitlines():
+            return None
+        return out
+
+    def config_test(self, argv: List[str]):
+        """(exit status, output) of a service's own configuration test.
+
+        Only test modes (`-t`, `-c`) are passed by the caller; the output is
+        bounded and the real exit status kept.
+        """
+        command = " ".join(shlex.quote(a) for a in argv)
+        rc, out = self._run(f"out=$({command} 2>&1); rc=$?; printf '%s\\n' \"$out\" "
+                            "| head -c 16384; echo \"@@SSLDOCTOR rc=$rc\"")
+        status = None
+        lines = []
+        for line in out.splitlines():
+            if line.startswith("@@SSLDOCTOR rc="):
+                value = line.split("=", 1)[1]
+                status = int(value) if value.isdigit() else None
+            else:
+                lines.append(line)
+        return status, "\n".join(lines)
+
+    def journal(self, unit: str):
+        if not unit or not nginx_discovery.SAFE_UNIT.match(unit):
+            return []
+        _rc, out = self._run(f"journalctl -u {shlex.quote(unit)} -n 200 --no-pager -q "
+                             "2>/dev/null | tail -n 200")
+        return out.splitlines()
+
+    _RENEWAL_SCRIPT = (
+        'echo "@@SSLDOCTOR tools"; for t in certbot acme.sh lego; do command -v "$t" '
+        '2>/dev/null; done; for d in /root/.acme.sh "$HOME/.acme.sh"; do '
+        '[ -x "$d/acme.sh" ] && echo "$d/acme.sh"; done; '
+        'echo "@@SSLDOCTOR certbot"; grep -HE "^(cert|fullchain|privkey|chain) *=" '
+        '/etc/letsencrypt/renewal/*.conf 2>/dev/null | head -n 200; '
+        'echo "@@SSLDOCTOR acme.sh"; grep -HE "^Le_Real(Cert|FullChain|Key)Path=" '
+        '/root/.acme.sh/*/*.conf "$HOME"/.acme.sh/*/*.conf 2>/dev/null | head -n 200; '
+        'echo "@@SSLDOCTOR timers"; systemctl list-timers --all --no-pager --no-legend '
+        '2>/dev/null | grep -iE "certbot|acme|lego" | head -n 10; '
+        # cron: file names only - a cron line may carry API credentials
+        'echo "@@SSLDOCTOR cron"; grep -liE "certbot|acme\\.sh|lego" /etc/crontab '
+        '/etc/cron.d/* /etc/cron.daily/* /var/spool/cron/crontabs/* /var/spool/cron/* '
+        '2>/dev/null | head -n 10')
+
+    def renewal(self):
+        _rc, out = self._run(self._RENEWAL_SCRIPT)
+        return out
+
+    def realpaths(self, paths):
+        safe = [p for p in paths if nginx_discovery.SAFE_PATH.match(p)]
+        if not safe:
+            return {}
+        _rc, out = self._run("for p in " + " ".join(shlex.quote(p) for p in safe)
+                             + "; do printf '%s\\t%s\\n' \"$p\" "
+                               "\"$(readlink -f -- \"$p\" 2>/dev/null)\"; done")
+        found = {}
+        for line in out.splitlines():
+            path, _, real = line.partition("\t")
+            if path in safe and real:
+                found[path] = real
+        return found
+
     def list_conf(self, dirs):
         safe = [d for d in dirs if nginx_discovery.SAFE_PATH.match(d)]
         if not safe:
@@ -1244,6 +1314,8 @@ class ServerSession:
                 ev.append(ln)
         self.last_remote_cert_sha256 = fp
         self._record_configured(cert_path, fp, [])
+        if key_path:
+            self.scan_context.setdefault("keys", []).append(key_path)
         status, verdict, rec = self._judge_configured_cert(so, domain)
         _add(F.Finding(
             "srv.cert", f"Server certificate {cert_path}", status, F.SCOPE_SERVER,
@@ -2121,13 +2193,277 @@ class ServerSession:
                          recommendation=rec, target=cert_path, failure_kind=kind,
                          uncertainty=uncertainty)
 
+    # ---------------------------------------------------------------- services
+    def service_scan(self, domain: str, port: int = 443,
+                     emit: Optional[Callable[[F.Finding], None]] = None) -> List[F.Finding]:
+        """Which process serves TLS on `port`, its configuration test, reload
+        state and renewal tooling; Apache/HAProxy certificate paths.  Read-only:
+        test modes only, never a reload, restart or signal."""
+        if (err := self._need_conn()):
+            if emit is not None:
+                emit(err)
+            return [err]
+        out: List[F.Finding] = []
+
+        def _add(f: F.Finding) -> F.Finding:
+            out.append(f)
+            if emit is not None:
+                emit(f)
+            return f
+
+        probe = self.nginx_probe()
+        d = self.discover_nginx()
+        ps_text, now, _why = probe.processes()
+        procs = services.parse_ps(ps_text or "")
+        others = services.detect_services(procs)
+        _add(self._listener_finding(probe.listeners(port), port, d, others))
+        sites: List[Tuple[services.Service, services.TlsSite]] = []
+        if d.master is not None:
+            _add(self._nginx_configtest(probe, d))
+        for svc in others:
+            _add(self._other_configtest(probe, svc))
+            site = self._other_site(probe, svc, domain, port, _add)
+            if site is not None:
+                sites.append((svc, site))
+        cert_paths = [e["path"] for e in self.scan_context["configured"]]
+        key_paths = list(self.scan_context.get("keys", []))
+        if d.master is not None and cert_paths:
+            _add(self._reload_finding(probe, "nginx", now,
+                                      services.children_elapsed(procs, d.master.pid),
+                                      cert_paths + key_paths, d.master.unit or ""))
+        for svc, site in sites:
+            _add(self._reload_finding(probe, svc.kind, now, svc.children,
+                                      [p for p in (site.cert, site.key, site.chain) if p],
+                                      ""))
+        all_certs = cert_paths + [site.cert for _s, site in sites if site.cert]
+        _add(self._renewal_finding(probe, all_certs))
+        return out
+
+    def _listener_finding(self, text, port, d, others) -> F.Finding:
+        title = "Process that terminates TLS on the target port"
+        state, owners = services.parse_listeners(text, port)
+        binaries = ([f"nginx master pid {m.pid}" for m in d.masters[:3]]
+                    + [f"{s.kind} pid {s.pid}" for s in others[:3]])
+        if state == services.LISTENER_UNAVAILABLE:
+            return F.Finding("srv.service", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                             ["neither ss nor netstat is available"] + binaries,
+                             target=self.cfg.host)
+        if state == services.LISTENER_NONE:
+            return F.Finding("srv.service", title, F.WARNING, F.SCOPE_SERVER,
+                             [f"no local listener on :{port}; TLS may be terminated "
+                              "elsewhere"] + binaries,
+                             recommendation="Find the load balancer, proxy or other host "
+                                            "that answers on this port.",
+                             target=self.cfg.host, observation="no-local-listener")
+        if state == services.LISTENER_HIDDEN:
+            return F.Finding("srv.service", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                             [f"something listens on :{port}, but the listener owner is not "
+                              "visible to this account"] + binaries,
+                             target=self.cfg.host, failure_kind="permission-denied")
+        kinds = sorted({services.kind_of(name) for name, _pid in owners})
+        names = ", ".join(f"{n} (pid {pid})" for n, pid in owners)
+        if all(kinds) and kinds:
+            return F.Finding("srv.service", title, F.PASS, F.SCOPE_SERVER,
+                             [f"{names} listens on :{port}"], target=self.cfg.host)
+        unknown = sorted({n for n, _pid in owners if not services.kind_of(n)})
+        return F.Finding("srv.service", title, F.WARNING, F.SCOPE_SERVER,
+                         [f"TLS on :{port} is served by {', '.join(unknown)}, which SSL "
+                          "Doctor does not analyse", f"listeners: {names}"],
+                         recommendation="Check that service's own TLS configuration; the "
+                                        "nginx/Apache/HAProxy results do not describe this "
+                                        "endpoint.",
+                         target=self.cfg.host, observation="listener-unsupported")
+
+    def _configtest_finding(self, service: str, argv: List[str], rc, output) -> F.Finding:
+        title = "Native configuration test of the TLS service"
+        verdict, lines = services.classify_config_test(rc, output)
+        command = " ".join(argv)
+        if verdict == "pass":
+            return F.Finding("srv.configtest", title, F.PASS, F.SCOPE_SERVER,
+                             [f"{command}: exit status 0", *lines], target=self.cfg.host)
+        if verdict == "permission":
+            return F.Finding("srv.configtest", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                             [f"{command}: exit status {rc}", "configuration test needs read "
+                              "access to files this account cannot read", *lines],
+                             target=self.cfg.host, failure_kind="permission-denied")
+        if verdict == "unknown":
+            return F.Finding("srv.configtest", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                             [f"{command}: no exit status", *lines],
+                             target=self.cfg.host, failure_kind="command-failed")
+        return F.Finding("srv.configtest", title, F.FAIL, F.SCOPE_SERVER,
+                         [f"{command}: exit status {rc}", *lines],
+                         recommendation=f"Fix the {service} configuration error shown; the "
+                                        "running service keeps its old configuration until "
+                                        "a reload succeeds.", target=self.cfg.host)
+
+    def _nginx_configtest(self, probe, d) -> F.Finding:
+        title = "Native configuration test of the TLS service"
+        if not d.executable or not d.executable_trusted:
+            reason = next((lim for lim in d.limitations if "executable" in lim),
+                          "the nginx executable is not known")
+            return F.Finding("srv.configtest", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                             [f"nginx -t not run: {reason}"], target=self.cfg.host)
+        argv = [d.executable]
+        if d.master.prefix:
+            argv += ["-p", d.master.prefix]
+        if d.master.conf:
+            argv += ["-c", d.master.conf]
+        argv.append("-t")
+        rc, output = probe.config_test(argv)
+        return self._configtest_finding("nginx", argv, rc, output)
+
+    def _trusted(self, probe, exe: str) -> Tuple[bool, str]:
+        if not exe.startswith("/") or not nginx_discovery.SAFE_PATH.match(exe):
+            return False, f"executable {exe!r} is not an absolute, safe path"
+        st = probe.exe_stat(exe)
+        if st is None:
+            return False, f"executable {exe} could not be inspected"
+        uid, mode, kind = st
+        if uid != 0 or mode & 0o022 or kind != "regular file":
+            return False, (f"executable {exe} is not trusted (owner uid {uid}, mode "
+                           f"{mode:o}, {kind}); it is not run")
+        return True, ""
+
+    def _other_configtest(self, probe, svc) -> F.Finding:
+        title = "Native configuration test of the TLS service"
+        exe = svc.exe
+        if svc.kind == "apache" and posixpath.basename(exe) == "apache2":
+            # Debian's apache2 needs the environment apache2ctl sets up
+            exe = posixpath.join(posixpath.dirname(exe), "apache2ctl")
+        ok, why = self._trusted(probe, exe)
+        if not ok:
+            return F.Finding("srv.configtest", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                             [f"{svc.kind} configuration test not run: {why}"],
+                             target=self.cfg.host)
+        if svc.kind == "apache":
+            argv = [exe, "-t"] + (["-f", svc.configs[0]] if svc.configs and
+                                  posixpath.basename(exe) != "apache2ctl" else [])
+        else:
+            argv = [exe, "-c"] + [a for c in svc.configs for a in ("-f", c)]
+        rc, output = probe.config_test(argv)
+        return self._configtest_finding(svc.kind, argv, rc, output)
+
+    _APACHE_DEFAULTS = {"apache2": ("/etc/apache2", "/etc/apache2/apache2.conf"),
+                        "httpd": ("/etc/httpd", "/etc/httpd/conf/httpd.conf")}
+
+    def _other_site(self, probe, svc, domain, port, _add):
+        """The Apache vhost / HAProxy bind answering domain:port, reported with
+        its paths; certificate checks run on the files that can be opened."""
+        title = "TLS virtual host configuration"
+        if svc.kind == "apache":
+            root, main = self._APACHE_DEFAULTS.get(posixpath.basename(svc.exe),
+                                                   self._APACHE_DEFAULTS["httpd"])
+            main = svc.configs[0] if svc.configs else main
+            files = self._read_tree(probe, main, root)
+            sites, globals_ = services.parse_apache(files)
+        else:
+            files = self._read_tree(probe, None, "", svc.configs or
+                                    ["/etc/haproxy/haproxy.cfg"])
+            sites, globals_ = services.parse_haproxy(files), {}
+        site = services.select_site(sites, domain, port)
+        if site is None:
+            _add(F.Finding("srv.tlsconf", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                           [f"{svc.kind}: no TLS site for {domain}:{port} in "
+                            f"{', '.join(files) or 'the readable configuration'}"],
+                           uncertainty=["the configuration was read without full include "
+                                        "semantics; a site may be defined elsewhere"],
+                           target=self.cfg.host))
+            return None
+        paths = [p for p in (site.cert, site.key, site.chain) if p]
+        states = probe.file_states(paths)
+        ev = [f"{svc.kind} site {site.addr}:{site.port} "
+              f"{' '.join(site.names) or '(no name)'} [{site.source}]"]
+        labels = {"certificate": site.cert, "key": site.key, "chain": site.chain}
+        for role, path in labels.items():
+            if path:
+                ev.append(f"{role}: {path} ({_PATH_STATE_LABELS.get(states.get(path), states.get(path))})")
+        if svc.kind == "apache" and "sslpassphrasedialog" in globals_:
+            ev.append(f"SSLPassPhraseDialog {globals_['sslpassphrasedialog']}")
+        missing = [p for p in paths if states.get(p) in ("missing", "notfile")]
+        _add(F.Finding("srv.tlsconf", title, F.WARNING if missing else F.PASS,
+                       F.SCOPE_SERVER, ev,
+                       uncertainty=["the configuration was read without full include "
+                                    "semantics (candidate evidence)"],
+                       recommendation="Correct the certificate/key path in the "
+                                      f"{svc.kind} configuration." if missing else "",
+                       target=self.cfg.host))
+        if site.cert and states.get(site.cert) == "readable":
+            for f in self.scan_cert(site.cert, site.key or "", domain=domain,
+                                    states={p: states.get(p, "") for p in paths}):
+                _add(f)
+            for f in self.permissions([(site.cert, "certificate")]
+                                      + ([(site.key, "key")] if site.key else []),
+                                      svc.user):
+                _add(f)
+        return site
+
+    def _read_tree(self, probe, main, root, mains=None) -> Dict[str, str]:
+        """Main configuration file(s) plus Include/IncludeOptional, bounded."""
+        files: Dict[str, str] = {}
+        queue = list(mains or [main])
+        rounds = 0
+        while queue and rounds < 3 and len(files) < 60:
+            rounds += 1
+            records = probe.read([q for q in queue if q])
+            queue = []
+            for rec in records:
+                if rec.state != nginx_discovery.READ or rec.path in files:
+                    continue
+                files[rec.path] = rec.content
+                for inc in services.apache_includes(rec.content):
+                    base = services.apache_server_root(rec.content, root) or root
+                    pattern = inc if inc.startswith("/") else posixpath.join(base, inc)
+                    if nginx_discovery.safe_pattern(pattern):
+                        queue.append(pattern)
+        return files
+
+    def _reload_finding(self, probe, service, now, workers, paths, unit) -> F.Finding:
+        title = "Reload state of the service after certificate changes"
+        mtimes = probe.mtimes(paths) if paths else {}
+        state, ev = services.reload_state(now, workers, mtimes)
+        errors = services.reload_errors(probe.journal(unit)) if unit else []
+        ev = [f"{service}: {e}" for e in ev] + [f"journal ({unit}): {e}" for e in errors]
+        if state == "stale":
+            return F.Finding("srv.reload", title, F.WARNING, F.SCOPE_SERVER,
+                             ev + [f"certificate changed after the running workers "
+                                   f"started; a reload is needed for {service} to serve it"],
+                             recommendation=f"Reload {service} (SSL Doctor never does it) "
+                                            "after checking its configuration test passes.",
+                             target=self.cfg.host)
+        if state == "unknown":
+            return F.Finding("srv.reload", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                             ["reload state unknown"] + ev, target=self.cfg.host)
+        if errors:
+            return F.Finding("srv.reload", title, F.WARNING, F.SCOPE_SERVER, ev,
+                             recommendation="Read the reload errors above; the service may "
+                                            "still run an older configuration.",
+                             target=self.cfg.host)
+        return F.Finding("srv.reload", title, F.PASS, F.SCOPE_SERVER, ev,
+                         target=self.cfg.host)
+
+    def _renewal_finding(self, probe, cert_paths) -> F.Finding:
+        title = "Renewal tooling that manages the configured certificate"
+        r = services.parse_renewal(probe.renewal())
+        state, ev = services.renewal_for(r, cert_paths, probe.realpaths(cert_paths))
+        if state == "managed":
+            return F.Finding("srv.renewal", title, F.PASS, F.SCOPE_SERVER, ev,
+                             target=self.cfg.host)
+        if state in ("unscheduled", "unlinked"):
+            return F.Finding("srv.renewal", title, F.WARNING, F.SCOPE_SERVER, ev,
+                             recommendation="Make sure something renews this certificate "
+                                            "before it expires, and reloads the service.",
+                             target=self.cfg.host)
+        return F.Finding("srv.renewal", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                         ["no renewal tooling found"] + ev, target=self.cfg.host)
+
     def begin_scan(self, conclusive: bool = True) -> None:
         """Start a new comparison context: only certificates read from now on count.
 
         `conclusive` says the configuration being read is the running instance's,
         which a FAIL comparison needs.
         """
-        self.scan_context = {"configured": [], "conclusive": conclusive, "inventory": []}
+        self.scan_context = {"configured": [], "conclusive": conclusive, "inventory": [],
+                             "keys": []}
         self.last_remote_cert_sha256 = ""
         self.chain_facts = {}
         self._password_file = None        # unknown until a configuration is analysed

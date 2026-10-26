@@ -83,6 +83,8 @@ into a configuration defect on its own. `""` means "nothing notable observed".
 | `legacy-accepted-default` | `tls.protocols` | a deprecated version (TLS 1.0/1.1) was accepted with the default cipher policy, so an ordinary client can negotiate it |
 | `legacy-accepted-relaxed-only` | `tls.protocols` | a deprecated version answered only when legacy cipher suites were offered, and the default-policy probe was refused: the server still speaks it, but a default-configured client is rejected |
 | `legacy-accepted-unverified` | `tls.protocols` | a deprecated version answered only under the relaxed policy and the default-policy probe could not produce a result (client limitation or timeout), so ordinary-client compatibility is unknown |
+| `listener-unsupported` | `srv.service` | the TLS port is served by a process SSL Doctor does not analyse (Caddy, Traefik, a Java server…); nginx-derived causes are not raised |
+| `no-local-listener` | `srv.service` | nothing on the analysed host listens on the TLS port; TLS is terminated elsewhere |
 | `tls12-relaxed-only` | `tls.protocols` | TLS 1.2 answers only when legacy cipher suites are offered, and the default-policy probe was refused: default-configured clients cannot negotiate it |
 
 ## Cause limitations (`limitations`)

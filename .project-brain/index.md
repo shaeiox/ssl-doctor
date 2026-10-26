@@ -6,11 +6,11 @@
 
 - (no topics yet)
 
-> resume 2026-10-26 · done: complete-certificate-diagnostics P0–P5 on branch feat/complete-certificate-diagnostics · next: P6 service discovery and runtime state (tasks 7.x) · blocker: none
+> resume 2026-10-26 · done: complete-certificate-diagnostics P0–P6 on branch feat/complete-certificate-diagnostics · next: P7 IPv4/IPv6 + revocation (tasks 8.x), then gate 9.x · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-25 · v2] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ done 2026-10-26 · v2] → projects/ssl-doctor/chain-diagnosis.md
-- server-ssh-nginx → Read-only SSH, nginx vhost resolution, chain linkage, configured-vs-presented   [✓ done 2026-10-26 · v5] → projects/ssl-doctor/server-ssh-nginx.md
+- server-ssh-nginx → Read-only SSH, nginx vhost resolution, chain linkage, configured-vs-presented   [✓ done 2026-10-26 · v6] → projects/ssl-doctor/server-ssh-nginx.md
 - commands-reference → Actual executed commands documented (local/remote, traced to source)   [✓ verified 2026-10-25 · v2] → projects/ssl-doctor/commands-reference.md
 - evidence-based-probes → Endpoint states, comparable-only comparison, SNI observations, probe reconciliation, cause limitations   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/evidence-based-probes.md
 - protocol-policy-evidence → Relaxed vs default cipher policy, per-version support classes, client-limited probes, contract 1.4   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/protocol-policy-evidence.md

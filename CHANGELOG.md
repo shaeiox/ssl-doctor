@@ -42,6 +42,29 @@ validating).
   says validation was inconclusive. A TLS-level rejection stays FAIL. Both
   validations now connect to the address the TCP check verified, and name it.
 
+### Added (phase 6: service discovery and runtime state)
+
+- `srv.service`: the process listening on the TLS port, from `ss` / `netstat`.
+  An unsupported terminator (for example Caddy) or no local listener is
+  reported, and nginx-derived causes are then not raised for that endpoint.
+- `srv.configtest`: the service's own configuration test (`nginx -t`,
+  `apachectl -t` / `httpd -t`, `haproxy -c`), run only for trusted root-owned
+  binaries and only in test mode, with the real exit status and a bounded
+  summary. A failure caused only by this account's permissions is NOT TESTED,
+  not FAIL. `nginx -T` was run before, but its result was discarded.
+- Apache httpd and HAProxy: detected from their process titles, with
+  configuration read with includes (bounded, candidate evidence). The vhost or
+  bind for the domain is reported with its certificate/key/chain paths and
+  their states; the certificate and key checks run on files that can be opened.
+- `srv.reload`: certificate and key modification times compared with the
+  newest worker, plus reload errors from the service journal. "A reload is
+  needed" is reported; SSL Doctor never reloads.
+- `srv.renewal`: certbot, acme.sh or lego, reported as managing a certificate
+  only when its configuration names the configured path (symlinks resolved),
+  together with its timer or cron entry. Cron file contents are never read.
+- `/server services`, also part of `/scan --with-server` and the server agent.
+- A command audit test proves that no state-changing command is executed.
+
 ### Fixed (phase 5: server certificate deployment)
 
 - **The configured-vs-served comparison no longer uses a stale file.** A

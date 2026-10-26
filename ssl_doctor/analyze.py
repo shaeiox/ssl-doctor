@@ -248,7 +248,11 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
     # nginx findings support a server cause only when the analysed configuration
     # is the running instance's, complete (nginx.conf PASS); documents from
     # before configuration discovery carry no nginx.conf verdict to doubt
-    nginx_confirmed = nginx_conf is None or nginx_conf.status == F.PASS
+    listener = _first(server, "srv.service")
+    elsewhere = bool(listener and listener.observation in ("listener-unsupported",
+                                                           "no-local-listener"))
+    # ...and only when nginx is what answers on the port at all
+    nginx_confirmed = (nginx_conf is None or nginx_conf.status == F.PASS) and not elsewhere
     # chain findings carry their defect class; documents from before 1.7 do not,
     # and then a WARNING is read the way it always was
     chain_bad = [f for f in (chain, chainfile if nginx_confirmed else None)
@@ -561,6 +565,42 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
             "The running service sends a different chain than its configured file - "
             "it was probably not reloaded after the file changed",
             cmp_srv.evidence, cmp_srv.recommendation, explains=("srv.compare",))
+    if elsewhere:
+        add("probable", "server",
+            "TLS on this port is not served by the analysed nginx/Apache/HAProxy - "
+            + listener.evidence[0], listener.evidence, listener.recommendation,
+            explains=("srv.service",))
+    configtest = [f for f in _by_check(server, "srv.configtest") if f.status == F.FAIL]
+    if configtest:
+        f = configtest[0]
+        add("confirmed", "server",
+            "The service's own configuration test fails - " + "; ".join(f.evidence[:2]),
+            f.evidence, f.recommendation, explains=("srv.configtest",))
+    reload_f = _first(server, "srv.reload")
+    if reload_f and reload_f.status == F.WARNING:
+        stale = any("changed after the running workers started" in e
+                    for e in reload_f.evidence)
+        if stale and cmp_srv and cmp_srv.status in (F.FAIL, F.WARNING):
+            add("probable", "server",
+                "The new certificate is not yet served because the service was not "
+                "reloaded after it changed", reload_f.evidence + cmp_srv.evidence,
+                reload_f.recommendation, explains=("srv.reload", "srv.compare"))
+        else:
+            add("probable", "server",
+                "The service may not run its current certificate - "
+                + reload_f.evidence[-1], reload_f.evidence, reload_f.recommendation,
+                explains=("srv.reload",))
+    renewal = _first(server, "srv.renewal")
+    if renewal and renewal.status == F.WARNING:
+        add("possible", "server", "Renewal of the configured certificate is not "
+            "established - " + renewal.evidence[0], renewal.evidence,
+            renewal.recommendation, bump=60, explains=("srv.renewal",))
+    tlsconf_bad = [f for f in _by_check(server, "srv.tlsconf") if f.status == F.WARNING]
+    if tlsconf_bad:
+        add("probable", "server",
+            "A certificate or key path in the Apache/HAProxy configuration does not exist",
+            tlsconf_bad[0].evidence, tlsconf_bad[0].recommendation,
+            limitations=list(tlsconf_bad[0].uncertainty), explains=("srv.tlsconf",))
     inventory = _first(server, "srv.inventory")
     if inventory and inventory.status == F.WARNING:
         add("possible", "server",
