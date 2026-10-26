@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import ssl
 import subprocess
@@ -156,32 +157,69 @@ def check_issuer_in_windows_root(issuer_names: List[str],
                          F.NOT_TESTED, F.SCOPE_LOCAL, [str(exc)])
 
 
+_CERTUTIL_FAILED = re.compile(r"-verify command FAILED: (0x[0-9a-fA-F]+)")
+_CERTUTIL_URL_FAILED = re.compile(r'Failed "(AIA|CDP|OCSP|Base CRL|Delta CRL)"|Error retrieving URL')
+_URL_LINE = re.compile(r"^\s*((?:https?|ldap)://\S+)", re.IGNORECASE)
+
+
+def _unreachable_urls(text: str) -> List[str]:
+    """URLs certutil -urlfetch reported as failed (English output only)."""
+    urls: List[str] = []
+    failing = False
+    for line in text.splitlines():
+        if _CERTUTIL_URL_FAILED.search(line):
+            failing = True
+            continue
+        m = _URL_LINE.match(line)
+        if m and failing:
+            urls.append(m.group(1))
+            failing = False
+        elif line.strip().startswith(("Verified", "----")):
+            failing = False
+    return list(dict.fromkeys(urls))
+
+
 def check_certutil_verify(cert_path: str) -> F.Finding:
-    """Windows chain validation via certutil (uses Windows chain engine)."""
+    """Windows chain validation via certutil (uses Windows chain engine).
+
+    certutil's exit status is the verdict: words such as "error" also appear in
+    successful output (chain-dump fields, names, URL-fetch lines), and the
+    messages are localised.
+    """
+    title = "Chain validation with Windows chain engine (certutil)"
     if not IS_WINDOWS:
-        return F.Finding(
-            "local.certutil", "Chain validation with Windows chain engine (certutil)",
-            F.NOT_TESTED, F.SCOPE_LOCAL, ["certutil is only available on Windows"])
+        return F.Finding("local.certutil", title, F.NOT_TESTED, F.SCOPE_LOCAL,
+                         ["certutil is only available on Windows"])
     if not shutil.which("certutil"):
-        return F.Finding(
-            "local.certutil", "Chain validation with Windows chain engine (certutil)",
-            F.NOT_TESTED, F.SCOPE_LOCAL, ["certutil not found in PATH"])
+        return F.Finding("local.certutil", title, F.NOT_TESTED, F.SCOPE_LOCAL,
+                         ["certutil not found in PATH"])
     try:
         proc = subprocess.run(["certutil", "-verify", "-urlfetch", cert_path],
-                              capture_output=True, timeout=60, text=True)
+                              capture_output=True, timeout=60, text=True, errors="replace")
     except subprocess.TimeoutExpired:
-        return F.Finding("local.certutil",
-                         "Chain validation with Windows chain engine (certutil)",
-                         F.NOT_TESTED, F.SCOPE_LOCAL, ["certutil timed out"])
-    tail = [ln.strip() for ln in (proc.stdout + proc.stderr).splitlines() if ln.strip()][-6:]
-    ok = proc.returncode == 0 and "Expired" not in proc.stdout \
-        and "ERROR" not in proc.stdout.upper()
+        return F.Finding("local.certutil", title, F.NOT_TESTED, F.SCOPE_LOCAL,
+                         ["certutil timed out"])
+    except OSError as exc:
+        return F.Finding("local.certutil", title, F.NOT_TESTED, F.SCOPE_LOCAL,
+                         [f"certutil could not be started: {exc}"])
+    text = (proc.stdout or "") + (proc.stderr or "")
+    tail = [ln.strip() for ln in text.splitlines() if ln.strip()][-6:]
+    if proc.returncode == 0:
+        urls = _unreachable_urls(text)
+        return F.Finding(
+            "local.certutil", title, F.PASS, F.SCOPE_LOCAL,
+            tail + ([f"warning: revocation URL could not be retrieved: {u}" for u in urls[:5]]
+                    if urls else []),
+            recommendation="Windows verified the chain, but some revocation URLs are "
+                           "unreachable from this machine; Schannel clients that require "
+                           "revocation checks may still fail." if urls else "")
+    m = _CERTUTIL_FAILED.search(text)
+    code = m.group(1) if m else f"0x{proc.returncode & 0xFFFFFFFF:08x}"
     return F.Finding(
-        "local.certutil", "Chain validation with Windows chain engine (certutil)",
-        F.PASS if ok else F.FAIL, F.SCOPE_LOCAL, tail,
-        recommendation="" if ok else
-        "Windows cannot build/verify the chain. Compare with the OpenSSL/system result: "
-        "a different outcome here means the app uses the Windows stack.")
+        "local.certutil", title, F.FAIL, F.SCOPE_LOCAL,
+        [f"certutil -verify failed with {code}"] + tail,
+        recommendation="Windows cannot build/verify the chain. Compare with the OpenSSL/system "
+                       "result: a different outcome here means the app uses the Windows stack.")
 
 
 def check_schannel_events(limit: int = 10) -> F.Finding:

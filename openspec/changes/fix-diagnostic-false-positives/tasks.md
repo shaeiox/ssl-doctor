@@ -49,7 +49,7 @@
 
 ## 5. `local.certutil` from the exit status (A)
 
-- [ ] 5.1 New `tests/test_client_machine.py` with mocked `subprocess.run` (design D1); verify these cases fail before the fix:
+- [x] 5.1 New `tests/test_client_machine.py` with mocked `subprocess.run` (design D1); verify these cases fail before the fix:
   - success with `dwErrorStatus=0` chain dump;
   - success with an "error" subject;
   - success with an unreachable CDP URL;
@@ -57,7 +57,7 @@
   - `FAILED: 0x800b010a`;
   - `PermissionError` on start;
   - timeout.
-- [ ] 5.2 Exit-status classification, error code in the FAIL evidence, URL-failure evidence line, `OSError` → NOT TESTED, `errors="replace"` decoding; verify all 5.1 cases give PASS, PASS, PASS (with the URL line), PASS, FAIL (with the code), NOT TESTED, NOT TESTED
+- [x] 5.2 Exit-status classification, error code in the FAIL evidence, URL-failure evidence line, `OSError` → NOT TESTED, `errors="replace"` decoding; verify all 5.1 cases give PASS, PASS, PASS (with the URL line), PASS, FAIL (with the code), NOT TESTED, NOT TESTED
 
 ## 6. `local.clockskew` with a timed reference (D)
 

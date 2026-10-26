@@ -44,6 +44,14 @@ Findings contract stays **1.7**; no schema change.
   without a port, unix sockets never match). Without a presented certificate, a
   covering block is an uncertainty, not a warning.
 
+- **`local.certutil` no longer fails a successful Windows verification.** Any
+  "error" in certutil's output - the `dwErrorStatus=0` lines of its chain dump,
+  a certificate name, an unreachable revocation URL - made it FAIL, which also
+  raised the "Windows chain engine fails" cause. certutil's exit status now
+  decides; a failure names its error code (for example `0x800b010a`).
+  Unreachable revocation URLs are listed as a warning line of a PASS, and
+  certutil that cannot be started is NOT TESTED.
+
 ## v0.11.0 — trustworthy certificate verdicts
 
 Chains are verified by signature, not by names; every certificate in a chain
