@@ -173,6 +173,33 @@ def _listen_ports(listens: List[List[str]]) -> List[str]:
     return ports
 
 
+def _block_listens_on(listens: List[List[str]], port: int) -> bool:
+    """Can a server block with these listen directives accept TCP `port`?
+
+    nginx semantics: an address without a port, and a block without any
+    listen, use port 80; unix sockets never match.  A value SSL Doctor cannot
+    parse (a variable) counts as "may answer", so it is never dismissed.
+    """
+    if not listens:
+        return port == 80
+    for args in listens:
+        if not args:
+            continue
+        value = args[0]
+        if value.startswith("unix:"):
+            continue
+        if "$" in value:
+            return True
+        tail = value.rsplit(":", 1)[-1] if (":" in value and not value.endswith("]")) else value
+        tail = tail.strip("[]").split("/")[0]
+        if tail.isdigit():
+            if int(tail) == port:
+                return True
+        elif port == 80:                     # an address only: nginx's default port
+            return True
+    return False
+
+
 def _nginx_name_matches(pattern: str, domain: str) -> Tuple[str, int]:
     """Classify a server_name pattern against `domain`.
 
@@ -1717,7 +1744,7 @@ class ServerSession:
                     target=self.cfg.host))
             return self._certificate_checks(d, None, out, _add, emit)
         matched_dirs = match[0]
-        self._inventory_blocks(d, blocks, ssl_blocks, nodes, matched_dirs, domain)
+        self._inventory_blocks(d, blocks, ssl_blocks, nodes, matched_dirs, domain, port)
         names = [n for a in matched_dirs.get("server_name", []) for n in a]
         # wildcard/regex matches are normal; only fallbacks and conflicts warn
         status = F.WARNING if "fallback" in how or notes else F.PASS
@@ -1823,7 +1850,8 @@ class ServerSession:
 
     _INVENTORY_LIMIT = 20
 
-    def _inventory_blocks(self, d, blocks, ssl_blocks, nodes, selected, domain) -> None:
+    def _inventory_blocks(self, d, blocks, ssl_blocks, nodes, selected, domain,
+                          port: int = 443) -> None:
         """Every TLS block's first certificate into scan_context["inventory"]."""
         nd = nginx_discovery
         http_dirs = _http_level_directives(nodes)
@@ -1836,6 +1864,7 @@ class ServerSession:
             entry = {"names": [n for a in dirs.get("server_name", []) for n in a],
                      "listen": [" ".join(a) for a in dirs.get("listen", [])],
                      "path": resolved or values[0][0], "selected": dirs is selected,
+                     "on_port": _block_listens_on(dirs.get("listen", []), port),
                      "sha256": "", "subject": "", "covers": None}
             data = None
             if resolved and self.nginx_probe().file_states([resolved]).get(resolved) == "readable":
@@ -1851,7 +1880,12 @@ class ServerSession:
         self.scan_context["inventory_truncated"] = len(ssl_blocks) > self._INVENTORY_LIMIT
 
     def inventory_finding(self, presented_sha256: str = "") -> F.Finding:
-        """`srv.inventory`: every configured certificate, the served one flagged."""
+        """`srv.inventory`: every configured certificate, the served one flagged.
+
+        Certificates are compared by identity: blocks that share the selected
+        block's certificate are listed, never warned about, and only blocks
+        that listen on the scanned port can be alternatives.
+        """
         title = "Certificates configured for the TLS service"
         entries = self.scan_context.get("inventory")
         if not entries:
@@ -1860,32 +1894,44 @@ class ServerSession:
                              target=self.cfg.host)
         domain = self.scan_context.get("inventory_domain", "")
         presented = presented_sha256.lower().replace(":", "")
-        ev, warnings = [], []
+        selected_sha = next((e["sha256"] for e in entries if e["selected"]), "")
+        selected_serves = bool(presented and selected_sha == presented)
+        ev, warnings, uncertainty = [], [], []
         for e in entries:
-            flags = [f for f, on in (("selected", e["selected"]),
-                                     ("served", presented and e["sha256"] == presented),
+            label = " ".join(e["names"]) or "(none)"
+            same_as_selected = bool(e["sha256"] and e["sha256"] == selected_sha)
+            served = bool(presented and e["sha256"] == presented)
+            flags = [f for f, on in (("selected", e["selected"]), ("served", served),
                                      (f"covers {domain}", e["covers"])) if on]
-            ev.append(f"server_name {' '.join(e['names']) or '(none)'} · listen "
+            if not e["selected"]:
+                if not e.get("on_port", True):
+                    flags.append("other listener")
+                elif same_as_selected:
+                    flags.append("shares the certificate")
+                elif presented and served and not selected_serves:
+                    warnings.append(f"the presented certificate belongs to server block "
+                                    f"'{label}', not the one selected for {domain}")
+                elif e["covers"] and not served:
+                    alternative = (f"another server block ({label}) has a certificate "
+                                   f"covering {domain}: a different listener or SNI order "
+                                   "could serve it")
+                    (warnings if presented else uncertainty).append(
+                        alternative if presented else
+                        alternative + " (the presented certificate is unknown, so which "
+                                      "block answers was not confirmed)")
+            ev.append(f"server_name {label} · listen "
                       f"{' / '.join(e['listen']) or '-'} · {e['path']}"
                       + (f" · {e['subject']} · sha256 {e['sha256'][:16]}…" if e["sha256"]
                          else " · certificate not read")
                       + (f" [{', '.join(flags)}]" if flags else ""))
-            if e["covers"] and not e["selected"] and not (presented and
-                                                          e["sha256"] == presented):
-                warnings.append(f"another server block ({' '.join(e['names']) or 'unnamed'}) "
-                                f"has a certificate covering {domain}: a different listener "
-                                "or SNI order could serve it")
-            if presented and e["sha256"] == presented and not e["selected"]:
-                warnings.append(f"the presented certificate belongs to server block "
-                                f"'{' '.join(e['names']) or '(none)'}', not the one selected "
-                                f"for {domain}")
         if self.scan_context.get("inventory_truncated"):
             ev.append(f"first {self._INVENTORY_LIMIT} TLS server blocks listed")
         status = F.WARNING if warnings else F.PASS
         return F.Finding("srv.inventory", title, status, F.SCOPE_SERVER, ev + warnings,
                          recommendation="Check which server block should answer for this "
                                         "name; remove or align the others."
-                         if warnings else "", target=self.cfg.host)
+                         if warnings else "", target=self.cfg.host,
+                         uncertainty=uncertainty)
 
     _CA_DIRECTIVES = ("ssl_trusted_certificate", "ssl_client_certificate")
 

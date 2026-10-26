@@ -103,7 +103,7 @@ Alternatives considered:
 - **Alternative considered:** resolve paths once via `realpaths()` and stat the result. Rejected: two round-trips, and a race between them.
 
 ### D5. Inventory: identity first, then listeners
-- `_inventory_blocks` additionally records each block's listen ports: the default 443 for `listen` without a port; `[::]:443` and `*:443` are parsed as port 443. `nginx_scan`'s port is stored in `scan_context["inventory_port"]`.
+- `_inventory_blocks` additionally records each block's listen ports: a `listen` with only an address uses nginx's default port 80, as does a block without any `listen`; `[::]:443` and `*:443` are parsed as port 443; `unix:` sockets never match a TCP port. `nginx_scan`'s port is stored in `scan_context["inventory_port"]`.
 - Blocks that do not listen on that port are listed with "other listener" and are never candidates.
 - **When the presented SHA-256 equals the selected block's SHA-256:**
   - other blocks with the same SHA-256 are tagged "shares the certificate";

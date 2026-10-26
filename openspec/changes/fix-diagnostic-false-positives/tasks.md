@@ -39,13 +39,13 @@
 
 ## 4. `srv.inventory` by identity and listener (C)
 
-- [ ] 4.1 Record listen ports per block and the scanned port (design D5), with unparseable `listen` → "can answer"; verify unit tests for `listen 443 ssl`, `[::]:443`, `127.0.0.1:8443`, bare `listen ssl`, and a variable
-- [ ] 4.2 Shared-certificate handling in `inventory_finding`; verify new tests in `tests/test_server_deployment.Inventory`:
+- [x] 4.1 Record listen ports per block and the scanned port (design D5), with unparseable `listen` → "can answer"; verify unit tests for `listen 443 ssl`, `[::]:443`, `127.0.0.1:8443`, an address without a port (nginx default 80), `unix:` and a variable
+- [x] 4.2 Shared-certificate handling in `inventory_finding`; verify new tests in `tests/test_server_deployment.Inventory`:
   - redirect block sharing the certificate → PASS, "shares the certificate", no cause;
   - same name on 8443 → no warning;
   - no presented certificate → PASS with an uncertainty, no cause;
   - the existing `test_another_block_covering_the_domain_warns` and `test_served_certificate_from_the_default_server` still pass.
-- [ ] 4.3 Update the inventory cause in `analyze.py` so it is raised only for a WARNING; verify `diagnose` on the 4.2 cases gives no "Another configured certificate could answer" cause, and overall PASS when nothing else fails
+- [x] 4.3 Update the inventory cause in `analyze.py` so it is raised only for a WARNING; verify `diagnose` on the 4.2 cases gives no "Another configured certificate could answer" cause, and overall PASS when nothing else fails
 
 ## 5. `local.certutil` from the exit status (A)
 

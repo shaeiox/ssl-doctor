@@ -34,6 +34,16 @@ Findings contract stays **1.7**; no schema change.
   is noted as not evaluated. The recommendation names the file and the exact
   `chmod`/`chown`, and never removes the service account's read access.
 
+- **Server blocks that share a certificate no longer contradict each other.**
+  With a redirect block reusing the site's certificate, `srv.inventory` marked
+  the selected block `[selected, served]` yet warned that the certificate
+  "belongs to" the other block, and raised a cause. Certificates are now
+  compared by identity: blocks sharing the selected block's certificate are
+  listed as "shares the certificate"; blocks that do not listen on the scanned
+  port are listed as "other listener" (nginx defaults: port 80 for an address
+  without a port, unix sockets never match). Without a presented certificate, a
+  covering block is an uncertainty, not a warning.
+
 ## v0.11.0 — trustworthy certificate verdicts
 
 Chains are verified by signature, not by names; every certificate in a chain
