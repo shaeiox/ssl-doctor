@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-26 · done: complete-certificate-diagnostics P0–P7 + integration gate (63/63 tasks, verification.md) on branch feat/complete-certificate-diagnostics · next: review, archive older changes then this one, merge · blocker: none
+> resume 2026-10-26 · done: v0.11.0 released (complete-certificate-diagnostics merged to master, tagged) · next: archive fix-chain-diagnosis-saas-enterprise + fix-tls-handshake-timeout-attribution, then complete-certificate-diagnostics · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-25 · v2] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ done 2026-10-26 · v2] → projects/ssl-doctor/chain-diagnosis.md

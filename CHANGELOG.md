@@ -1,8 +1,11 @@
 # Changelog
 
-## Unreleased — trustworthy verdicts (complete-certificate-diagnostics)
+## v0.11.0 — trustworthy certificate verdicts
 
-A failing check can no longer disappear from the overall result, and checks
+Chains are verified by signature, not by names; every certificate in a chain
+is judged for dates, constraints, usage and algorithm policy; keys, revocation
+(stapled OCSP by default) and the running service are checked without reading
+secrets or changing the server. A failing check can no longer disappear from the overall result, and checks
 that could not be completed are no longer reported as certificate or key
 failures. Findings contract **1.7** (additive; 1.0–1.6 documents keep
 validating).

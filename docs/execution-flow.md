@@ -5,7 +5,7 @@ points, argument handling, the command loop, what each command does internally,
 how findings become a diagnosis and a report, and how the session shuts down.
 File names are included at every step.
 
-Version covered: `0.10.1` (`ssl_doctor/__init__.py`).
+Version covered: `0.11.0` (`ssl_doctor/__init__.py`).
 
 ---
 
@@ -59,6 +59,7 @@ ssl_doctor/cli.py :: main()
    - `ssl_doctor/findings.py` — findings model and session store
    - `ssl_doctor/analyze.py` — correlation rules
    - `ssl_doctor/certs.py` — certificate parsing, chain assessment, key matching
+     (with `chainval.py`, `certpolicy.py`, `hostnames.py`, `revocation.py`)
    - `ssl_doctor/local.py` — checks on the local/client machine
    - `ssl_doctor/netchecks.py` — remote DNS/TCP/TLS/HTTPS checks
    - `ssl_doctor/report.py` — HTML/JSON rendering
@@ -283,6 +284,7 @@ pattern: run a library function under a `Spinner`, add findings to
 | `/findings [scope]` | `cmd_findings` | Prints all findings, or filters by `local`, `remote-net`, `server`. | `ssl_doctor/findings.py` |
 | `/clear` | `cmd_clear` | Empties the store and clears the cached diagnosis. | `ssl_doctor/findings.py` |
 | `/cert inspect <file> [host]` | `cmd_cert` | Parses a PEM/DER certificate or chain file, checks dates/SANs/fingerprints and chain order. | `ssl_doctor/certs.py` → `inspect_cert_file` |
+| `/cert cafile <file>` | `cmd_cert` | Classifies every certificate in a CA/root file (root, intermediate, leaf). | `ssl_doctor/certs.py`, `ssl_doctor/chainval.py` |
 | `/cert match <cert> <key>` | `cmd_cert` | Compares public-key digests only; never reads out key material. | `ssl_doctor/certs.py` → `match_cert_key` |
 | `/tls <host\|URL> [--sni name]` | `cmd_tls` | Full remote TLS/HTTPS suite. | `ssl_doctor/netchecks.py` → `run_remote_diagnostics` |
 | `/local [cert]` | `cmd_local` | Checks the machine running SSL Doctor. | `ssl_doctor/local.py` → `run_local_for_remote` |
@@ -294,6 +296,7 @@ pattern: run a library function under a `Spinner`, add findings to
 | `/server cert <file> [key]` | `cmd_server` | Remote certificate inspection, key pairing, file permissions. | `ssl_doctor/server.py` |
 | `/server config` | `cmd_server` | Read-only scan of web-server TLS/vhost configuration. | `ssl_doctor/server.py` |
 | `/server logs` | `cmd_server` | Recent TLS-related service log entries, when readable. | `ssl_doctor/server.py` |
+| `/server services` | `cmd_server` | TLS listeners, configuration test, reload state and renewal tooling (read-only). | `ssl_doctor/server.py` → `service_scan`, `ssl_doctor/services.py` |
 | `/server compare` | `cmd_server` | Configured nginx certificate vs certificate served on the network. | `ssl_doctor/server.py` |
 | `/server disconnect` | `cmd_server` | Closes SSH and drops the session object. | `ssl_doctor/server.py` |
 | `/diagnose` | `cmd_diagnose` | Correlates all findings into ranked root causes. | `ssl_doctor/analyze.py` |
@@ -726,7 +729,7 @@ User                cli.py                  netchecks/local/server      analyze 
 |---|---|
 | `ssldoctor.py` | Source entry point; calls `ssl_doctor.cli.main()` |
 | `pyproject.toml` | Declares the `ssl-doctor` console script and package |
-| `ssl_doctor/__init__.py` | Version (`0.10.1`) and application name |
+| `ssl_doctor/__init__.py` | Version (`0.11.0`) and application name |
 | `ssl_doctor/cli.py` | Argument parsing, batch mode, REPL, dispatch, all command handlers, spinner/colors, result frames, `/scan` orchestration, the `/server connect` pipeline and remembered-server commands |
 | `ssl_doctor/tui.py` | Full-screen shell: layout, transcript (frames redrawn per width), composer, completion menu, mouse selection, key reader (termios / Windows console records) |
 | `ssl_doctor/termcaps.py` | Per-terminal presentation: full-screen shell or line mode, mouse capture, the reason for a fallback; Windows VT-output check |
@@ -737,7 +740,12 @@ User                cli.py                  netchecks/local/server      analyze 
 | `ssl_doctor/vault.py` | Saved passwords: Windows Credential Manager, Secret Service (`secret-tool`), or none; host-key binding, expiry |
 | `ssl_doctor/findings.py` | `Finding` model, statuses/scopes, `FindingStore` |
 | `ssl_doctor/netchecks.py` | Target parsing, domain profile, DNS/TCP/TLS/HTTPS suite, presented-chain reading |
-| `ssl_doctor/certs.py` | PEM/DER parsing, chain assessment, hostname matching, cert/key digest matching |
+| `ssl_doctor/certs.py` | Strict PEM/DER/PKCS#7/PKCS#12 detection and parsing, certificate records, key states, chain assessment entry point, cert/key digest matching |
+| `ssl_doctor/chainval.py` | Per-link signature verification with isolated `openssl verify`, self-signature check, roles, bounded path enumeration, trust classification |
+| `ssl_doctor/certpolicy.py` | Validity of every certificate, expiry-warning threshold (`--expiry-warn-days`), key and signature algorithm policy |
+| `ssl_doctor/hostnames.py` | SAN-only hostname coverage: IDN, IP addresses, wildcard and public-suffix rules |
+| `ssl_doctor/revocation.py` | Stapled OCSP (`s_client -status`), online OCSP/CRL (`--revocation online`), response validation |
+| `ssl_doctor/services.py` | Read-only service probes: listener owner, configuration test, Apache/HAProxy certificate paths, reload state, renewal tooling |
 | `ssl_doctor/local.py` | Local machine checks: OS, clock skew, proxy, Windows stores, certutil, Schannel |
 | `ssl_doctor/server.py` | SSH config/session, host-key trust store (with the `ssh` probe fallback when `ssh-keyscan` cannot negotiate), askpass helper (POSIX script, Windows `.cmd` or the frozen exe), nginx config parsing and vhost resolution, remote checks |
 | `ssl_doctor/analyze.py` | Correlation rules producing ranked causes and overall verdict |
