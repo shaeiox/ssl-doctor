@@ -173,7 +173,8 @@ class ServerCompareOnce(Themed):
         class Server:
             connected = True
 
-            def compare_configured_vs_presented(self, presented, emit=None):
+            def compare_configured_vs_presented(self, presented_sha256="", emit=None,
+                                                **_presented):
                 f = finding("srv.compare", F.PASS, "configured matches presented")
                 if emit:
                     emit(f)

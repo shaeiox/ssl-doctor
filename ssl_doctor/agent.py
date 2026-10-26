@@ -110,10 +110,16 @@ def run_server_checks(host: str, port: int, sni: Optional[str],
                       timeout: float = 8.0) -> Dict[str, Any]:
     domain = sni or host
     sess = server.LocalSession(tls_host=domain, tls_port=port)
-    items = sess.overview() + sess.webserver_detection() + sess.nginx_scan(domain, port)
+    _dns, ips = netchecks.check_dns(host, timeout)
+    items = sess.overview() + sess.webserver_detection() + sess.nginx_scan(
+        domain, port, addresses=tuple(ips))
     _hs, hs_facts = netchecks.check_tls_basic(host, port, domain, timeout)
     presented = hs_facts["cert"].sha256 if hs_facts.get("cert") else ""
-    items.append(sess.compare_configured_vs_presented(presented))
+    chain = hs_facts.get("chain")
+    items.append(sess.compare_configured_vs_presented(
+        presented, presented_chain=[c.sha256 for c in chain] if chain else None,
+        presented_from=hs_facts.get("handshake_ip") or ""))
+    items.append(sess.inventory_finding(presented))
     items += sess.log_scan()
     # configured chains only: endpoint facts (leaf, chain_status) belong to client runs
     facts = {"certificates": sess.chain_facts} if sess.chain_facts else None

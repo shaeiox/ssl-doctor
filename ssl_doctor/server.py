@@ -201,13 +201,23 @@ def _nginx_name_matches(pattern: str, domain: str) -> Tuple[str, int]:
     return "", 0
 
 
+def _listen_address(arg: str) -> str:
+    """Explicit address of a listen value ('' for '443', '*:443', '[::]:443')."""
+    if ":" not in arg or arg.startswith("unix:"):
+        return ""
+    host = arg.rsplit(":", 1)[0].strip("[]")
+    return "" if host in ("*", "", "::", "0.0.0.0") else host
+
+
 def _match_nginx_server(blocks: List[Dict[str, List[List[str]]]], domain: str,
-                        port: int = 443):
+                        port: int = 443, addresses: Tuple[str, ...] = ()):
     """Server block nginx selects for `domain` on `port`.
 
-    Mirrors nginx: only blocks listening on the port; exact name (first
-    wins), longest leading wildcard, longest trailing wildcard, first
-    matching regex; else that port's default_server, else its first block.
+    Mirrors nginx: only blocks listening on the port - and, when the target's
+    `addresses` are known, only the blocks of the listen socket the connection
+    reaches (an explicit `addr:port` socket takes it over `*:port`); exact name
+    (first wins), longest leading wildcard, longest trailing wildcard, first
+    matching regex; else that socket's default_server, else its first block.
     Returns (candidate, how, notes) with candidate = (dirs, ports, name).
     """
     on_port = []
@@ -218,6 +228,24 @@ def _match_nginx_server(blocks: List[Dict[str, List[List[str]]]], domain: str,
     if not on_port:
         return None, f"no server block listens on port {port}", []
     notes: List[str] = []
+
+    def socket_addrs(dirs) -> set:
+        return {_listen_address(a[0]) for a in dirs.get("listen", [])
+                if a and a[0].rsplit(":", 1)[-1].strip("[]").split("/")[0] == str(port)}
+
+    wanted = {a for a in addresses if a}
+    specific = [(d, p) for d, p in on_port if socket_addrs(d) & wanted]
+    if specific:
+        on_port = specific
+        hit = sorted(set().union(*(socket_addrs(d) for d, _p in specific)) & wanted)
+        notes.append(f"listen address {', '.join(hit)}:{port} has its own socket: only "
+                     "its server blocks can answer")
+    elif wanted and any(socket_addrs(d) - {""} for d, _p in on_port):
+        wildcard = [(d, p) for d, p in on_port if "" in socket_addrs(d)]
+        if wildcard:
+            on_port = wildcard
+            notes.append(f"no listen socket for {', '.join(sorted(wanted))}:{port}; "
+                         f"the *:{port} server blocks answer")
     best: Dict[str, Tuple] = {}
     for dirs, ports in on_port:
         for n in (n for args in dirs.get("server_name", []) for n in args):
@@ -822,6 +850,8 @@ class ServerSession:
         self.last_configured_chain: List = []      # certificates of the last chain file read
         # facts.certificates entries ("configured:<path>") of the chain files read
         self.chain_facts: Dict[str, Dict] = {}
+        # what this scan read, so a comparison never uses an earlier command's file
+        self.scan_context: Dict = {"configured": [], "conclusive": True}
         self.nginx_cert_path: str = ""
         self.nginx_key_path: str = ""
         # nginx invocation for config dumps; override for non-default installs,
@@ -1213,6 +1243,7 @@ class ServerSession:
             elif ln and not ln.startswith("rc="):
                 ev.append(ln)
         self.last_remote_cert_sha256 = fp
+        self._record_configured(cert_path, fp, [])
         status, verdict, rec = self._judge_configured_cert(so, domain)
         _add(F.Finding(
             "srv.cert", f"Server certificate {cert_path}", status, F.SCOPE_SERVER,
@@ -1231,6 +1262,8 @@ class ServerSession:
             state, why = self.key_state(key_path)
             if state != certs.KEY_READABLE:
                 _add(self._pairing_not_tested(cert_path, key_path, state, why))
+                if state == certs.KEY_ENCRYPTED:
+                    _add(self._keystartup_finding(key_path))
                 return out
             cert_h, key_h, failed = self._pairing_digests(cert_path, key_path)
             if failed:
@@ -1259,6 +1292,46 @@ class ServerSession:
                                    "certificate was replaced.",
                     target=cert_path))
         return out
+
+    def _keystartup_finding(self, key_path: str) -> F.Finding:
+        """`srv.keystartup`: can the service unlock this encrypted key at startup?
+
+        Only the presence and access state of the passphrase file are checked;
+        its content is never read.
+        """
+        title = "Encrypted private key and service startup"
+        directive = getattr(self, "_password_file", None)
+        if directive is None:
+            return F.Finding("srv.keystartup", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                             [f"{key_path} is encrypted; the service configuration that "
+                              "uses it was not analysed in this command"],
+                             recommendation="Run /server nginx to check ssl_password_file.",
+                             target=key_path, failure_kind="key-encrypted")
+        if not directive:
+            return F.Finding("srv.keystartup", title, F.FAIL, F.SCOPE_SERVER,
+                             [f"{key_path} is encrypted",
+                              "nginx cannot load this encrypted key without "
+                              "ssl_password_file (nginx would ask for the passphrase on "
+                              "a terminal it does not have, and fail to start)"],
+                             recommendation="Add ssl_password_file to the server block, or "
+                                            "deploy an unencrypted key readable only by "
+                                            "root.", target=key_path)
+        value, resolved = directive
+        state = self.nginx_probe().file_states([resolved]).get(resolved, "unsupported") \
+            if resolved else "unsupported"
+        label = _PATH_STATE_LABELS.get(state, state)
+        if state == "readable" or state == "denied":
+            # root-only passphrase files are normal: nginx's master reads it as root
+            return F.Finding("srv.keystartup", title, F.PASS, F.SCOPE_SERVER,
+                             [f"{key_path} is encrypted",
+                              f"ssl_password_file {value} -> {resolved}: {label} "
+                              "(passphrase file configured; its content is not read)"],
+                             target=key_path)
+        return F.Finding("srv.keystartup", title, F.FAIL, F.SCOPE_SERVER,
+                         [f"{key_path} is encrypted",
+                          f"ssl_password_file {value} -> {resolved or '?'}: {label}"],
+                         recommendation="Point ssl_password_file at the passphrase file "
+                                        "nginx should use.", target=key_path)
 
     _PAIRING_NOT_TESTED = {
         "encrypted": ("key-encrypted",
@@ -1317,30 +1390,67 @@ class ServerSession:
         return cert_h, key_h, ""
 
     def file_permissions(self, paths: List[str]) -> List[F.Finding]:
+        """Permissions of `/server cert` arguments: the certificate, then its key."""
+        return self.permissions([(p, "certificate" if i == 0 else "key")
+                                 for i, p in enumerate(paths)])
+
+    def permissions(self, entries: List[Tuple[str, str]],
+                    reader: str = "") -> List[F.Finding]:
+        """`srv.perms` per (path, role): owner, group, mode - never the content.
+
+        The role comes from the directive, not the file name.  `reader` is the
+        account that loads the files (nginx's master); "" or root = not judged.
+        """
         if (err := self._need_conn()):
             return [err]
-        out: List[F.Finding] = []
         q = shlex.quote
-        for p in paths:
-            rc, so, se, fatal = self.run(
-                f"stat -c '%U %G %a %n' {q(p)} 2>&1 || echo MISSING")
+        groups: List[str] = []
+        if reader and reader != "root":
+            _rc, so, _se, fatal = self.run(f"id -Gn {q(reader)} 2>/dev/null")
+            groups = so.split() if not fatal else []
+        out: List[F.Finding] = []
+        for path, role in entries:
+            name = os.path.basename(path)
+            rc, so, se, fatal = self.run(f"stat -c '%U %G %a %F' -- {q(path)} 2>&1 "
+                                         "|| echo MISSING")
             line = so.strip().splitlines()[0] if so.strip() else ""
-            if fatal or not line or "MISSING" in line or rc != 0:
+            if fatal or not line or "MISSING" in so or rc != 0:
                 out.append(F.Finding(
-                    "srv.perms", f"Permissions on {os.path.basename(p)}", F.WARNING,
-                    F.SCOPE_SERVER, [line or se.strip() or "unreadable / missing"],
-                    target=p))
+                    "srv.perms", f"Permissions on {name}", F.NOT_TESTED, F.SCOPE_SERVER,
+                    [f"{path}: {line or se.strip() or fatal or 'unreadable / missing'}"],
+                    target=path, failure_kind="command-failed"))
                 continue
-            user, group, mode, name = (line.split() + ["", "", "", ""])[:4]
-            warn = p.lower().endswith((".key",)) and int(mode[-1]) > 0
+            user, group, mode = (line.split(" ", 3) + ["", "", ""])[:3]
+            try:
+                bits = int(mode, 8)
+            except ValueError:
+                bits = None
+            ev = [f"{path} ({role}): owner={user} group={group} mode={mode}"]
+            if bits is None:
+                out.append(F.Finding("srv.perms", f"Permissions on {name}", F.NOT_TESTED,
+                                     F.SCOPE_SERVER, ev + ["mode could not be read"],
+                                     target=path))
+                continue
+            problems, warnings = [], []
+            if role == "key" and bits & 0o004:
+                warnings.append("private key readable by other users")
+            if reader and reader != "root":
+                readable = ((user == reader and bits & 0o400)
+                            or (group in groups and bits & 0o040) or bits & 0o004)
+                if not readable:
+                    problems.append(f"service account {reader} cannot read {path}")
+                else:
+                    ev.append(f"readable by the service account {reader}")
+            status = F.FAIL if problems else F.WARNING if warnings else F.PASS
             out.append(F.Finding(
-                "srv.perms", f"Permissions on {os.path.basename(p)}",
-                F.WARNING if warn else F.PASS, F.SCOPE_SERVER,
-                [f"{name}: owner={user} group={group} mode={mode}"] +
-                (["private key is readable by 'other' users"] if warn else []),
-                recommendation="Restrict private keys: chmod 600/640 root:<service>."
-                if warn else "",
-                target=p))
+                "srv.perms", f"Permissions on {name}", status, F.SCOPE_SERVER,
+                ev + problems + warnings,
+                recommendation=("Make the file readable by the account the service runs "
+                                "as (owner or group), without opening it to others."
+                                if problems else
+                                "Restrict private keys: chmod 600/640 root:<service group>."
+                                if warnings else ""),
+                target=path))
         return out
 
     def tls_config_scan(self, emit: Optional[Callable[[F.Finding], None]] = None) -> List[F.Finding]:
@@ -1420,13 +1530,19 @@ class ServerSession:
         return [_f]
 
     def nginx_scan(self, domain: str, port: int = 443,
-                   emit: Optional[Callable[[F.Finding], None]] = None) -> List[F.Finding]:
+                   emit: Optional[Callable[[F.Finding], None]] = None,
+                   addresses: Tuple[str, ...] = ()) -> List[F.Finding]:
+        """nginx configuration analysis for `domain:port`; `addresses` (what the
+        domain resolves to) select the listen socket, as nginx does."""
         if (err := self._need_conn()):
             if emit is not None:
                 emit(err)
             return [err]
         self._nginx_domain = domain
         self._service_cas = None      # CA certificates of the block's CA files
+        self._password_file = None    # (value, resolved) | "" none configured | None unknown
+        self._service_user = ""
+        self.begin_scan()
         out: List[F.Finding] = []
         sources = ""
 
@@ -1436,6 +1552,11 @@ class ServerSession:
                 emit(f)
             return f
         d = self.discover_nginx()
+        # a mismatch is FAIL only against the running instance's configuration
+        # (or paths the operator saved); otherwise it is a qualified WARNING
+        self.scan_context["conclusive"] = bool(d.conclusive or self.nginx_settings.manual)
+        # nginx's master loads certificates and keys; non-root, its workers share it
+        self._service_user = d.master.user if d.master else ""
         conf = _nginx_conf_finding(d, self.cfg.username)
         _add(conf)
         if d.level == nginx_discovery.LEVEL_NONE:
@@ -1463,7 +1584,7 @@ class ServerSession:
                for path in d.discovered_only[:8]]],
             uncertainty=list(d.uncertainty) if not d.conclusive else []))
 
-        match, how, notes = _match_nginx_server(blocks, domain, port)
+        match, how, notes = _match_nginx_server(blocks, domain, port, tuple(addresses))
         if not match:
             if d.conclusive:
                 _add(F.Finding(
@@ -1486,6 +1607,7 @@ class ServerSession:
                     target=self.cfg.host))
             return self._certificate_checks(d, None, out, _add, emit)
         matched_dirs = match[0]
+        self._inventory_blocks(d, blocks, ssl_blocks, nodes, matched_dirs, domain)
         names = [n for a in matched_dirs.get("server_name", []) for n in a]
         # wildcard/regex matches are normal; only fallbacks and conflicts warn
         status = F.WARNING if "fallback" in how or notes else F.PASS
@@ -1555,7 +1677,9 @@ class ServerSession:
                  + (" (inherited from http{})" if "ssl_certificate" in inherited else ""),
                  f"ssl_certificate_key {key_paths[0] if key_paths else '(none)'}"
                  + (" (inherited from http{})" if "ssl_certificate_key" in inherited
-                    else "")],
+                    else "")]
+                + [f"ssl_certificate {c} / ssl_certificate_key {k or '(none)'}"
+                   for c, k in list(zip(cert_paths, key_paths + [""] * len(cert_paths)))[1:]],
                 target=self.cfg.host))
         if not cert_paths:
             _add(F.Finding(
@@ -1567,11 +1691,91 @@ class ServerSession:
                 target=self.cfg.host))
             self._ca_file_checks(d, matched_dirs, http_dirs, _add)
             return self._certificate_checks(d, None, out, _add, emit)
-        values = {"certificate": (cert_paths[0], "ssl_certificate" in inherited),
-                  "key": ((key_paths[0], "ssl_certificate_key" in inherited)
-                          if key_paths else None)}
+        cert_inh, key_inh = "ssl_certificate" in inherited, "ssl_certificate_key" in inherited
+        pairs = [{"certificate": (c, cert_inh),
+                  "key": (key_paths[i], key_inh) if i < len(key_paths) else None}
+                 for i, c in enumerate(cert_paths)]
+        mismatch = ""
+        if len(cert_paths) != len(key_paths) and max(len(cert_paths), len(key_paths)) > 1:
+            mismatch = (f"{len(cert_paths)} certificate{'s' if len(cert_paths) != 1 else ''} "
+                        f"but {len(key_paths)} key{'s' if len(key_paths) != 1 else ''} "
+                        "configured")
         self._ca_file_checks(d, matched_dirs, http_dirs, _add)
-        return self._certificate_checks(d, values, out, _add, emit)
+        pw = matched_dirs.get("ssl_password_file") or http_dirs.get("ssl_password_file")
+        if pw and pw[-1]:
+            resolved, _method, _problem = nginx_discovery.resolve_cert_path(
+                pw[-1][0], nginx_discovery.conf_prefix(d))
+            self._password_file = (pw[-1][0], resolved)
+        else:
+            self._password_file = ""
+        return self._certificate_checks(d, pairs[0], out, _add, emit,
+                                        extra_pairs=pairs[1:], mismatch=mismatch)
+
+    _INVENTORY_LIMIT = 20
+
+    def _inventory_blocks(self, d, blocks, ssl_blocks, nodes, selected, domain) -> None:
+        """Every TLS block's first certificate into scan_context["inventory"]."""
+        nd = nginx_discovery
+        http_dirs = _http_level_directives(nodes)
+        entries = []
+        for dirs in ssl_blocks[:self._INVENTORY_LIMIT]:
+            values = dirs.get("ssl_certificate") or http_dirs.get("ssl_certificate") or []
+            if not values or not values[0]:
+                continue
+            resolved, _m, _p = nd.resolve_cert_path(values[0][0], nd.conf_prefix(d))
+            entry = {"names": [n for a in dirs.get("server_name", []) for n in a],
+                     "listen": [" ".join(a) for a in dirs.get("listen", [])],
+                     "path": resolved or values[0][0], "selected": dirs is selected,
+                     "sha256": "", "subject": "", "covers": None}
+            data = None
+            if resolved and self.nginx_probe().file_states([resolved]).get(resolved) == "readable":
+                data, _why = self.read_public_file(resolved)
+            parsed = certs.parse_cert_bytes(data) if data else None
+            if parsed and parsed.certs:
+                leaf = parsed.certs[0]
+                entry.update(sha256=leaf.sha256, subject=leaf.subject,
+                             covers=leaf.hostname_match(domain)[0])
+            entries.append(entry)
+        self.scan_context["inventory"] = entries
+        self.scan_context["inventory_domain"] = domain
+        self.scan_context["inventory_truncated"] = len(ssl_blocks) > self._INVENTORY_LIMIT
+
+    def inventory_finding(self, presented_sha256: str = "") -> F.Finding:
+        """`srv.inventory`: every configured certificate, the served one flagged."""
+        title = "Certificates configured for the TLS service"
+        entries = self.scan_context.get("inventory")
+        if not entries:
+            return F.Finding("srv.inventory", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                             ["no TLS server block certificates were read in this scan"],
+                             target=self.cfg.host)
+        domain = self.scan_context.get("inventory_domain", "")
+        presented = presented_sha256.lower().replace(":", "")
+        ev, warnings = [], []
+        for e in entries:
+            flags = [f for f, on in (("selected", e["selected"]),
+                                     ("served", presented and e["sha256"] == presented),
+                                     (f"covers {domain}", e["covers"])) if on]
+            ev.append(f"server_name {' '.join(e['names']) or '(none)'} · listen "
+                      f"{' / '.join(e['listen']) or '-'} · {e['path']}"
+                      + (f" · {e['subject']} · sha256 {e['sha256'][:16]}…" if e["sha256"]
+                         else " · certificate not read")
+                      + (f" [{', '.join(flags)}]" if flags else ""))
+            if e["covers"] and not e["selected"] and not (presented and
+                                                          e["sha256"] == presented):
+                warnings.append(f"another server block ({' '.join(e['names']) or 'unnamed'}) "
+                                f"has a certificate covering {domain}: a different listener "
+                                "or SNI order could serve it")
+            if presented and e["sha256"] == presented and not e["selected"]:
+                warnings.append(f"the presented certificate belongs to server block "
+                                f"'{' '.join(e['names']) or '(none)'}', not the one selected "
+                                f"for {domain}")
+        if self.scan_context.get("inventory_truncated"):
+            ev.append(f"first {self._INVENTORY_LIMIT} TLS server blocks listed")
+        status = F.WARNING if warnings else F.PASS
+        return F.Finding("srv.inventory", title, status, F.SCOPE_SERVER, ev + warnings,
+                         recommendation="Check which server block should answer for this "
+                                        "name; remove or align the others."
+                         if warnings else "", target=self.cfg.host)
 
     _CA_DIRECTIVES = ("ssl_trusted_certificate", "ssl_client_certificate")
 
@@ -1609,15 +1813,9 @@ class ServerSession:
                 if parsed.ok and getattr(self, "_service_cas", None) is None:
                     self._service_cas = (parsed.certs, f"{name} {resolved}")
 
-    def _certificate_checks(self, d, values, out, _add, emit) -> List[F.Finding]:
-        """nginx.path_resolution, then validation of the files that could be opened.
-
-        `values` maps "certificate"/"key" to (configured value, inherited) from
-        the selected block, or is None when discovery gave none. In manual mode
-        the saved paths are validated and the automatic ones only compared.
-        """
+    def _resolve_values(self, d, values) -> Dict[str, Dict]:
+        """Automatic resolution of one {"certificate"/"key": (value, inherited)} pair."""
         nd = nginx_discovery
-        settings = self.nginx_settings
         directive = {"certificate": "ssl_certificate", "key": "ssl_certificate_key"}
         cprefix = nd.conf_prefix(d)
         auto: Dict[str, Dict] = {}
@@ -1633,6 +1831,20 @@ class ServerSession:
             auto[kind] = {"value": value, "resolved": resolved, "method": method,
                           "problem": problem, "alt": alt, "origin": "automatic discovery",
                           "source": nd.directive_source(d, directive[kind], value, inherited)}
+        return auto
+
+    def _certificate_checks(self, d, values, out, _add, emit, extra_pairs=(),
+                            mismatch: str = "") -> List[F.Finding]:
+        """nginx.path_resolution, then validation of the files that could be opened.
+
+        `values` maps "certificate"/"key" to (configured value, inherited) from
+        the selected block, or is None when discovery gave none. In manual mode
+        the saved paths are validated and the automatic ones only compared.
+        `extra_pairs` are further certificate/key pairs of the same block (an
+        RSA + ECDSA configuration); `mismatch` says the counts differ.
+        """
+        settings = self.nginx_settings
+        auto = self._resolve_values(d, values)
         chosen: Dict[str, Dict] = {}
         for kind, saved in (("certificate", settings.cert), ("key", settings.key)):
             if settings.manual and saved:
@@ -1642,13 +1854,50 @@ class ServerSession:
                                 "source": settings.origin or "saved manual setting"}
             elif kind in auto:
                 chosen[kind] = auto[kind]
-        if not chosen:
+        pairs = [(chosen, auto)] + [(a, a) for a in
+                                    (self._resolve_values(d, v) for v in extra_pairs) if a]
+        if not chosen and len(pairs) == 1:
             return out
-        paths = {r["resolved"] for r in chosen.values() if r["resolved"]}
-        paths |= {r["alt"] for r in chosen.values() if r["alt"]}
-        paths |= {r["resolved"] for r in auto.values() if r["resolved"]}
+        paths = set()
+        for c, a in pairs:
+            for r in list(c.values()) + list(a.values()):
+                paths |= {x for x in (r["resolved"], r["alt"]) if x}
         states = self.nginx_probe().file_states(sorted(paths)) if paths else {}
-        _add(self._path_resolution_finding(d, chosen, auto, states))
+        if len(pairs) == 1 and not mismatch:
+            _add(self._path_resolution_finding(d, chosen, auto, states))
+            return self._validate_pair(chosen, states, out, _add, emit)
+        _add(self._pairs_finding(d, pairs, states, mismatch))
+        for i, (c, _a) in enumerate(pairs, 1):
+            label = (f"certificate pair {i} of {len(pairs)}: "
+                     f"{(c.get('certificate') or {}).get('resolved') or '?'} + "
+                     f"{(c.get('key') or {}).get('resolved') or '(no key)'}")
+
+            def labelled(f, _label=label):
+                f.evidence.insert(0, _label)
+                _add(f)
+            self._validate_pair(c, states, out, labelled, None)
+        return out
+
+    def _pairs_finding(self, d, pairs, states, mismatch: str) -> F.Finding:
+        """One nginx.path_resolution listing every certificate/key pair."""
+        parts = [self._path_resolution_finding(d, c, a, states) for c, a in pairs]
+        rank = {F.PASS: 0, F.NOT_TESTED: 1, F.WARNING: 2, F.FAIL: 3}
+        worst = max(parts, key=lambda f: rank[f.status])
+        status = F.FAIL if mismatch else worst.status
+        ev = [mismatch] if mismatch else []
+        for i, f in enumerate(parts, 1):
+            ev.append(f"pair {i}:")
+            ev += [f"  {e}" for e in f.evidence]
+        return F.Finding("nginx.path_resolution", "Certificate and key file paths", status,
+                         F.SCOPE_SERVER, ev,
+                         recommendation=("Configure one ssl_certificate_key for every "
+                                         "ssl_certificate, in the same order."
+                                         if mismatch else worst.recommendation),
+                         uncertainty=[u for f in parts for u in f.uncertainty],
+                         target=self.cfg.host)
+
+    def _validate_pair(self, chosen, states, out, _add, emit) -> List[F.Finding]:
+        """Validate one resolved certificate/key pair whose files could be opened."""
         cert, key = chosen.get("certificate"), chosen.get("key")
         cert_state = states.get(cert["resolved"], "") if cert and cert["resolved"] else ""
         key_state = states.get(key["resolved"], "") if key and key["resolved"] else ""
@@ -1659,6 +1908,7 @@ class ServerSession:
             _add(self._chainfile_finding(cert_path))
             configured = self.last_configured_chain
             if configured:
+                self._record_configured(cert_path, "", [c.sha256 for c in configured])
                 _add(chainval.usage_finding(configured, F.SCOPE_SERVER, cert_path))
                 validity = certpolicy.chain_validity_finding(configured, F.SCOPE_SERVER,
                                                              cert_path)
@@ -1672,10 +1922,15 @@ class ServerSession:
                 self.chain_facts[f"configured:{cert_path}"] = chainval.certificates_fact(
                     configured, "configured", certs.load_root_anchors(), cert_path,
                     private=getattr(self, "_service_cas", None))
-            out.extend(self.scan_cert(cert_path, key_path, emit=emit,
-                                      domain=getattr(self, "_nginx_domain", None),
-                                      states={cert_path: cert_state,
-                                              **({key_path: key_state} if key_path else {})}))
+            for f in self.scan_cert(cert_path, key_path, emit=None,
+                                    domain=getattr(self, "_nginx_domain", None),
+                                    states={cert_path: cert_state,
+                                            **({key_path: key_state} if key_path else {})}):
+                _add(f)
+            reader = getattr(self, "_service_user", "")
+            for f in self.permissions([(cert_path, "certificate")]
+                                      + ([(key_path, "key")] if key_path else []), reader):
+                _add(f)
             self.nginx_cert_path, self.nginx_key_path = cert_path, key_path
             return out
         reason = ("certificate file could not be opened: "
@@ -1866,47 +2121,101 @@ class ServerSession:
                          recommendation=rec, target=cert_path, failure_kind=kind,
                          uncertainty=uncertainty)
 
+    def begin_scan(self, conclusive: bool = True) -> None:
+        """Start a new comparison context: only certificates read from now on count.
+
+        `conclusive` says the configuration being read is the running instance's,
+        which a FAIL comparison needs.
+        """
+        self.scan_context = {"configured": [], "conclusive": conclusive, "inventory": []}
+        self.last_remote_cert_sha256 = ""
+        self.chain_facts = {}
+        self._password_file = None        # unknown until a configuration is analysed
+
+    def _record_configured(self, path: str, leaf: str, chain: List[str]) -> None:
+        for entry in self.scan_context["configured"]:
+            if entry["path"] == path:
+                entry["leaf"] = leaf or entry["leaf"]
+                entry["chain"] = chain or entry["chain"]
+                return
+        self.scan_context["configured"].append({"path": path, "leaf": leaf, "chain": chain})
+
     def compare_configured_vs_presented(self, presented_sha256: str,
-                                       emit: Optional[Callable[[F.Finding], None]] = None
-                                       ) -> F.Finding:
-        """Compare network-presented cert fingerprint with the configured file."""
+                                        emit: Optional[Callable[[F.Finding], None]] = None,
+                                        presented_chain: Optional[List[str]] = None,
+                                        presented_from: str = "") -> F.Finding:
+        """Compare the presented leaf (and chain) with every configured certificate
+        read in this scan; a fingerprint from an earlier command never counts."""
+        def done(f: F.Finding) -> F.Finding:
+            if emit is not None:
+                emit(f)
+            return f
+        title = "Configured vs presented certificate"
         if (err := self._need_conn()):
-            if emit is not None:
-                emit(err)
-            return err
-        if not self.last_remote_cert_sha256:
-            _f = F.Finding(
-                "srv.compare", "Configured vs presented certificate", F.NOT_TESTED,
-                F.SCOPE_SERVER,
-                ["no server certificate scanned yet - run /server cert <path> first"])
-            if emit is not None:
-                emit(_f)
-            return _f
+            return done(err)
+        configured = [e for e in self.scan_context["configured"] if e["leaf"]]
+        if not configured:
+            return done(F.Finding(
+                "srv.compare", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                ["configured certificate not read in this scan - run /server cert "
+                 "<path> or /server nginx first"]))
         if not presented_sha256:
-            _f = F.Finding(
-                "srv.compare", "Configured vs presented certificate", F.NOT_TESTED,
-                F.SCOPE_SERVER,
-                ["no network TLS check has run yet - run /tls <host> [port] first"])
-            if emit is not None:
-                emit(_f)
-            return _f
-        same = self.last_remote_cert_sha256 == presented_sha256.lower().replace(":", "")
-        _f = F.Finding(
-            "srv.compare", "Configured vs presented certificate",
-            F.PASS if same else F.FAIL, F.SCOPE_SERVER,
-            ([f"the certificate file on the server matches what clients receive",
-              f"sha256: {self.last_remote_cert_sha256}"]
-             if same else
-             [f"configured file sha256: {self.last_remote_cert_sha256}",
-              f"network-presented sha256: {presented_sha256}",
-              "the server is NOT serving the certificate found in its configuration"]),
-            recommendation="" if same else
-            "Possible causes: the service was not reloaded after a cert change, a "
-            "different vhost/SNI answers, or a load balancer terminates TLS elsewhere.",
-            target=self.cfg.host)
-        if emit is not None:
-            emit(_f)
-        return _f
+            return done(F.Finding(
+                "srv.compare", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                ["no network TLS check has run yet - run /tls <host> [port] first"]))
+        presented = presented_sha256.lower().replace(":", "")
+        vantage = [f"presented chain captured from {presented_from}"] if presented_from else []
+        match = next((e for e in configured if e["leaf"] == presented), None)
+        if match:
+            ev = [f"the server presents the certificate of {match['path']}",
+                  f"sha256: {presented}", *vantage]
+            if len(configured) > 1:
+                ev.append(f"{len(configured)} certificates are configured for this block; "
+                          "clients that negotiate another key type get another one")
+            diff = _chain_difference(match["chain"], presented_chain or [])
+            if diff:
+                return done(F.Finding(
+                    "srv.compare", title, F.WARNING, F.SCOPE_SERVER, ev + [diff],
+                    recommendation="The running service sends a different chain than the "
+                                   "configured file: reload it after changing the file, "
+                                   "or check what terminates TLS in front of it.",
+                    target=self.cfg.host))
+            return done(F.Finding("srv.compare", title, F.PASS, F.SCOPE_SERVER, ev,
+                                  target=self.cfg.host))
+        ev = [f"configured: {e['path']} sha256 {e['leaf']}" for e in configured]
+        ev += [f"network-presented sha256: {presented}", *vantage,
+               "the server is NOT serving any certificate found in its configuration"]
+        rec = ("Possible causes: the service was not reloaded after a cert change, a "
+               "different vhost/SNI answers, or a load balancer terminates TLS elsewhere.")
+        if self.scan_context.get("conclusive", True):
+            return done(F.Finding("srv.compare", title, F.FAIL, F.SCOPE_SERVER, ev,
+                                  recommendation=rec, target=self.cfg.host))
+        return done(F.Finding(
+            "srv.compare", title, F.WARNING, F.SCOPE_SERVER, ev, recommendation=rec,
+            uncertainty=["the configuration read is not confirmed as the running "
+                         "instance's, so the mismatch may come from another configuration"],
+            target=self.cfg.host))
+
+
+def _chain_difference(configured: List[str], presented: List[str]) -> str:
+    """First difference between the configured file's and the presented chain's
+    fingerprints, as an evidence line ('' when equal or unknown)."""
+    if not configured or not presented:
+        return ""
+    for i in range(max(len(configured), len(presented))):
+        c = configured[i] if i < len(configured) else ""
+        p = presented[i] if i < len(presented) else ""
+        if c == p:
+            continue
+        pos = i + 1
+        if not p:
+            return (f"position {pos} differs: configured {c[:16]}… is not presented "
+                    "(missing)")
+        if not c:
+            return (f"position {pos} differs: presented {p[:16]}… is not in the "
+                    "configured file (added)")
+        return f"position {pos} differs: configured {c[:16]}…, presented {p[:16]}… (replaced)"
+    return ""
 
 
 # ---------------------------------------------------------------- local session

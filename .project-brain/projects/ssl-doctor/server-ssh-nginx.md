@@ -4,8 +4,8 @@ topic: server-ssh-nginx
 tags: [ssh, nginx, apache, vhost, config, hostkeys, permissions]
 status: done
 trust: human
-last_done: 2026-10-25
-version: 4
+last_done: 2026-10-26
+version: 5
 ---
 
 **Problem:** Diagnose server-side TLS config via read-only SSH without sudo/config edits.
@@ -31,3 +31,13 @@ version: 4
 
 **v4 (cert path resolution, trust: ai-inferred; openspec `nginx-cert-path-resolution`):** relative `ssl_certificate`/`ssl_certificate_key` resolve against nginx's **conf_prefix = dirname(main config)** (nginx 1.26.2 `ngx_event_openssl.c:667,805`, `nginx.c:1060-1068`), NOT the `-p` prefix — `-p /opt/pvm/nginx/ -c conf/nginx.conf` + `ssl/fullchain.pem` → `/opt/pvm/nginx/conf/ssl/fullchain.pem` (the request had assumed `/opt/pvm/nginx/ssl/…`; that holds only if nginx.conf sits at the prefix root). Prefix-relative file is reported as "nginx would not open". `nginx_discovery.resolve_cert_path/conf_prefix/directive_source`; `ServerSession._certificate_checks` → `nginx.path_resolution` (contract 1.6) then chainfile/srv.cert/srv.keymatch only on `file_states == readable`; `scan_cert(states=)` checks access first. `NginxSettings` on the session (manual paths validated, auto only compared; `conf`/`prefix` overrides → `discover(conf_override, prefix_override)`; `set_nginx_settings` clears the discovery cache). Fixtures: `NginxHost.file_states`, `HostSession` answers `openssl x509` for PEM files; `FakeSession` file states from the local FS. Tests: `tests/test_nginx_cert_paths.py`, `tests/test_server_config_cmd.py`.
 
+
+**v5 (complete-certificate-diagnostics P5, trust: ai-inferred):**
+- Every `ssl_certificate`/`_key` pair of the selected block is resolved and validated. `_certificate_checks(..., extra_pairs, mismatch)` → one `nginx.path_resolution` ("pair N:") and per-pair findings labelled "certificate pair N of M"; a count mismatch is FAIL. Single-pair wording is unchanged. `_validate_pair` is the per-pair half.
+- `_match_nginx_server(..., addresses)`: an explicit `addr:port` listen socket owns connections to that address, otherwise `*:port` (nginx semantics). CLI passes the measured IPs (`_target_addresses`); the agent resolves them.
+- Per-scan context: `begin_scan()` (called by `nginx_scan` and `/server cert`) resets `scan_context`, `chain_facts`, `_password_file`. `srv.compare` matches the presented leaf against every configured leaf of this scan and compares the full chain (`_chain_difference`: missing / added / replaced). FAIL only when the configuration is conclusive (or manual), else WARNING with uncertainty. The stale `last_remote_cert_sha256` is no longer used for compare.
+- `permissions(entries, reader)`: role from the directive; key o+r → WARNING; unreadable for the nginx master's account (`d.master.user`; root = not judged) → FAIL. Runs in `_validate_pair`, so it is part of `/scan` and the agent. Gotcha: nginx's master (not the workers) loads certs/keys.
+- `srv.keystartup`: encrypted key → `ssl_password_file` (block or http) state-checked only.
+- `srv.inventory` (`inventory_finding(presented)`, ≤ 20 blocks) flags selected / served / covers.
+- `analyze`: causes for path FAIL, keystartup FAIL, perms FAIL (confirmed only with a confirmed configuration), a compare chain difference (not reloaded), and an inventory warning (possible).
+- `docs/command-used.md` lists the exact certificate/key commands.

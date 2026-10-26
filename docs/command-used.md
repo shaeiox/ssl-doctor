@@ -109,10 +109,15 @@ incomplete, `local.rootca` reports `NOT TESTED` instead of blaming the client.
 /cert inspect server.crt
 /cert inspect chain.pem example.com
 /cert match server.crt server.key
+/cert cafile roots.pem
 ```
 
-- `inspect` parses PEM/DER certificates or a chain file (dates, SANs,
-  fingerprints, chain order).
+- `inspect` parses a certificate or chain file strictly by content (PEM, DER;
+  PKCS#7, PKCS#12, keys and CSRs are named). It lists every certificate with
+  its role, verifies each link's signature with `openssl verify`, and reports
+  dates, key usages, key and signature policy and the trust class.
+- `/cert cafile <file>` checks a root / CA bundle: only CA certificates that
+  their own key signed count as roots.
 - `match` proves a key belongs to a certificate using a digest comparison;
   private key material is never printed.
 
@@ -153,6 +158,25 @@ non-writable executable), and then the `include` graph of the main file
 none of that names a configuration. `nginx.conf` states the evidence level
 (runtime-verified / runtime-associated / candidate / none). Nothing is
 reloaded, restarted or written.
+
+For the certificate and key files the configuration names, SSL Doctor runs
+only these read-only commands on the server. It handles every
+`ssl_certificate` / `ssl_certificate_key` pair, so an RSA + ECDSA block gives
+two pairs, and it includes CA files from `ssl_trusted_certificate` /
+`ssl_client_certificate`:
+
+| Purpose | Command (paths quoted) |
+|---|---|
+| file state (exists / readable / not a file / unreachable) | `for p in …; do [ -f "$p" ] && [ -r "$p" ] …; done` |
+| certificate bytes (public files only; at most 1 MiB) | `head -c 1048576 -- <cert> \| base64` (fallback `cat <cert>`) |
+| certificate details | `openssl x509 -noout -subject -issuer -dates -serial -fingerprint -sha256 -ext subjectAltName -in <cert>` |
+| key state (prints one token: readable / encrypted / unreadable / …) | `head -c 4096 <key> \| grep -q …`, `openssl asn1parse -inform DER -in <key> \| head -n 4 \| grep -q …`, `openssl pkey -in <key> -passin pass: -noout` |
+| key pairing (public-key digests only) | `openssl x509 -noout -pubkey -in <cert> \| openssl pkey -pubin -outform DER \| sha256sum` and `openssl pkey -in <key> -passin pass: -pubout -outform DER \| sha256sum`, each step reporting its own failure |
+| ownership and mode | `stat -c '%U %G %a %F' -- <file>`, and `id -Gn <account>` for the nginx master's account |
+
+Signatures, chains and policy are then judged on this machine from the
+certificate bytes; key bytes never leave the server. A passphrase file
+(`ssl_password_file`) is only state-checked (exists / readable), never read.
 
 Host keys are checked against `~/.ssl-doctor/known_hosts`: unknown keys require
 an explicit `yes`, and changed keys are refused (possible MITM). Keys are read

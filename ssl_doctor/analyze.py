@@ -527,6 +527,46 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
             "The certificate actually served over the network differs from the "
             "certificate file configured on the server",
             cmp_srv.evidence, cmp_srv.recommendation, explains=("srv.compare",))
+    # ---- server deployment (paths, permissions, startup, served chain) --------
+    # Gated like every nginx-derived cause: confirmed only for the running
+    # instance's configuration, capped at probable otherwise.
+    gate = "confirmed" if nginx_confirmed else "probable"
+    gate_note = ([] if nginx_confirmed else
+                 ["the configuration analysed is not confirmed as the running "
+                  "instance's"])
+    path_fail = _first(server, "nginx.path_resolution")
+    if path_fail and path_fail.status == F.FAIL:
+        missing = next((e.strip() for e in path_fail.evidence
+                        if e.strip().startswith(("resolved:", "certificate:", "key:"))
+                        or "configured" in e), path_fail.evidence[0])
+        add(gate, "server",
+            "A certificate or key file the nginx configuration names cannot be used - "
+            + missing, path_fail.evidence, path_fail.recommendation,
+            limitations=gate_note, explains=("nginx.path_resolution",))
+    startup = _first(server, "srv.keystartup")
+    if startup and startup.status == F.FAIL:
+        add(gate, "server",
+            "nginx cannot start with the configured encrypted private key - no usable "
+            "ssl_password_file", startup.evidence, startup.recommendation,
+            limitations=gate_note, explains=("srv.keystartup",))
+    perms_fail = [f for f in _by_check(server, "srv.perms") if f.status == F.FAIL]
+    if perms_fail:
+        add(gate, "server",
+            "The account the TLS service runs as cannot read its certificate or key",
+            [e for f in perms_fail for e in f.evidence], perms_fail[0].recommendation,
+            limitations=gate_note, explains=("srv.perms",))
+    if cmp_srv and cmp_srv.status == F.WARNING and any(
+            "differs" in e for e in cmp_srv.evidence):
+        add("probable", "server",
+            "The running service sends a different chain than its configured file - "
+            "it was probably not reloaded after the file changed",
+            cmp_srv.evidence, cmp_srv.recommendation, explains=("srv.compare",))
+    inventory = _first(server, "srv.inventory")
+    if inventory and inventory.status == F.WARNING:
+        add("possible", "server",
+            "Another configured certificate could answer for this name",
+            inventory.evidence, inventory.recommendation, bump=40,
+            explains=("srv.inventory",))
     if keymatch_srv and keymatch_srv.status == F.FAIL:
         add("confirmed", "server",
             "The configured private key does not match the certificate on the "

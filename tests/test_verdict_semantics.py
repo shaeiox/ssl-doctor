@@ -79,7 +79,10 @@ class VerdictTable(unittest.TestCase):
         missing = finding("nginx.path_resolution", F.FAIL,
                           "certificate: /etc/nginx/ssl/site.pem", "  missing",
                           scope=F.SCOPE_SERVER)
-        self.check([HANDSHAKE, missing], F.FAIL, unexplained=["nginx.path_resolution"])
+        # since P5 a confirmed server cause names it (it was unexplained in P0)
+        d = self.check([HANDSHAKE, missing], F.FAIL)
+        self.assertTrue(any("cannot be used" in c.summary and c.certainty == "confirmed"
+                            for c in d.causes))
 
     def test_unexplained_warning_gives_warning(self):
         soon = finding("tls.certvalid", F.WARNING, "certificate expires in 12 days")

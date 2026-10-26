@@ -58,6 +58,7 @@ sample this openssl cannot build skips the calling test with the reason):
     sha1-int-chain.pem   leaf + the intermediate re-signed by the root with SHA-1
     sha1-root.pem        a self-signed root whose own signature is SHA-1
     lookalike-chain.pem  leaf + a self-signed root *named* like a public CA
+    ecdsa-chain.pem  a P-256 leaf for shop.test (key ecdsa_leaf.key) + intermediate
 """
 
 from __future__ import annotations
@@ -481,6 +482,19 @@ def _lookalike_chain(pki: "PKI", out: str) -> None:
     _cat(lambda p: _read(leaf), lambda p: _read(p.path("lookalike_root.pem")))(pki, out)
 
 
+def _ecdsa_chain(pki: "PKI", out: str) -> None:
+    d = pki.dir
+    _run("req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+         "-keyout", "ecdsa_leaf.key", "-out", "ecdsa_leaf.csr", "-subj", f"/CN={HOSTNAME}",
+         cwd=d)
+    with open(os.path.join(d, "ecdsa_leaf.ext"), "w") as fh:
+        fh.write(_leaf_ext())
+    _run("x509", "-req", "-in", "ecdsa_leaf.csr", "-CA", "int.pem", "-CAkey", "int.key",
+         "-CAcreateserial", "-out", "ecdsa_leaf.pem", "-days", "30",
+         "-extfile", "ecdsa_leaf.ext", cwd=d)
+    _cat(lambda p: _read(p.path("ecdsa_leaf.pem")), _file("intermediate"))(pki, out)
+
+
 _SAMPLES = {
     "truncated.pem": _cat(_file("leaf"), _truncated_int),
     "corrupt.pem": _cat(_file("leaf"), _corrupt_int, _file("root")),
@@ -523,6 +537,7 @@ _SAMPLES = {
     "sha1-int-chain.pem": _sha1_int_chain,
     "sha1-root.pem": _sha1_root,
     "lookalike-chain.pem": _lookalike_chain,
+    "ecdsa-chain.pem": _ecdsa_chain,
 }
 
 

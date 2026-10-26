@@ -26,7 +26,7 @@ import textwrap
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from . import APP_NAME, __version__
 from . import findings as F
@@ -1517,18 +1517,30 @@ class SSLDoctorCLI:
 
         with self._results(f"examining nginx SSL configuration for "
                            f"'{domain}:{port}'") as phase:
-            items = phase.done(srv.nginx_scan(domain, port, emit=phase.add))
+            items = phase.done(srv.nginx_scan(domain, port, emit=phase.add,
+                                              addresses=self._target_addresses(domain)))
         self.store.extend(items)
 
-        presented = ""
-        cert = self.remote_facts.get("cert")
-        if cert:
-            presented = cert.sha256
         with self._results("comparing configured and presented certificates, "
                            "scanning TLS service logs (read-only)") as phase:
-            items = phase.done([srv.compare_configured_vs_presented(
-                presented, emit=phase.add)] + srv.log_scan(emit=phase.add))
+            compare = srv.compare_configured_vs_presented(emit=phase.add, **self._presented())
+            inventory = srv.inventory_finding(self._presented()["presented_sha256"])
+            phase.add(inventory)
+            items = phase.done([compare, inventory] + srv.log_scan(emit=phase.add))
         self.store.extend(items)
+
+    def _presented(self) -> Dict:
+        """What the last network check saw, for srv.compare."""
+        cert, chain = self.remote_facts.get("cert"), self.remote_facts.get("chain")
+        return {"presented_sha256": cert.sha256 if cert else "",
+                "presented_chain": [c.sha256 for c in chain] if chain else None,
+                "presented_from": self.remote_facts.get("handshake_ip") or ""}
+
+    def _target_addresses(self, domain: str) -> Tuple[str, ...]:
+        """Addresses the scanned name resolved to, when the session measured it."""
+        if (self.remote_facts.get("host") or "").lower() == domain.lower():
+            return tuple(self.remote_facts.get("ips") or ())
+        return ()
 
     # ---------------- /server ----------------
     def cmd_server(self, args: List[str]) -> None:
@@ -1578,7 +1590,8 @@ class SSLDoctorCLI:
                     port = srv.cfg.tls_port      # bare domain: session's TLS port
             with self._results(f"examining nginx SSL configuration for "
                                f"'{domain}:{port}'") as phase:
-                items = phase.done(srv.nginx_scan(domain, port, emit=phase.add))
+                items = phase.done(srv.nginx_scan(domain, port, emit=phase.add,
+                                                  addresses=self._target_addresses(domain)))
         elif sub == "cert":
             if len(args) < 2:
                 self.error("usage: /server cert <remote-cert-path> [remote-key-path]")
@@ -1587,6 +1600,7 @@ class SSLDoctorCLI:
             key_path = args[2] if len(args) > 2 else ""
             self.note("key material stays on the server; only digests are compared")
             paths = [cert_path] + ([key_path] if key_path else [])
+            srv.begin_scan()          # /server compare then uses this file only
             with self._results(f"inspecting {cert_path} on the server") as phase:
                 items = phase.done(srv.scan_cert(cert_path, key_path, emit=phase.add)
                                    + srv.file_permissions(paths))
@@ -1597,14 +1611,10 @@ class SSLDoctorCLI:
             with self._results("scanning service logs (read-only)") as phase:
                 items = phase.done(srv.log_scan(emit=phase.add))
         elif sub == "compare":
-            presented = ""
-            cert = self.remote_facts.get("cert")
-            if cert:
-                presented = cert.sha256
             with self._results("comparing configured and presented "
                                "certificates") as phase:
                 items = phase.done([srv.compare_configured_vs_presented(
-                    presented, emit=phase.add)])
+                    emit=phase.add, **self._presented())])
         else:
             self.error("usage: /server connect|status|overview|nginx [domain]|cert|"
                        "config|logs|compare|disconnect")

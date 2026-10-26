@@ -58,14 +58,14 @@
 
 ## 6. P5: Server certificate deployment
 
-- [ ] 6.1 Per-scan configured-fingerprint context (design D6, O2); verify `test_regression_o2_stale_compare`
-- [ ] 6.2 Multiple nginx certificate/key pairs (NCP "every pair", SCD #38, O1) and listen-address block selection; verify the dual RSA/ECDSA fixture, the count-mismatch FAIL and the address-specific listen test
-- [ ] 6.3 `srv.compare` against every configured leaf, plus full-chain comparison (SCD #35, #27); verify the ECDSA-served PASS, the no-match FAIL and the configured-B-vs-presented-A difference
-- [ ] 6.4 Role-based permissions in `/scan`, the server agent and `/server cert`, with a worker-account readability check (SCD #34, O5); verify the 0644 `.pem` key WARNING, the www-data-unreadable FAIL, the presence in `/scan` and a non-root CI job
-- [ ] 6.5 `srv.keystartup` (SCD #39); verify the encrypted key with and without `ssl_password_file`, and that passphrase-file content is never read (command audit)
-- [ ] 6.6 `srv.inventory` (SCD #44); verify the second-block-covers-domain and served-from-default_server fixtures
-- [ ] 6.7 Path-resolution FAIL reaches the verdict (NCP "path-resolution failures reach the overall verdict", SCD #33); verify the missing certificate in a verified configuration → overall FAIL
-- [ ] 6.8 Update the brain topic `server-ssh-nginx` and the commands reference; verify the documented commands match the executed commands list
+- [x] 6.1 Per-scan configured-fingerprint context (design D6, O2); verify `test_regression_o2_stale_compare`
+- [x] 6.2 Multiple nginx certificate/key pairs (NCP "every pair", SCD #38, O1) and listen-address block selection; verify the dual RSA/ECDSA fixture, the count-mismatch FAIL and the address-specific listen test
+- [x] 6.3 `srv.compare` against every configured leaf, plus full-chain comparison (SCD #35, #27); verify the ECDSA-served PASS, the no-match FAIL and the configured-B-vs-presented-A difference
+- [x] 6.4 Role-based permissions in `/scan`, the server agent and `/server cert`, with a worker-account readability check (SCD #34, O5); verify the 0644 `.pem` key WARNING, the www-data-unreadable FAIL, the presence in `/scan` and a non-root CI job
+- [x] 6.5 `srv.keystartup` (SCD #39); verify the encrypted key with and without `ssl_password_file`, and that passphrase-file content is never read (command audit)
+- [x] 6.6 `srv.inventory` (SCD #44); verify the second-block-covers-domain and served-from-default_server fixtures
+- [x] 6.7 Path-resolution FAIL reaches the verdict (NCP "path-resolution failures reach the overall verdict", SCD #33); verify the missing certificate in a verified configuration → overall FAIL
+- [x] 6.8 Update the brain topic `server-ssh-nginx` and the commands reference; verify the documented commands match the executed commands list
 
 ## 7. P6: Service discovery and runtime state
 

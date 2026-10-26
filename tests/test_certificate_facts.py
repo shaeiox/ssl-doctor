@@ -78,7 +78,7 @@ class CertificateFacts(unittest.TestCase):
         from ssl_doctor import agent, server
         p = get_pki()
         with mock.patch.object(server.LocalSession, "nginx_scan",
-                                        lambda self, domain, port=443:
+                                        lambda self, domain, port=443, **_kw:
                                         FakeSession(f"""http {{ server {{ listen 443 ssl;
             server_name shop.test; ssl_certificate {p.fullchain};
             ssl_certificate_key {p.leaf_key}; }} }}""").nginx_scan(domain)), \
@@ -168,8 +168,8 @@ class ValidationCauses(unittest.TestCase):
 class ReportsShowUnexplained(unittest.TestCase):
 
     ITEMS = [F.Finding("tls.handshake", "TLS handshake", F.PASS, F.SCOPE_REMOTE_NET, ["ok"]),
-             F.Finding("nginx.path_resolution", "Certificate and key file paths", F.FAIL,
-                       F.SCOPE_SERVER, ["certificate: /etc/nginx/site.pem", "missing"])]
+             F.Finding("cert.parse", "Parse certificate file site.pem", F.FAIL,
+                       F.SCOPE_LOCAL, ["block 2 is not terminated"])]
 
     def test_html_lists_unexplained_findings(self):
         d = diagnose(self.ITEMS)
@@ -177,14 +177,14 @@ class ReportsShowUnexplained(unittest.TestCase):
         report.write_html(path, self.ITEMS, d, {"tool": "t"})
         with open(path, encoding="utf-8") as fh:
             page = fh.read()
-        self.assertIn("[UNEXPLAINED · nginx.path_resolution · FAIL]", page)
+        self.assertIn("[UNEXPLAINED · cert.parse · FAIL]", page)
 
     def test_agent_markdown_lists_unexplained_findings(self):
         d = diagnose(self.ITEMS)
         payload = report.build_payload(self.ITEMS, d, {"tool": "t"})
         md = report.agent_markdown(payload)
         self.assertIn("### 5.8 Unexplained findings", md)
-        self.assertIn("FAIL · `nginx.path_resolution`", md)
+        self.assertIn("FAIL · `cert.parse`", md)
         self.assertIn("unexplained findings: 1", md)
         self.assertNotIn("derived from causes only", md)
 

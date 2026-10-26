@@ -42,6 +42,38 @@ validating).
   says validation was inconclusive. A TLS-level rejection stays FAIL. Both
   validations now connect to the address the TCP check verified, and name it.
 
+### Fixed (phase 5: server certificate deployment)
+
+- **The configured-vs-served comparison no longer uses a stale file.** A
+  fingerprint from an earlier `/server cert` was compared after a later scan
+  that could not read its certificate. Each scan now starts a fresh context,
+  and the comparison is NOT TESTED when this scan read nothing.
+- **RSA + ECDSA configurations.** Every `ssl_certificate` / `ssl_certificate_key`
+  pair of the selected block is resolved, validated and paired, and a count
+  mismatch is a FAIL. `srv.compare` matches the served certificate against
+  each pair, so an ECDSA certificate served from a dual block is no longer a
+  mismatch.
+- The server block is selected by listen address as well as name, as nginx
+  does for `listen 10.0.0.5:443` next to `listen 443`.
+
+### Added (phase 5)
+
+- `srv.compare` also compares the full served chain with the configured file
+  and names the first differing position (missing / added / replaced). A
+  mismatch is FAIL only against the running instance's configuration.
+- `srv.perms` runs in every nginx scan (and so in `/scan` and the server
+  agent), judged by role: a private key readable by other users warns, and a
+  file the nginx master's account cannot read fails. Only `stat` and `id` are
+  run.
+- `srv.keystartup`: an encrypted key without a usable `ssl_password_file` is a
+  FAIL (nginx could not start). The passphrase file is state-checked, never
+  read.
+- `srv.inventory`: every TLS server block's certificate, with the selected and
+  served ones flagged, and other blocks that also cover the domain.
+- Causes for a missing configured file, an unstartable encrypted key,
+  unreadable files, a served chain that differs from the file, and an
+  alternative certificate.
+
 ### Added (phase 4: structured facts, causes, reports)
 
 - `facts.certificates` is filled for the presented chain (`presented`), every
