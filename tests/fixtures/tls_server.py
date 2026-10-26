@@ -30,12 +30,14 @@ def _free_port() -> int:
 class TLSServer:
     """Context manager: `with TLSServer(pki, "leaf-only") as srv: srv.port`."""
 
-    def __init__(self, pki: PKI, mode: str, chain: str = "") -> None:
+    def __init__(self, pki: PKI, mode: str, chain: str = "", status_file: str = "") -> None:
         """`chain`: a PEM file of extra certificates to send after the leaf,
-        replacing the mode's intermediates."""
+        replacing the mode's intermediates.  `status_file`: a DER OCSP
+        response the server staples."""
         if mode not in MODES:
             raise ValueError(f"unknown mode {mode!r}")
         self.pki, self.mode, self.chain = pki, mode, chain
+        self.status_file = status_file
         self.host = "127.0.0.1"
         self.port = 0
         self._proc = None
@@ -58,6 +60,8 @@ class TLSServer:
         chain = self.chain or chain
         if chain:
             argv += ["-cert_chain", chain]
+        if self.status_file:
+            argv += ["-status_file", self.status_file]
         return argv
 
     def __enter__(self) -> "TLSServer":

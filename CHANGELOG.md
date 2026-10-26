@@ -42,6 +42,25 @@ validating).
   says validation was inconclusive. A TLS-level rejection stays FAIL. Both
   validations now connect to the address the TCP check verified, and name it.
 
+### Added (phase 7: revocation, IPv4/IPv6)
+
+- `tls.revocation`: the OCSP response the server staples is fetched (a
+  dedicated `openssl s_client -status` handshake to the verified address, since
+  Python's ssl module cannot request stapling). It is validated with
+  `openssl ocsp`: the signature must verify against the issuer, the response
+  must name this certificate, and it must be within its time window. States are
+  `good`, `revoked`, `unavailable`, `not-checked` and `inconclusive`, with
+  their source. A revoked certificate is a confirmed cause and opens the
+  service's `revoked` alert. An invalid stapled response is a server warning.
+- `--revocation=staple|online|off` (default `staple`) and the agent job
+  option `options.revocation`. `online` asks the CA's OCSP responder, then the
+  CRL, for the leaf and each intermediate (privacy note in the README).
+- Endpoint comparison probes both address families when DNS publishes both,
+  alternating within the cap of 4. Each endpoint is labelled `ipv4` / `ipv6`,
+  and the evidence names a difference between the families, or a family that
+  is unreachable from this network (never a certificate difference).
+  `facts.endpoints[].family` is part of contract 1.7.
+
 ### Added (phase 6: service discovery and runtime state)
 
 - `srv.service`: the process listening on the TLS port, from `ss` / `netstat`.

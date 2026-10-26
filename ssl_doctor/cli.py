@@ -32,7 +32,7 @@ from . import APP_NAME, __version__
 from . import findings as F
 from . import textcells
 from .analyze import diagnose
-from . import certpolicy
+from . import certpolicy, revocation
 from . import certs as certmod
 from . import chainval
 from . import local as localmod
@@ -2715,6 +2715,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"ssl-doctor: --expiry-warn-days: {exc}", file=sys.stderr)
                 return 2
             i += 2
+        elif argv[i].startswith("--revocation"):
+            value = argv[i].split("=", 1)[1] if "=" in argv[i] else \
+                (argv[i + 1] if i + 1 < len(argv) else "")
+            try:
+                revocation.set_mode(value)
+            except ValueError as exc:
+                print(f"ssl-doctor: --revocation: {exc}", file=sys.stderr)
+                return 2
+            i += 1 if "=" in argv[i] else 2
         elif argv[i] == "--no-remember":
             cli.no_remember = True
             i += 1

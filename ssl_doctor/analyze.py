@@ -366,6 +366,16 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
             "The certificate file configured on the server is unusable for this domain - "
             + "; ".join(judged), srv_cert.evidence, srv_cert.recommendation,
             explains=("srv.cert",))
+    revoked = _first(remote, "tls.revocation")
+    if revoked and revoked.status == F.FAIL:
+        add("confirmed", "certificate", "A presented certificate is revoked - "
+            + (revoked.evidence[1] if len(revoked.evidence) > 1 else revoked.evidence[0]),
+            revoked.evidence, revoked.recommendation, explains=("tls.revocation",))
+    elif revoked and revoked.status == F.WARNING:
+        add("probable", "server",
+            "The server staples an OCSP response that is not valid for its certificate",
+            revoked.evidence, revoked.recommendation, bump=30,
+            explains=("tls.revocation",))
     policy = [f for f in _by_check(items, "cert.policy") if f.status == F.FAIL]
     if policy:
         f = policy[-1]

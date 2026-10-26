@@ -341,6 +341,8 @@ SCHEMA: Dict[str, Any] = {
                         "detail": {"type": "string"},
                         "sha256": {"type": "string"},
                         "sni": {"type": ["string", "null"]},
+                        # 1.7: address family of the probed address
+                        "family": {"type": "string", "enum": ["ipv4", "ipv6", ""]},
                     },
                 }},
                 "endpoint_comparison": {"type": ["object", "null"], "properties": {

@@ -190,6 +190,14 @@ Nothing is reloaded, restarted or signalled: a test asserts that no executed
 command contains `reload`, `restart`, `graceful`, `kill`, `-s <signal>`,
 `systemctl start/stop/restart/reload` or `sudo`.
 
+Revocation (from the client side, to the verified address):
+
+| Purpose | Command |
+|---|---|
+| stapled OCSP response (default) | `openssl s_client -connect <ip>:<port> -servername <name> -status -msg` |
+| validation of a response | `openssl ocsp -respin <resp.der> -issuer <issuer> -cert <cert> -CAfile <issuer> -partial_chain -no_nonce` |
+| `--revocation=online` only | `openssl ocsp -issuer … -cert … -url <AIA OCSP> -no_nonce -respout …`; the CRL is fetched over HTTP (at most 10 MiB) and checked with `openssl crl -CAfile <issuer>` |
+
 Signatures, chains and policy are then judged on this machine from the
 certificate bytes; key bytes never leave the server. A passphrase file
 (`ssl_password_file`) is only state-checked (exists / readable), never read.

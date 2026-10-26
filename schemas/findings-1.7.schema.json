@@ -456,6 +456,14 @@
                   "string",
                   "null"
                 ]
+              },
+              "family": {
+                "type": "string",
+                "enum": [
+                  "ipv4",
+                  "ipv6",
+                  ""
+                ]
               }
             }
           }

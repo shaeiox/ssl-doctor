@@ -59,6 +59,10 @@ sample this openssl cannot build skips the calling test with the reason):
     sha1-root.pem        a self-signed root whose own signature is SHA-1
     lookalike-chain.pem  leaf + a self-signed root *named* like a public CA
     ecdsa-chain.pem  a P-256 leaf for shop.test (key ecdsa_leaf.key) + intermediate
+    ocsp-leaf.pem    leaf with OCSP and CRL URLs on 127.0.0.1:9 (nothing answers)
+
+OCSP responses and CRLs for the PKI leaf, signed by the intermediate:
+``pki.ocsp_response("good"|"revoked")`` and ``pki.crl(revoked=True|False)``.
 """
 
 from __future__ import annotations
@@ -138,6 +142,50 @@ class PKI:
                 import unittest
                 raise unittest.SkipTest(f"this openssl cannot build {name}: {exc}")
         return path
+
+    def _revocation_index(self, revoked: bool) -> str:
+        import datetime
+        serial = subprocess.run(["openssl", "x509", "-in", self.leaf, "-noout", "-serial"],
+                                capture_output=True, text=True, check=True
+                                ).stdout.strip().split("=", 1)[1]
+        now = datetime.datetime.now(datetime.timezone.utc)
+        exp = (now + datetime.timedelta(days=300)).strftime("%y%m%d%H%M%SZ")
+        when = (now - datetime.timedelta(days=2)).strftime("%y%m%d%H%M%SZ")
+        path = self.path(f"index-{'revoked' if revoked else 'good'}.txt")
+        with open(path, "w") as fh:
+            if revoked:
+                fh.write(f"R\t{exp}\t{when},keyCompromise\t{serial}\tunknown\t/CN={HOSTNAME}\n")
+            else:
+                fh.write(f"V\t{exp}\t\t{serial}\tunknown\t/CN={HOSTNAME}\n")
+        return path
+
+    def ocsp_response(self, status: str) -> str:
+        """DER OCSP response for the leaf ("good" or "revoked"), valid one day."""
+        out = self.path(f"ocsp-{status}.der")
+        if not os.path.exists(out):
+            _run("ocsp", "-index", self._revocation_index(status == "revoked"),
+                 "-rsigner", "int.pem", "-rkey", "int.key", "-CA", "int.pem",
+                 "-issuer", "int.pem", "-cert", "leaf.pem", "-respout", out,
+                 "-ndays", "1", cwd=self.dir)
+        return out
+
+    def crl(self, revoked: bool) -> str:
+        """DER CRL of the intermediate, listing the leaf when `revoked`."""
+        out = self.path(f"crl-{'revoked' if revoked else 'good'}.der")
+        if not os.path.exists(out):
+            work = tempfile.mkdtemp(prefix="crl-", dir=self.dir)
+            shutil.copy(self._revocation_index(revoked), os.path.join(work, "index.txt"))
+            with open(os.path.join(work, "crlnumber"), "w") as fh:
+                fh.write("01\n")
+            with open(os.path.join(work, "ca.cnf"), "w") as fh:
+                fh.write("[ca]\ndefault_ca = c\n[c]\n"
+                         f"database = {work}/index.txt\ncrlnumber = {work}/crlnumber\n"
+                         "default_md = sha256\ndefault_crl_days = 1\n")
+            pem = os.path.join(work, "crl.pem")
+            _run("ca", "-gencrl", "-config", f"{work}/ca.cnf", "-keyfile", "int.key",
+                 "-cert", "int.pem", "-out", pem, cwd=self.dir)
+            _run("crl", "-in", pem, "-outform", "DER", "-out", out, cwd=self.dir)
+        return out
 
     def bundle(self, *names: str) -> str:
         """Concatenate PEM files (by attribute name) into a trust bundle file."""
@@ -495,6 +543,13 @@ def _ecdsa_chain(pki: "PKI", out: str) -> None:
     _cat(lambda p: _read(p.path("ecdsa_leaf.pem")), _file("intermediate"))(pki, out)
 
 
+def _ocsp_leaf(pki: "PKI", out: str) -> None:
+    path = _issue_sample(pki, "ocsp_leaf", f"/CN={HOSTNAME}", "int.pem", "int.key",
+                         _leaf_ext() + "authorityInfoAccess=OCSP;URI:http://127.0.0.1:9/\n"
+                         "crlDistributionPoints=URI:http://127.0.0.1:9/int.crl\n")
+    os.replace(path, out)
+
+
 _SAMPLES = {
     "truncated.pem": _cat(_file("leaf"), _truncated_int),
     "corrupt.pem": _cat(_file("leaf"), _corrupt_int, _file("root")),
@@ -538,6 +593,7 @@ _SAMPLES = {
     "sha1-root.pem": _sha1_root,
     "lookalike-chain.pem": _lookalike_chain,
     "ecdsa-chain.pem": _ecdsa_chain,
+    "ocsp-leaf.pem": _ocsp_leaf,
 }
 
 

@@ -32,7 +32,7 @@ The chain captured from the primary handshake, in the order sent and by the read
 - **THEN** `tls.chain`, `chain.validity` and `cert.policy` for the presented chain are NOT TESTED with the reader errors
 
 ### Requirement: The handshake requests a stapled OCSP response (audit #30)
-The primary handshake SHALL request OCSP stapling, and SHALL record whether a response was stapled for revocation evaluation. A server that staples nothing SHALL NOT fail the handshake finding.
+A handshake to the same verified address and server name as the primary handshake SHALL request OCSP stapling (Python's ssl module cannot, so `openssl s_client -status` does), and SHALL record whether a response was stapled for revocation evaluation. A server that staples nothing SHALL NOT fail the handshake finding.
 
 #### Scenario: No stapled response
 - **WHEN** the server does not staple an OCSP response

@@ -66,3 +66,4 @@ One line per settled choice: `YYYY-MM: chosen > rejected — why`.
 2026-10: wildcard public-suffix guard from an embedded list of common multi-label suffixes + 'at least two labels below *' > bundling the full Public Suffix List — keeps the CLI stdlib-only and small; documented as a limitation.
 2026-10: expiry threshold as a per-process setting (certpolicy.set_warn_days) restored per agent job > threading a parameter through every check — agents run jobs sequentially; the CLI sets it once.
 2026-10: chain.trust private/unknown for any chain → unresolved entry, not a cause > a probable 'no trusted root' cause — the checking machine is not necessarily the client; an internal-CA server would always be blamed.
+2026-10: stapled OCSP fetched with a separate `openssl s_client -status -msg` handshake and validated with `openssl ocsp -respin` > parsing s_client's text dump — the text cannot prove the signature; the DER can.

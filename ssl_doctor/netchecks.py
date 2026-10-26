@@ -1059,7 +1059,8 @@ def _probe_endpoint(host: str, port: int, sni: Optional[str], timeout: float,
     other state explains why no certificate evidence exists.
     """
     record = {"ip": ip, "state": EP_UNREACHABLE, "detail": "", "sha256": "",
-              "hostname_ok": None, "chain_status": "", "sni": sni}
+              "hostname_ok": None, "chain_status": "", "sni": sni,
+              "family": "ipv6" if ":" in ip else "ipv4"}
     ssock = None
     try:
         ctx = _make_context(verify=False)
@@ -1102,6 +1103,49 @@ def _probe_endpoint(host: str, port: int, sni: Optional[str], timeout: float,
     return record
 
 
+def _family_balanced(addresses: List[str], cap: int) -> List[str]:
+    """Up to `cap` addresses, alternating IPv4 / IPv6, so both are probed."""
+    v4 = [a for a in addresses if ":" not in a]
+    v6 = [a for a in addresses if ":" in a]
+    out = []
+    while (v4 or v6) and len(out) < cap:
+        for family in (v4, v6):
+            if family and len(out) < cap:
+                out.append(family.pop(0))
+    return out
+
+
+def _family_notes(addresses: List[str], records: List[Dict]) -> List[str]:
+    v4 = [a for a in addresses if ":" not in a]
+    v6 = [a for a in addresses if ":" in a]
+    notes = [f"DNS published {len(v4)} IPv4 and {len(v6)} IPv6 address(es)"]
+    if not v6:
+        notes.append("no IPv6 address was published")
+    for family, label in (("ipv6", "IPv6"), ("ipv4", "IPv4")):
+        own = [r for r in records if r.get("family") == family]
+        other = [r for r in records if r.get("family") != family]
+        if own and other and all(r["state"] in (EP_UNREACHABLE, EP_TIMEOUT) for r in own) \
+                and any(r["state"] == EP_NEGOTIATED for r in other):
+            notes.append(f"{label} not reachable from this network")
+    return notes
+
+
+def _family_difference(comparable: List[Dict]) -> str:
+    """Attributes in which every IPv4 endpoint differs from every IPv6 one."""
+    v4 = [r for r in comparable if r.get("family") == "ipv4"]
+    v6 = [r for r in comparable if r.get("family") == "ipv6"]
+    if not v4 or not v6:
+        return ""
+    found = []
+    for key, label in (("sha256", "certificate identity"),
+                       ("hostname_ok", "hostname coverage"),
+                       ("chain_status", "chain status")):
+        a, b = {r[key] for r in v4}, {r[key] for r in v6}
+        if len(a) == 1 and len(b) == 1 and a != b:
+            found.append(label)
+    return ", ".join(found)
+
+
 def _describe_endpoint(rec: Dict) -> str:
     ip, state = rec["ip"], rec["state"]
     if state == EP_NEGOTIATED:
@@ -1111,7 +1155,7 @@ def _describe_endpoint(rec: Dict) -> str:
                         else "does NOT cover the requested name")
         if rec.get("chain_status"):
             bits.append(f"chain {rec['chain_status']}")
-        return f"{ip}: negotiated - " + ", ".join(bits)
+        return f"{ip} ({rec.get('family', '?')}): negotiated - " + ", ".join(bits)
     reason = f" ({rec['detail']})" if rec.get("detail") else ""
     return f"{ip}: {state}{reason}"
 
@@ -1139,10 +1183,10 @@ def check_multi_ip(host: str, port: int, ips: List[str], timeout: float,
                          ["DNS returned fewer than two addresses - nothing to compare"],
                          target=target)
 
-    probe_ips = uniq[:_ENDPOINT_CAP]
+    probe_ips = _family_balanced(uniq, _ENDPOINT_CAP)
     records = [_probe_endpoint(host, port, server_name, timeout, ip)
                for ip in probe_ips]
-    rows = [_describe_endpoint(r) for r in records]
+    rows = [_describe_endpoint(r) for r in records] + _family_notes(uniq, records)
     comparable = [r for r in records
                   if r["state"] == EP_NEGOTIATED and r.get("sni") == server_name]
     facts["endpoints"] = records
@@ -1183,6 +1227,9 @@ def check_multi_ip(host: str, port: int, ips: List[str], timeout: float,
             target=target, failure_kind=kind, observation=obs)
 
     differences = []
+    family_split = _family_difference(comparable)
+    if family_split:
+        rows.insert(0, f"IPv6 endpoints differ from IPv4 endpoints in: {family_split}")
     if len({r["sha256"] for r in comparable}) > 1:
         differences.append("certificate identity")
     covered = {r["hostname_ok"] for r in comparable if r["hostname_ok"] is not None}
@@ -1319,6 +1366,36 @@ def check_https(host: str, port: int, sni: Optional[str], timeout: float,
                                     "flip breaks clients.", target=target), facts
 
 
+def revocation_finding(chain: List[certs.CertInfo], host: str, port: int,
+                       sni: Optional[str], timeout: float,
+                       connect_ip: Optional[str] = None) -> Tuple[F.Finding, str]:
+    """(`tls.revocation` finding, revocation state) for the presented chain
+    (see `revocation.check_chain`)."""
+    from . import revocation as rv
+    title = "OCSP / CRL revocation status"
+    target = f"{host}:{port}"
+    r = rv.check_chain(chain, host, port, sni, timeout, connect_ip)
+    ev = [f"revocation state: {r.state}" + (f" (source: {r.source})" if r.source else ""),
+          *r.evidence]
+    if r.state == rv.GOOD:
+        f = F.Finding("tls.revocation", title, F.PASS, F.SCOPE_REMOTE_NET, ev, target=target)
+    elif r.state == rv.REVOKED:
+        f = F.Finding("tls.revocation", title, F.FAIL, F.SCOPE_REMOTE_NET, ev,
+                      recommendation="Replace the revoked certificate now; clients that "
+                                     "check revocation refuse it.", target=target)
+    elif r.stapled_defect:
+        f = F.Finding("tls.revocation", title, F.WARNING, F.SCOPE_REMOTE_NET, ev,
+                      recommendation="The server staples an OCSP response that is not "
+                                     "valid for this certificate: check OCSP stapling "
+                                     "(ssl_stapling, ssl_trusted_certificate, resolver).",
+                      target=target)
+    else:
+        f = F.Finding("tls.revocation", title, F.NOT_TESTED, F.SCOPE_REMOTE_NET, ev,
+                      target=target,
+                      failure_kind="probe-inconclusive" if r.state == rv.INCONCLUSIVE else "")
+    return f, r.state
+
+
 def check_presented_chain(facts: Dict, host: str, port: int) -> F.Finding:
     """Judge the chain the server sent; records the verdict in `facts`.
 
@@ -1389,6 +1466,7 @@ def _certificate_facts(facts: Dict) -> Dict:
     if facts.get("chain"):
         out["presented"] = chainval.certificates_fact(facts["chain"], "presented",
                                                       certs.load_root_anchors())
+        out["presented"]["revocation"] = facts.get("revocation", "")
     out.update(facts.get("certificate_chains") or {})
     return out
 
@@ -1520,6 +1598,9 @@ def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None
                                            certpolicy.anchor_ids(presented)))
             _add(chainval.trust_finding(presented, F.SCOPE_REMOTE_NET, f"{host}:{port}",
                                         certs.load_root_anchors()))
+            rev, facts["revocation"] = revocation_finding(presented, host, port,
+                                                          server_name, timeout, verified_ip)
+            _add(rev)
 
     _add(check_tls_validation(host, port, server_name, timeout, connect_ip=verified_ip))
     _add(check_tls_rootonly_validation(host, port, server_name, timeout,

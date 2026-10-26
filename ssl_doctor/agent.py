@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, Optional, Tuple
 
-from . import __version__, certpolicy, local, netchecks, report, server
+from . import __version__, certpolicy, local, netchecks, report, revocation, server
 from .analyze import diagnose
 
 DEFAULT_STATE = os.path.expanduser("~/.ssl-doctor/agent.json")
@@ -149,12 +149,21 @@ def handle_job(client: AgentClient, role: str, job: Dict[str, Any]) -> str:
     except ValueError as exc:
         client.decline(job["job_id"], f"invalid job option: {exc}")
         return "declined"
-    previous = certpolicy.warn_days()
+    try:
+        rev_mode = options.get("revocation", "staple")
+        if rev_mode not in revocation.MODES:
+            raise ValueError(f"revocation must be one of {', '.join(revocation.MODES)}")
+    except ValueError as exc:
+        client.decline(job["job_id"], f"invalid job option: {exc}")
+        return "declined"
+    previous, previous_rev = certpolicy.warn_days(), revocation.mode()
     certpolicy.set_warn_days(warn)
+    revocation.set_mode(rev_mode)
     try:
         doc = RUNNERS[kind](t["host"], int(t["port"]), t.get("sni"))
     finally:
         certpolicy.set_warn_days(previous)
+        revocation.set_mode(previous_rev)
     client.upload(job["job_id"], doc)
     return "done"
 

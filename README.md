@@ -21,6 +21,7 @@ python3 ssldoctor.py -c "/scan example.com --with-server" -c "/report both out"
 |---|---|
 | `-c "<command>"` | run a command non-interactively (repeatable); exit code `1` when the overall diagnosis is `FAIL`, otherwise `0` (see [Overall result](#overall-result)) |
 | `--timeout <seconds>` | network timeout (default 8 s; `/timeout` changes it in a session) |
+| `--revocation=staple\|online\|off` | revocation checking (default `staple`). `staple` judges the OCSP response the server staples; nothing is sent to the CA. `online` also asks the CA's OCSP responder, then its CRL, for the leaf and each intermediate. This sends the certificates' serial numbers to the CA, so the CA learns which site you checked and from where. `off` checks nothing and reports `not-checked` |
 | `--expiry-warn-days <1-365>` | warn when any certificate expires within this many days (default 30; agents take it per job from the service's target setting) |
 | `--no-tui` (or `--plain`) | line-oriented REPL instead of the full-screen shell |
 | `--no-remember` | never offer to remember servers and never use saved passwords (also `SSL_DOCTOR_REMEMBER=off`) |
@@ -255,6 +256,7 @@ wrong endpoint).
 | `chain.validity` | Dates of every certificate after the leaf: expired or not yet valid is FAIL, and an intermediate that expires before the leaf is WARNING ("the chain stops validating on …"). |
 | `chain.trust` | Trust class from verified paths only, never from issuer names: `public` (anchored in this machine's system store, named with its anchor count), `private` (only through a CA file the service references, such as `ssl_trusted_certificate`), `self-signed`, or `unknown`. An expired anchor warns, with the limitation that other clients may build another path. |
 | `cert.policy` | Key and signature policy (`policy 1`, below). |
+| `tls.revocation` | Revocation state `good`, `revoked`, `unavailable` (no OCSP/CRL information), `not-checked` or `inconclusive`, with its source (`stapled`, `ocsp`, `crl`). A response counts only when its signature verifies against the issuer, it names this certificate and it is within its validity window. A stapled response that fails these checks is a server WARNING. A revoked certificate is a confirmed cause. An unreachable responder is `inconclusive` (NOT TESTED), never FAIL. |
 | `chain.usage` | The leaf may authenticate a TLS server (EKU `serverAuth` or unrestricted; Key Usage that fits its key type), and every issuer with a Key Usage includes `keyCertSign`. A client-only certificate is FAIL with its own cause. |
 | `tls.verify` | Validation against this machine's full trust store, including any cached intermediates (what *this* machine sees). |
 | `tls.verify.rootonly` | Validation against trusted **roots only**, with no cached or bundled intermediates (what a client that has never seen the intermediate sees). PASS on `tls.verify` with FAIL here means the server is missing its intermediate. |

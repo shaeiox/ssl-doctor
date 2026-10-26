@@ -78,10 +78,10 @@
 
 ## 8. P7: Network extras (may run in parallel with 6–7 once 5 is done)
 
-- [ ] 8.1 Family-balanced endpoint selection and family labels, plus family-level difference wording (EC #28); verify mocked 5×v4 + 2×v6, v6-only difference, v6-unreachable, and a real `::1` test or a named skip
-- [ ] 8.2 Request OCSP stapling and capture the stapled response (TND "requests a stapled OCSP response"); verify against an `openssl s_server -status_file` fixture
-- [ ] 8.3 `tls.revocation` states and response validity checks, stapled by default, `--revocation=online|off` (REV #30, U4); verify good, revoked, stale, unreachable responder (mocked), `unavailable` and `not-checked`
-- [ ] 8.4 Document the revocation option and its privacy implications in README; verify the documented flags run
+- [x] 8.1 Family-balanced endpoint selection and family labels, plus family-level difference wording (EC #28); verify mocked 5×v4 + 2×v6, v6-only difference, v6-unreachable, and a real `::1` test or a named skip
+- [x] 8.2 Request OCSP stapling and capture the stapled response (TND "requests a stapled OCSP response"); verify against an `openssl s_server -status_file` fixture
+- [x] 8.3 `tls.revocation` states and response validity checks, stapled by default, `--revocation=online|off` (REV #30, U4); verify good, revoked, stale, unreachable responder (mocked), `unavailable` and `not-checked`
+- [x] 8.4 Document the revocation option and its privacy implications in README; verify the documented flags run
 
 ## 9. Integration and regression gate
 

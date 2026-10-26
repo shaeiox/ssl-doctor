@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-26 · done: complete-certificate-diagnostics P0–P6 on branch feat/complete-certificate-diagnostics · next: P7 IPv4/IPv6 + revocation (tasks 8.x), then gate 9.x · blocker: none
+> resume 2026-10-26 · done: complete-certificate-diagnostics P0–P7 on branch feat/complete-certificate-diagnostics · next: integration gate (tasks 9.1–9.4) · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-25 · v2] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ done 2026-10-26 · v2] → projects/ssl-doctor/chain-diagnosis.md
@@ -21,5 +21,6 @@
 - ui-design-system → Theme, full-screen shell, result frames, streaming into frames, centred banner, chat composer   [✓ done 2026-10-25 · v8] → projects/ssl-doctor/ui-design-system.md
 - remembered-servers → SSH server profiles + passwords in OS vault (Win Credential Manager / Secret Service), host-key bound; ADR-001 Accepted, implemented   [⚠ in-progress 2026-10-25 · v4] → projects/ssl-doctor/remembered-servers.md
 - certificate-diagnostics → 45-check audit remediation: verdict/unexplained, key states, verify transport, contract 1.7, phases P0–P7   [⚠ in-progress 2026-10-26 · v3] → projects/ssl-doctor/certificate-diagnostics.md
-- cert-analysis-internals → certs/chainval/certpolicy/hostnames internals: strict parsing, verify_link, roles, trust class, policy, gotchas   [⚠ in-progress 2026-10-26 · v2] → projects/ssl-doctor/cert-analysis-internals.md
+- cert-analysis-internals → certs/chainval/certpolicy/hostnames internals: strict parsing, verify_link, roles, trust class, policy, gotchas   [⚠ in-progress 2026-10-26 · v3] → projects/ssl-doctor/cert-analysis-internals.md
+- revocation → stapled OCSP via s_client -status + openssl ocsp validation, online OCSP/CRL opt-in, IPv4/IPv6 endpoint balance   [✓ done 2026-10-26 · v1] → projects/ssl-doctor/revocation.md
 - _decisions → One-line decision log: colours, frames, static input, report pills   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/_decisions.md
