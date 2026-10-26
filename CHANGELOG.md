@@ -52,6 +52,15 @@ Findings contract stays **1.7**; no schema change.
   Unreachable revocation URLs are listed as a warning line of a PASS, and
   certutil that cannot be started is NOT TESTED.
 
+- **Clock skew is measured when the server's `Date` arrived, not when `/local`
+  runs.** `/tls` followed minutes later by `/local` reported the waiting time
+  as clock skew (FAIL above 300 s). The server time now carries its receive
+  time, round trip, source host and `Age` (cached responses are corrected).
+  A reference older than 120 s is NOT TESTED; the evidence names the time
+  source and the uncertainty, and the thresholds apply to the skew minus that
+  uncertainty. The "client clock" cause now needs a date-related validation
+  error; a missing issuer is no longer blamed on the clock.
+
 ## v0.11.0 — trustworthy certificate verdicts
 
 Chains are verified by signature, not by names; every certificate in a chain

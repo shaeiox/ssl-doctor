@@ -13,7 +13,7 @@ import ipaddress
 import socket
 import ssl
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 
 from . import __version__, certs, findings as F
@@ -1315,10 +1315,12 @@ def check_https(host: str, port: int, sni: Optional[str], timeout: float,
             ctx = _make_context(verify=False)
             conn = http.client.HTTPSConnection(
                 current_host, current_port, timeout=timeout, context=ctx)
+            sent = time.time()
             conn.request("GET", "/", headers={"Host": current_host,
                                               "User-Agent": "ssl-doctor/" + __version__,
                                               "Connection": "close"})
             resp = conn.getresponse()
+            received = time.time()
             body = resp.read(512)
             loc = resp.getheader("Location")
             server = resp.getheader("Server") or "?"
@@ -1326,9 +1328,20 @@ def check_https(host: str, port: int, sni: Optional[str], timeout: float,
             if date_hdr:
                 try:
                     from email.utils import parsedate_to_datetime
-                    facts["server_time"] = parsedate_to_datetime(date_hdr)
+                    when = parsedate_to_datetime(date_hdr)
                 except (TypeError, ValueError, IndexError):
-                    pass            # a malformed Date header: clock skew is simply not measured
+                    when = None     # a malformed Date header: clock skew is simply not measured
+                if when is not None:
+                    # the clock reference keeps when and from whom it was received; a
+                    # cache serves the origin's Date and says how old it is in Age
+                    age_hdr = (resp.getheader("Age") or "").strip()
+                    age = int(age_hdr) if age_hdr.isdigit() else 0
+                    facts.update(
+                        server_time=when + timedelta(seconds=age),
+                        server_time_received=received, server_time_rtt=received - sent,
+                        server_time_host=current_host, server_time_age=age,
+                        server_time_problem=(f"malformed Age header {age_hdr!r}"
+                                             if age_hdr and not age_hdr.isdigit() else ""))
             rows.append(
                 f"https://{current_host}:{current_port}/ -> "
                 f"{resp.status} {resp.reason} (Server: {server})")

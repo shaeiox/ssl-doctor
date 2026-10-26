@@ -387,7 +387,12 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
             explains=("cert.policy",))
 
     skew = _first(local, "local.clockskew")
-    if skew and skew.status == F.FAIL and verify and verify.status == F.FAIL:
+    # only date errors can come from a wrong client clock (OpenSSL's verify strings)
+    date_error = bool(verify) and any(
+        k in " ".join(verify.evidence).lower()
+        for k in ("certificate is not yet valid", "certificate has expired",
+                  "certificate expired"))
+    if skew and skew.status == F.FAIL and verify and verify.status == F.FAIL and date_error:
         add("probable", "client",
             "Client clock is significantly off and validation fails with date "
             "errors - the client, not the server, is the likely culprit",

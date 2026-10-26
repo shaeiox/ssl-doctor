@@ -61,14 +61,14 @@
 
 ## 6. `local.clockskew` with a timed reference (D)
 
-- [ ] 6.1 `check_https` records the receive time, round-trip time, source host and `Age` for the `Date` it keeps (design D3); verify with the existing local TLS/HTTP fixture server that the facts are set, and that a redirect to another host names that host
-- [ ] 6.2 `check_os_and_clock` uses the receive time, the 120 s freshness window, the `Age` correction and the uncertainty margin; verify `tests/test_client_machine.py` cases:
+- [x] 6.1 `check_https` records the receive time, round-trip time, source host and `Age` for the `Date` it keeps (design D3); verify with the existing local TLS/HTTP fixture server that the facts are set, and that a redirect to another host names that host
+- [x] 6.2 `check_os_and_clock` uses the receive time, the 120 s freshness window, the `Age` correction and the uncertainty margin; verify `tests/test_client_machine.py` cases:
   - stale reference (360 s) → NOT TESTED;
   - `Age: 600` → PASS with "Age correction";
-  - 60/61/300/301 s with 0 s and 3 s uncertainty → PASS/WARNING/WARNING/FAIL and WARNING at 301 s ± 3 s;
+  - with the minimum 1 s uncertainty: 61/62/301/302 s → PASS/WARNING/WARNING/FAIL, symmetric for a clock behind; with 3 s uncertainty: 301 s → WARNING, 304 s → FAIL;
   - malformed `Age` → NOT TESTED.
-- [ ] 6.3 The clock cause requires a date-related verify error; verify missing issuer + skew FAIL → no "date errors" cause, and "certificate has expired" + skew FAIL → probable client cause
-- [ ] 6.4 Document the clock-skew evidence (time source, uncertainty, freshness) in `docs/command-used.md` or README; verify the documented `/tls` then `/local` sequence produces the documented NOT TESTED wording
+- [x] 6.3 The clock cause requires a date-related verify error; verify missing issuer + skew FAIL → no "date errors" cause, and "certificate has expired" + skew FAIL → probable client cause
+- [x] 6.4 Document the clock-skew evidence (time source, uncertainty, freshness) in `docs/command-used.md` or README; verify the documented `/tls` then `/local` sequence produces the documented NOT TESTED wording
 
 ## 7. `srv.renewal` with source visibility (G)
 

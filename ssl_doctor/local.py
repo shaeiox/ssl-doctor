@@ -23,7 +23,19 @@ from . import findings as F
 IS_WINDOWS = sys.platform.startswith("win")
 
 
-def check_os_and_clock(server_time_epoch: Optional[float] = None) -> List[F.Finding]:
+# A server time reference older than this says nothing about the clock now
+# (decision U2): `/local` long after `/tls` would compare an old Date header.
+CLOCK_REFERENCE_MAX_AGE = 120
+
+
+def check_os_and_clock(server_time_epoch: Optional[float] = None,
+                       reference: Optional[dict] = None) -> List[F.Finding]:
+    """`local.os`, and `local.clockskew` against the server's HTTP Date.
+
+    `reference` carries when the Date was received (`server_time_received`),
+    the request round trip (`server_time_rtt`), its host and its Age header.
+    Without it (older callers), the Date is assumed to have just arrived.
+    """
     out: List[F.Finding] = []
     now = datetime.now(timezone.utc)
     try:
@@ -37,26 +49,50 @@ def check_os_and_clock(server_time_epoch: Optional[float] = None) -> List[F.Find
          f"system time (UTC): {now:%Y-%m-%d %H:%M:%S}",
          f"local timezone: {tz}"]))
     if server_time_epoch:
-        skew = int(now.timestamp() - server_time_epoch)
-        adjective = "ahead of" if skew >= 0 else "behind"
-        if abs(skew) > 300:
-            out.append(F.Finding(
-                "local.clockskew", "System clock vs server clock", F.FAIL, F.SCOPE_LOCAL,
-                [f"this machine is {abs(skew)}s {adjective} the remote server's clock",
-                 "a wrong clock makes valid certificates appear expired/not-yet-valid"],
-                recommendation="Synchronize the system clock (w32time / NTP) and retry.",
-                detail="clock-skew evidence: HTTP Date header of the remote server"))
-        elif abs(skew) > 60:
-            out.append(F.Finding(
-                "local.clockskew", "System clock vs server clock", F.WARNING,
-                F.SCOPE_LOCAL,
-                [f"clock differs by {abs(skew)}s from the server"],
-                recommendation="Consider enabling automatic time synchronization."))
-        else:
-            out.append(F.Finding(
-                "local.clockskew", "System clock vs server clock", F.PASS,
-                F.SCOPE_LOCAL, [f"clock skew to server: {skew}s (acceptable)"]))
+        out.append(_clock_skew(server_time_epoch, reference or {}, now.timestamp()))
     return out
+
+
+def _clock_skew(server_time: float, ref: dict, now: float) -> F.Finding:
+    title = "System clock vs server clock"
+    host = ref.get("server_time_host") or ""
+    target = ref.get("target") or ""
+    source = (f"time source: HTTP Date header of {host}" if host else
+              "time source: HTTP Date header of the remote server")
+    if host and target and host.lower() != target.lower():
+        source += f" (redirect target, not {target})"
+    if ref.get("server_time_problem"):
+        return F.Finding("local.clockskew", title, F.NOT_TESTED, F.SCOPE_LOCAL,
+                         [f"clock skew not measured: {ref['server_time_problem']}", source])
+    received = ref.get("server_time_received") or now
+    old = now - received
+    if old > CLOCK_REFERENCE_MAX_AGE:
+        return F.Finding("local.clockskew", title, F.NOT_TESTED, F.SCOPE_LOCAL,
+                         [f"server time reference is {int(old)}s old; repeat the network "
+                          "check", source])
+    skew = received - server_time
+    uncertainty = 1 + max(0.0, float(ref.get("server_time_rtt") or 0.0))
+    margin = abs(skew) - uncertainty
+    adjective = "ahead of" if skew >= 0 else "behind"
+    ev = [source, f"measurement uncertainty: ±{uncertainty:.1f}s (Date resolution and "
+                  "request round trip)"]
+    if ref.get("server_time_age"):
+        ev.append(f"Age correction: the response was served from a cache "
+                  f"{ref['server_time_age']}s after the server dated it")
+    if margin > 300:
+        return F.Finding(
+            "local.clockskew", title, F.FAIL, F.SCOPE_LOCAL,
+            [f"this machine is {abs(skew):.0f}s {adjective} the remote server's clock",
+             "a wrong clock makes valid certificates appear expired/not-yet-valid", *ev],
+            recommendation="Synchronize the system clock (w32time / NTP) and retry.",
+            detail="clock-skew evidence: HTTP Date header of the remote server")
+    if margin > 60:
+        return F.Finding(
+            "local.clockskew", title, F.WARNING, F.SCOPE_LOCAL,
+            [f"clock differs by {abs(skew):.0f}s from the server", *ev],
+            recommendation="Consider enabling automatic time synchronization.")
+    return F.Finding("local.clockskew", title, F.PASS, F.SCOPE_LOCAL,
+                     [f"clock skew to server: {skew:.0f}s (acceptable)", *ev])
 
 
 def check_proxy_config() -> F.Finding:
@@ -274,7 +310,12 @@ def run_local_for_remote(facts: dict, cert_path: Optional[str] = None,
             fh.write(facts["cert"].pem)
             tmp_leaf = cert_path = fh.name
     try:
+        reference = {k: facts.get(k) for k in ("server_time_received", "server_time_rtt",
+                                                "server_time_host", "server_time_age",
+                                                "server_time_problem")}
+        reference["target"] = facts.get("host")
         return run_local_diagnostics(server_time_epoch=facts.get("server_time_epoch"),
+                                     clock_reference=reference,
                                      chain_issuer_names=issuers, cert_path=cert_path,
                                      anchor_unknown=anchor_unknown, emit=emit)
     finally:
@@ -286,7 +327,8 @@ def run_local_diagnostics(server_time_epoch: Optional[float] = None,
                           chain_issuer_names: Optional[List[str]] = None,
                           cert_path: Optional[str] = None,
                           anchor_unknown: str = "",
-                          emit: Optional[Callable[[F.Finding], None]] = None) -> List[F.Finding]:
+                          emit: Optional[Callable[[F.Finding], None]] = None,
+                          clock_reference: Optional[dict] = None) -> List[F.Finding]:
     out: List[F.Finding] = []
     def _add(f: F.Finding) -> F.Finding:
         list.append(out, f)
@@ -294,7 +336,7 @@ def run_local_diagnostics(server_time_epoch: Optional[float] = None,
             emit(f)
         return f
 
-    for _f in check_os_and_clock(server_time_epoch):
+    for _f in check_os_and_clock(server_time_epoch, clock_reference):
         _add(_f)
     _add(check_proxy_config())
     _add(check_cert_stores())
