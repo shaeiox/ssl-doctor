@@ -225,7 +225,13 @@
                   "key-encrypted",
                   "key-unreadable",
                   "command-failed",
-                  "permission-denied"
+                  "permission-denied",
+                  "chain-signature",
+                  "chain-misordered",
+                  "chain-incomplete",
+                  "chain-unverified",
+                  "chain-hygiene",
+                  "chain-wrong-leaf"
                 ]
               },
               "evidence": {
@@ -312,7 +318,13 @@
               "key-encrypted",
               "key-unreadable",
               "command-failed",
-              "permission-denied"
+              "permission-denied",
+              "chain-signature",
+              "chain-misordered",
+              "chain-incomplete",
+              "chain-unverified",
+              "chain-hygiene",
+              "chain-wrong-leaf"
             ]
           },
           "observation": {
@@ -397,7 +409,13 @@
             "key-encrypted",
             "key-unreadable",
             "command-failed",
-            "permission-denied"
+            "permission-denied",
+            "chain-signature",
+            "chain-misordered",
+            "chain-incomplete",
+            "chain-unverified",
+            "chain-hygiene",
+            "chain-wrong-leaf"
           ]
         },
         "endpoints": {

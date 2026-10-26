@@ -1096,7 +1096,7 @@ def _probe_endpoint(host: str, port: int, sni: Optional[str], timeout: float,
         chain[0] = leaf
         try:
             record["chain_status"] = certs.assess_chain(
-                chain, certs.load_root_anchors() if len(chain) == 1 else None).status
+                chain, certs.load_root_anchors()).status
         except Exception:            # noqa: BLE001 - chain judgement is best effort
             record["chain_status"] = "unread"
     return record
@@ -1336,26 +1336,32 @@ def check_presented_chain(facts: Dict, host: str, port: int) -> F.Finding:
             recommendation="Inspect manually: openssl s_client -connect "
                            f"{host}:{port} -servername <name> -showcerts",
             target=target)
-    leaf = chain[0]
-    if len(chain) == 1 and leaf.is_self_signed():
-        facts["chain_status"], facts["anchor"] = "complete", leaf.subject
-        return F.Finding("tls.chain", "Chain sent by server", F.PASS, F.SCOPE_REMOTE_NET,
-                         ["single self-signed certificate (no chain to send)"],
-                         target=target)
-    roots = certs.load_root_anchors() if len(chain) == 1 else None
-    a = certs.assess_chain(chain, roots)
+    from . import chainval
+    a = certs.assess_chain(chain, certs.load_root_anchors())
     facts["chain_status"], facts["anchor"] = a.status, a.anchor
+    status, kind, uncertainty = chainval.chain_verdict(a)
     ev = a.evidence + [f"read via: {facts.get('chain_reader') or '?'}"]
-    if a.status == "complete":
+    if status == F.PASS:
         return F.Finding("tls.chain", "Chain sent by server", F.PASS, F.SCOPE_REMOTE_NET,
                          ev, target=target)
-    rec = ("Fix the order/content of the chain file on the server: leaf first, then the "
-           "intermediate that issued it." if a.status == "broken" else
-           "Serve the full chain: put the leaf followed by the issuing intermediate(s) in "
-           "the server's certificate file (nginx: ssl_certificate). Clients without a "
-           "cached intermediate fail otherwise.")
-    return F.Finding("tls.chain", "Chain sent by server", F.WARNING, F.SCOPE_REMOTE_NET,
-                     ev, recommendation=rec, target=target)
+    rec = {
+        chainval.FAIL_SIGNATURE:
+            "The certificate after the failing position did not sign the one before it "
+            "(or may not issue certificates). Serve the intermediate(s) your CA issued "
+            "for this certificate, leaf first.",
+        chainval.FAIL_MISORDERED:
+            "Fix the order/content of the chain file on the server: leaf first, then the "
+            "intermediate that issued it.",
+        chainval.FAIL_INCOMPLETE:
+            "Serve the full chain: put the leaf followed by the issuing intermediate(s) in "
+            "the server's certificate file (nginx: ssl_certificate). Clients without a "
+            "cached intermediate fail otherwise.",
+        chainval.FAIL_HYGIENE:
+            "Remove repeated certificates from the server's certificate file.",
+    }.get(kind, "")
+    return F.Finding("tls.chain", "Chain sent by server", status, F.SCOPE_REMOTE_NET,
+                     ev, recommendation=rec, target=target, failure_kind=kind,
+                     uncertainty=uncertainty)
 
 
 def export_facts(facts: Dict) -> Dict:
@@ -1503,6 +1509,10 @@ def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None
                 target=f"{host}:{port}"))
 
         _add(check_presented_chain(facts, host, port))
+        if facts.get("chain"):
+            from . import chainval
+            _add(chainval.usage_finding(facts["chain"], F.SCOPE_REMOTE_NET,
+                                        f"{host}:{port}"))
 
     _add(check_tls_validation(host, port, server_name, timeout, connect_ip=verified_ip))
     _add(check_tls_rootonly_validation(host, port, server_name, timeout,

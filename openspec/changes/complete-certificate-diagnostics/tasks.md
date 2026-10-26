@@ -26,15 +26,15 @@
 ## 3. P2: Verified chains
 
 - [x] 3.1 `openssl verify` wrapper (design D1) with a one-time flag probe and the `verifier-unavailable` outcome; verify unit tests with `openssl` present and with `PATH` masked
-- [ ] 3.2 Canonical name comparison and per-link signature verification (CCV #15, #4, #16); verify `test_regression_r3_forged_intermediate` (→ broken/FAIL) and the wrong-intermediate tests unchanged
-- [ ] 3.3 Basic Constraints and pathLen (CCV #17); verify `test_regression_r3_non_ca_issuer` and a pathLen fixture
-- [ ] 3.4 KU/EKU for TLS server authentication (CCV #18) as `chain.usage`; verify the clientAuth-only leaf → FAIL and the CA without keyCertSign → FAIL
-- [ ] 3.5 Verified self-signature (CCV #21); verify `test_regression_r7_name_only_self_signed` and the genuine self-signed PASS
-- [ ] 3.6 AKI/SKI-guided issuer selection with lazy root SKI and the ambiguity note (CCV #19); verify the two same-name roots fixture
-- [ ] 3.7 Bounded path enumeration (CCV #20, design D2 limits); verify the cross-signed fixture lists two paths, and a bounded-limit test
-- [ ] 3.8 Missing-intermediate naming (AIA, AKI) and the anchored-unknown result (CCV #6, #2); verify the e2e `ScanVerdictTable` still passes and the evidence names the missing issuer
-- [ ] 3.9 `assess_chain` becomes a compatibility wrapper over the builder, and the presented chain from the primary handshake feeds it unchanged (TND "presented chain feeds the verified chain analysis", #26); verify every existing chain test (`test_tls_inspection`, `test_nginx_config.ChainFileTests`, `test_diagnosis`, `test_scan_e2e`) passes unchanged
-- [ ] 3.10 Update the brain topic `chain-diagnosis` and the README chain section; verify `brain-check` passes, or the index line is updated
+- [x] 3.2 Canonical name comparison and per-link signature verification (CCV #15, #4, #16); verify `test_regression_r3_forged_intermediate` (→ broken/FAIL) and the wrong-intermediate tests unchanged
+- [x] 3.3 Basic Constraints and pathLen (CCV #17); verify `test_regression_r3_non_ca_issuer` and a pathLen fixture
+- [x] 3.4 KU/EKU for TLS server authentication (CCV #18) as `chain.usage`; verify the clientAuth-only leaf → FAIL and the CA without keyCertSign → FAIL
+- [x] 3.5 Verified self-signature (CCV #21); verify `test_regression_r7_name_only_self_signed` and the genuine self-signed PASS
+- [x] 3.6 AKI/SKI-guided issuer selection with lazy root SKI and the ambiguity note (CCV #19); verify the two same-name roots fixture
+- [x] 3.7 Bounded path enumeration (CCV #20, design D2 limits); verify the cross-signed fixture lists two paths, and a bounded-limit test
+- [x] 3.8 Missing-intermediate naming (AIA, AKI) and the anchored-unknown result (CCV #6, #2); verify the e2e `ScanVerdictTable` still passes and the evidence names the missing issuer
+- [x] 3.9 `assess_chain` becomes a compatibility wrapper over the builder, and the presented chain from the primary handshake feeds it unchanged (TND "presented chain feeds the verified chain analysis", #26); verify every existing chain test (`test_tls_inspection`, `test_nginx_config.ChainFileTests`, `test_diagnosis`, `test_scan_e2e`) passes unchanged
+- [x] 3.10 Update the brain topic `chain-diagnosis` and the README chain section; verify `brain-check` passes, or the index line is updated
 
 ## 4. P3: Trust, lifecycle, policy and hostname rules
 

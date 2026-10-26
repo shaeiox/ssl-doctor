@@ -90,7 +90,7 @@ def verify_link(child: CertInfo, parent: CertInfo) -> Tuple[str, str]:
 
 
 def _verify_link(child: CertInfo, parent: CertInfo) -> Tuple[str, str]:
-    if child.issuer != parent.subject:
+    if not child.issued_name_of(parent):
         return LINK_NAME_MISMATCH, "issuer name differs from the next certificate's subject"
     if parent.extensions_read and not parent.is_ca:
         return LINK_NOT_A_CA, "the issuing certificate is not a CA (Basic Constraints)"
@@ -128,7 +128,7 @@ def self_signed(cert: CertInfo) -> Optional[bool]:
 
 
 def _self_signed(cert: CertInfo) -> Optional[bool]:
-    if not cert.subject or cert.subject != cert.issuer:
+    if not cert.subject or not cert.self_issued_name():
         return False
     if cert.aki and cert.ski and cert.aki != cert.ski:
         return False
@@ -257,7 +257,7 @@ def ca_file_finding(parsed, path: str, scope: str, purpose: str = CA_ROOTS,
             unknown = True
         elif role == ROLE_ROOT:
             continue
-        elif c.subject == c.issuer:
+        elif c.self_issued_name():
             issues.append(f"{where}: subject equals issuer, but it is not self-signed "
                           "(its own key did not sign it), so it is not a root")
         elif role == ROLE_LEAF:
@@ -281,3 +281,279 @@ def ca_file_finding(parsed, path: str, scope: str, purpose: str = CA_ROOTS,
                          target=path)
     return F.Finding("cert.cafile", title, F.PASS, scope,
                      ev + [f"{roots} verified root certificate(s)"], target=path)
+
+
+# ---------------------------------------------------------------- chain building
+
+FAIL_SIGNATURE = "chain-signature"      # a link's signature, CA flag or path length is wrong
+FAIL_MISORDERED = "chain-misordered"    # a certificate is not followed by its issuer
+FAIL_INCOMPLETE = "chain-incomplete"    # the issuer of the top certificate was not sent
+FAIL_UNVERIFIED = "chain-unverified"    # names match, signatures could not be checked
+FAIL_HYGIENE = "chain-hygiene"          # duplicates / unrelated certificates
+FAIL_WRONG_LEAF = "chain-wrong-leaf"    # the file does not start with the server certificate
+
+MAX_PATHS = 8
+MAX_DEPTH = 8
+
+_LINK_FAILURES = {LINK_SIGNATURE_FAILED: FAIL_SIGNATURE, LINK_NOT_A_CA: FAIL_SIGNATURE,
+                  LINK_NAME_MISMATCH: FAIL_MISORDERED, LINK_UNVERIFIED: FAIL_UNVERIFIED}
+
+
+def _label(c: CertInfo) -> str:
+    return c.common_name or c.subject or "(no subject)"
+
+
+def _ensure_extensions(c: CertInfo) -> None:
+    """Trust-store roots are decoded without openssl; read them on demand."""
+    if not c.extensions_read:
+        from . import certs
+        certs._enrich_with_openssl(c)
+
+
+def _anchor_candidates(child: CertInfo, roots: List[CertInfo]) -> List[CertInfo]:
+    """Roots that name themselves as `child`'s issuer, key-identifier match first."""
+    named = [r for r in roots if child.issued_name_of(r)]
+    for r in named:
+        _ensure_extensions(r)
+    if child.aki:
+        named.sort(key=lambda r: r.ski != child.aki)
+    return named
+
+
+def _paths(chain: List[CertInfo], roots: List[CertInfo]
+           ) -> Tuple[List[Tuple[List[CertInfo], CertInfo, bool]], List[str]]:
+    """Every anchored path from chain[0]: [(certificates, anchor, verified)], notes.
+
+    Uses the given certificates in any order plus the anchors; bounded by
+    MAX_PATHS paths of at most MAX_DEPTH certificates.
+    """
+    found: List[Tuple[List[CertInfo], CertInfo, bool]] = []
+    notes: List[str] = []
+    root_ids = {r.sha256 for r in roots}
+
+    def walk(path: List[CertInfo], verified: bool) -> None:
+        if len(found) >= MAX_PATHS or len(path) > MAX_DEPTH:
+            return
+        node = path[-1]
+        if node.sha256 in root_ids and len(path) > 1:
+            found.append((path[:-1], node, verified))
+            return
+        anchors = _anchor_candidates(node, roots)
+        if len(anchors) > 1:
+            pick = anchors[0]
+            note = (f"{len(anchors)} trusted roots share the name '{node.issuer}'"
+                    + (f"; the one with key identifier {pick.ski[:16]}… matches "
+                       f"'{_label(node)}'" if node.aki and pick.ski == node.aki else ""))
+            if note not in notes:
+                notes.append(note)
+        for anchor in anchors:
+            if anchor.sha256 == node.sha256:
+                continue
+            state, _ = verify_link(node, anchor)
+            if state in _CONNECTING:
+                found.append((list(path), anchor, verified and state == LINK_VERIFIED))
+                if len(found) >= MAX_PATHS:
+                    return
+        for cand in chain:
+            if cand in path or not node.issued_name_of(cand) or cand.sha256 == node.sha256:
+                continue
+            state, _ = verify_link(node, cand)
+            if state in _CONNECTING:
+                walk(path + [cand], verified and state == LINK_VERIFIED)
+        if not anchors and not any(node.issued_name_of(c) and c is not node for c in chain):
+            note = (f"'{_label(node)}': its issuer '{node.issuer}' is not among the "
+                    "trusted anchors")
+            if note not in notes:
+                notes.append(note)
+
+    if chain:
+        walk([chain[0]], True)
+    found.sort(key=lambda p: (not p[2], len(p[0])))
+    return found, notes
+
+
+def _missing_issuer(top: CertInfo) -> str:
+    return (f"missing issuer: '{top.issuer}'"
+            + (f" (key identifier {top.aki})" if top.aki else "")
+            + (f"; the certificate names {', '.join(top.aia_ca_issuers)} as where to "
+               "get it" if top.aia_ca_issuers else ""))
+
+
+def assess(chain: List[CertInfo], roots: Optional[List[CertInfo]] = None):
+    """Verify a chain as sent, then find the anchors it reaches.
+
+    Order: each certificate must be issued and signed by the next one (a name
+    break is `broken`/misordered; a signature, CA-flag or path-length failure
+    is `broken`/signature).  Completeness: the top is a verified self-signed
+    root, reaches a trusted anchor, or - for a verified multi-certificate chain
+    whose top issuer is unknown here - stays `complete` with `anchored` False,
+    because a missing root is a trust question, not a missing intermediate.
+    """
+    from . import certs
+    unique, duplicates = certs.dedupe(chain)
+    a = _assess(unique, roots)
+    a.duplicates = duplicates
+    a.evidence += [f"{d} (identical certificate, ignored for linkage)" for d in duplicates]
+    return a
+
+
+def _assess(chain: List[CertInfo], roots: Optional[List[CertInfo]]):
+    from .certs import ChainAssessment
+    name_only = False
+    for i in range(len(chain) - 1):
+        child, parent = chain[i], chain[i + 1]
+        here, nxt = child.position or i + 1, parent.position or i + 2
+        state, detail = verify_link(child, parent)
+        if state == LINK_NAME_ONLY:
+            name_only = True
+            continue
+        if state != LINK_VERIFIED:
+            return ChainAssessment(
+                "broken", broken_at=here, failure=_LINK_FAILURES[state],
+                evidence=[f"position {here}: '{_label(child)}' is not issued by "
+                          f"position {nxt} ('{_label(parent)}') [{detail}]"])
+    for j in range(1, len(chain)):
+        limit, below = chain[j].path_len, j - 1      # CAs between the leaf and chain[j]
+        if limit is not None and below > limit:
+            return ChainAssessment(
+                "broken", broken_at=chain[j].position or j + 1, failure=FAIL_SIGNATURE,
+                evidence=[f"position {chain[j].position or j + 1}: '{_label(chain[j])}' "
+                          f"allows pathLenConstraint:{limit}, but {below} CA "
+                          "certificate(s) follow it in the chain"])
+    top = chain[-1]
+    names = " -> ".join(_label(c) for c in chain)
+    linked = ("linked by name only" if name_only else "signatures verified")
+    ss = self_signed(top)
+    if ss or (ss is None and top.self_issued_name()):
+        a = ChainAssessment("complete", top.subject, name_only=name_only or ss is None,
+                            anchored=True,
+                            evidence=[f"{len(chain)} certificate(s), {linked}, ends at a "
+                                      f"self-signed root ({names})"
+                                      if len(chain) > 1 else
+                                      "single self-signed certificate "
+                                      + ("(self-signature verified)" if ss else
+                                         "(self-signature not verified)")])
+        if ss is None:
+            a.evidence.append("self-signature not verified (openssl not available)")
+        return a
+    if top.self_issued_name() and ss is False:
+        uncertainty_note = (f"'{_label(top)}': subject equals issuer, but it is not "
+                            "self-signed, so it is not accepted as an anchor")
+    else:
+        uncertainty_note = ""
+    if roots is not None:
+        paths, notes = _paths(chain, roots)
+        if paths:
+            used, anchor, verified = paths[0]
+            rows = [f"path {i}: " + " -> ".join(_label(c) for c in p) +
+                    f" -> [{_label(r)}]" + ("" if ok else " (name only)")
+                    for i, (p, r, ok) in enumerate(paths, 1)]
+            ev = [f"{len(chain)} certificate(s), {linked} ({names}); anchored by "
+                  f"trusted root '{_label(anchor)}'", *rows]
+            if len(paths) > 1:
+                ev.append("the verdict uses path 1")
+            if top in used and not top.self_issued_name():
+                # the anchor is reached through the top certificate, which another
+                # CA issued (a cross-signed CA): its own self-signed root is not here
+                ev.append(f"no trusted root named '{top.subject}' is present here, so the "
+                          f"path continues through position {top.position or len(chain)} "
+                          f"('{_label(top)}', issued by '{top.issuer}')")
+            ev += [n for n in notes if "share the name" in n]
+            return ChainAssessment("complete", anchor.subject, anchored=True,
+                                   name_only=name_only or not verified, evidence=ev,
+                                   paths=rows)
+    if len(chain) > 1:
+        note = ("root anchor list unavailable on this machine" if roots is None else
+                f"its issuer '{top.issuer}' is not among this machine's trusted roots "
+                "(anchor unknown)")
+        return ChainAssessment(
+            "complete", top.issuer, anchored=None if roots is None else False,
+            name_only=name_only,
+            evidence=[f"{len(chain)} certificate(s), {linked} ({names})",
+                      f"top certificate is a CA; {note}"]
+            + ([f"trust anchor not found here: '{top.issuer}'"
+                 + (f" (key identifier {top.aki})" if top.aki else "")]
+               if roots is not None else [])
+            + ([uncertainty_note] if uncertainty_note else []))
+    return ChainAssessment(
+        "incomplete", failure=FAIL_INCOMPLETE, name_only=name_only,
+        anchored=None if roots is None else False,
+        evidence=[f"{len(chain)} certificate(s) ({names})",
+                  "intermediate certificate(s) not sent: the chain ends "
+                  f"at a non-CA certificate issued by '{top.issuer}'"
+                  if not top.is_ca else
+                  f"the chain ends at '{_label(top)}', whose issuer was not sent",
+                  _missing_issuer(top)]
+        + ([uncertainty_note] if uncertainty_note else []))
+
+
+def chain_verdict(a) -> Tuple[str, str, List[str]]:
+    """(finding status, failure kind, uncertainty) for a ChainAssessment."""
+    from . import findings as F
+    if a.status == "broken":
+        return (F.FAIL if a.failure == FAIL_SIGNATURE else F.WARNING), a.failure, []
+    if a.status == "incomplete":
+        return F.WARNING, FAIL_INCOMPLETE, []
+    if a.name_only:
+        return F.WARNING, FAIL_UNVERIFIED, [
+            "links matched by name only; signatures not verified (openssl not available)"]
+    if a.duplicates:
+        return F.WARNING, FAIL_HYGIENE, []
+    return F.PASS, "", []
+
+
+# Key Usage bits that let a key of this type authenticate a TLS server
+_LEAF_KEY_USAGE = {"RSA": {"digitalSignature", "keyEncipherment"},
+                   "RSA-PSS": {"digitalSignature"},
+                   "EC": {"digitalSignature", "keyAgreement"},
+                   "Ed25519": {"digitalSignature"}, "Ed448": {"digitalSignature"}}
+
+
+def usage_finding(chain: List[CertInfo], scope: str, target: str):
+    """`chain.usage`: is the leaf usable for TLS server authentication, and may
+    each issuer sign certificates?  Judged from KU / EKU / Basic Constraints."""
+    from . import findings as F
+    title = "Certificate usage for TLS server authentication"
+    if not chain:
+        return F.Finding("chain.usage", title, F.NOT_TESTED, scope,
+                         ["no certificate to check"], target=target)
+    leaf = chain[0]
+    if not leaf.extensions_read:
+        return F.Finding("chain.usage", title, F.NOT_TESTED, scope,
+                         ["certificate extensions could not be read (openssl not "
+                          "available)"], target=target, failure_kind="verifier-unavailable")
+    fails, warns, ok = [], [], []
+    eku = set(leaf.ext_key_usage)
+    if eku and not eku & {"serverAuth", "anyExtendedKeyUsage"}:
+        fails.append(f"'{_label(leaf)}': certificate is not valid for TLS server "
+                     f"authentication (Extended Key Usage: {', '.join(leaf.ext_key_usage)})")
+    else:
+        ok.append(f"'{_label(leaf)}': Extended Key Usage "
+                  + (", ".join(leaf.ext_key_usage) if eku else "not restricted"))
+    allowed = _LEAF_KEY_USAGE.get(leaf.key_type)
+    if leaf.key_usage and allowed is not None and not set(leaf.key_usage) & allowed:
+        fails.append(f"'{_label(leaf)}': Key Usage {', '.join(leaf.key_usage)} does not "
+                     f"allow TLS server authentication with an {leaf.key_type} key")
+    if leaf.is_ca:
+        warns.append(f"'{_label(leaf)}': the server certificate is itself a CA "
+                     "certificate (CA:TRUE)")
+    for i, c in enumerate(chain[1:], 2):
+        if not c.extensions_read:
+            continue
+        if c.key_usage and "keyCertSign" not in c.key_usage:
+            fails.append(f"position {c.position or i} ('{_label(c)}'): Key Usage "
+                         f"{', '.join(c.key_usage)} lacks keyCertSign, so it may not "
+                         "issue certificates")
+    if fails:
+        return F.Finding("chain.usage", title, F.FAIL, scope, fails + warns + ok,
+                         recommendation="Use a certificate issued for TLS server "
+                                        "authentication (EKU serverAuth), with "
+                                        "intermediates that may sign certificates.",
+                         target=target)
+    if warns:
+        return F.Finding("chain.usage", title, F.WARNING, scope, warns + ok,
+                         recommendation="Serve an end-entity certificate (CA:FALSE) for "
+                                        "the domain.", target=target)
+    return F.Finding("chain.usage", title, F.PASS, scope,
+                     ok + ["every issuer with a Key Usage may sign certificates"],
+                     target=target)

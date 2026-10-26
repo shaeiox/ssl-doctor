@@ -52,7 +52,7 @@ class Duplicates(unittest.TestCase):
         self.assertNotIn("is not issued by", text)
         chainfile = local("duplicate.pem")["cert.chainfile"]
         self.assertEqual(chainfile.status, F.WARNING)
-        self.assertIn("position 3 duplicates position 1", chainfile.evidence)
+        self.assertIn("position 3 duplicates position 1", " ".join(chainfile.evidence))
 
     def test_duplicate_in_presented_chain_order_keeps_positions(self):
         p = get_pki()

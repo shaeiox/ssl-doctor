@@ -42,6 +42,36 @@ validating).
   says validation was inconclusive. A TLS-level rejection stays FAIL. Both
   validations now connect to the address the TCP check verified, and name it.
 
+### Fixed (phase 2: verified chains)
+
+- **Chains are verified, not matched by name.** Each link of `tls.chain`,
+  `nginx.chainfile` and `cert.chainfile` must verify with `openssl verify`: the
+  next certificate's key signed it, it is a CA, and `pathLenConstraint` holds.
+  A forged intermediate (same name and key identifier, different key) and a
+  non-CA "intermediate" used to give `complete` / PASS; they are now FAIL
+  (`chain-signature`) with a cause that says the chain does not verify. A
+  wrong or misordered intermediate stays a WARNING. Without `openssl`, links
+  are name-only and the chain is never PASS.
+- Names compare by RFC 5280 rules (case and whitespace).
+- Chain findings carry their defect class in `failure_kind`, and the diagnosis
+  uses it instead of evidence text. A file that only repeats a certificate is
+  no longer reported as "does not send the full chain".
+
+### Added (phase 2)
+
+- Anchoring: a verified self-signed top, or every path to a trusted root (with
+  cross-signed CAs, up to 8 paths), chosen by key identifier when roots share
+  a name, and noted. `tls.chain` now uses the trust anchors for every chain,
+  not only single certificates. A verified chain whose root this machine lacks
+  stays complete, marked "anchor unknown". A missing intermediate is named
+  with its key identifier and AIA URL; nothing is fetched.
+- `chain.usage`: the leaf must allow TLS server authentication (EKU and a Key
+  Usage that fits its key type), and issuers need `keyCertSign`, for presented,
+  configured and supplied chains. Its cause replaces the generic "validation
+  failed" for an unsuitable-purpose error.
+- A certificate counts as self-signed only when its own key verifiably signed
+  it. Equal names are reported as "self-issued name, not self-signed".
+
 ### Fixed (phase 1: strict certificate files)
 
 - **Truncated and corrupt PEM files no longer pass.** A trailing block without

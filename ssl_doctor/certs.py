@@ -48,6 +48,13 @@ def _fmt_name(rdns) -> str:
     return ", ".join(parts)
 
 
+def canonical_name(rdns) -> Tuple[Tuple[str, str], ...]:
+    """RFC 5280 / RFC 4518 style name for comparison: attribute values
+    case-folded with internal whitespace collapsed, regardless of string type."""
+    return tuple((key, " ".join(str(value).casefold().split()))
+                 for rdn in rdns or () for key, value in rdn)
+
+
 def _parse_time(value: str) -> Optional[datetime]:
     """Parse ASN.1 times as returned by _test_decode_cert ('GMT')."""
     for fmt in ("%b %d %H:%M:%S %Y %Z", "%b  %d %H:%M:%S %Y %Z"):
@@ -105,9 +112,21 @@ class CertInfo:
     crl_urls: List[str] = field(default_factory=list)
     pem: bytes = b""
     position: int = 0               # 1-based place in its file or chain; 0 = unknown
+    subject_canon: Tuple[Tuple[str, str], ...] = ()     # see canonical_name()
+    issuer_canon: Tuple[Tuple[str, str], ...] = ()
+
+    def issued_name_of(self, parent: "CertInfo") -> bool:
+        """Does this certificate name `parent` as its issuer (canonical compare)?"""
+        if self.issuer_canon and parent.subject_canon:
+            return self.issuer_canon == parent.subject_canon
+        return bool(self.issuer) and self.issuer == parent.subject
+
+    def self_issued_name(self) -> bool:
+        return self.issued_name_of(self)
 
     def is_self_signed(self) -> bool:
-        return bool(self.subject) and self.subject == self.issuer
+        # names only: whether its own key signed it is chainval.self_signed()
+        return bool(self.subject) and self.self_issued_name()
 
     def days_to_expiry(self) -> Optional[int]:
         if not self.not_after:
@@ -166,6 +185,8 @@ def _decode_with_stdlib(pem: bytes) -> CertInfo:
     info = CertInfo(pem=pem)
     info.subject = _fmt_name(raw.get("subject"))
     info.issuer = _fmt_name(raw.get("issuer"))
+    info.subject_canon = canonical_name(raw.get("subject"))
+    info.issuer_canon = canonical_name(raw.get("issuer"))
     cn = [v for rdn in (raw.get("subject") or ()) for k, v in rdn if k == "commonName"]
     info.common_name = cn[-1] if cn else ""
     icn = [v for rdn in (raw.get("issuer") or ()) for k, v in rdn if k == "commonName"]
@@ -480,7 +501,7 @@ def load_cert_file(path: str) -> Tuple[List[CertInfo], Optional[str]]:
 
 def issued_by(child: CertInfo, parent: CertInfo) -> Tuple[bool, str]:
     """Did `parent` issue `child`?  Returns (verdict, method used)."""
-    if child.issuer != parent.subject:
+    if not child.issued_name_of(parent):
         return False, "issuer/subject name"
     if child.aki and parent.ski:
         return child.aki == parent.ski, "issuer/subject name + key identifier"
@@ -537,6 +558,12 @@ class ChainAssessment:
     evidence: List[str] = field(default_factory=list)
     # "position 3 duplicates position 1": repeated certificates, left out of linkage
     duplicates: List[str] = field(default_factory=list)
+    # contract failure kind for a defect (chain-signature, chain-misordered,
+    # chain-incomplete); "" when the chain is complete
+    failure: str = ""
+    name_only: bool = False         # some link matched by name only (no verifier)
+    anchored: Optional[bool] = None  # top reached a trusted anchor; None = no anchors given
+    paths: List[str] = field(default_factory=list)   # every anchored path found
 
 
 def dedupe(chain: List[CertInfo]) -> Tuple[List[CertInfo], List[str]]:
@@ -563,58 +590,11 @@ def assess_chain(chain: List[CertInfo],
                  roots: Optional[List[CertInfo]] = None) -> ChainAssessment:
     """Judge a presented/configured chain without using intermediate caches.
 
-    `roots` are trusted root anchors (self-signed).  When None, completeness
-    of a chain topped by a CA certificate is assumed and stated as such.
+    `roots` are trusted root anchors.  Links are verified cryptographically
+    (see `chainval.assess`); this wrapper keeps the historic entry point.
     """
-    return _assess_unique(*dedupe(chain), roots)
-
-
-def _assess_unique(chain: List[CertInfo], duplicates: List[str],
-                   roots: Optional[List[CertInfo]]) -> ChainAssessment:
-    a = _assess_linkage(chain, roots)
-    a.duplicates = duplicates
-    a.evidence += [f"{d} (identical certificate, ignored for linkage)" for d in duplicates]
-    return a
-
-
-def _assess_linkage(chain: List[CertInfo],
-                    roots: Optional[List[CertInfo]]) -> ChainAssessment:
-    label = lambda c: c.common_name or c.subject  # noqa: E731
-    for i in range(len(chain) - 1):
-        ok, method = issued_by(chain[i], chain[i + 1])
-        if not ok:
-            here, nxt = chain[i].position or i + 1, chain[i + 1].position or i + 2
-            return ChainAssessment(
-                "broken", broken_at=here,
-                evidence=[f"position {here}: '{label(chain[i])}' is not issued by "
-                          f"position {nxt} ('{label(chain[i + 1])}') [{method}]"])
-    top = chain[-1]
-    names = " -> ".join(label(c) for c in chain)
-    if top.is_self_signed():
-        return ChainAssessment("complete", top.subject,
-                               evidence=[f"{len(chain)} certificate(s), linked, ends at a "
-                                         f"self-signed root ({names})"])
-    if roots is not None:
-        issuer = next((r for r in roots if issued_by(top, r)[0]), None)
-        if issuer:
-            return ChainAssessment("complete", issuer.subject,
-                                   evidence=[f"{len(chain)} certificate(s), linked "
-                                             f"({names}); anchored by trusted root "
-                                             f"'{label(issuer)}'"])
-    if len(chain) > 1:
-        # Linked chain: the top issued the cert below it, so it is a CA and
-        # its issuer is the expected root.  Not finding that root
-        # locally is a trust question (validation reports it), not proof that
-        # the server omitted certificates.
-        note = ("root anchor list unavailable on this machine" if roots is None else
-                f"its issuer '{top.issuer}' is not among this machine's trusted roots")
-        return ChainAssessment("complete", top.issuer,
-                               evidence=[f"{len(chain)} certificate(s), linked ({names})",
-                                         f"top certificate is a CA; {note}"])
-    return ChainAssessment("incomplete",
-                           evidence=[f"{len(chain)} certificate(s) ({names})",
-                                     "intermediate certificate(s) not sent: the chain ends "
-                                     f"at a non-CA certificate issued by '{top.issuer}'"])
+    from . import chainval      # chainval builds on this module
+    return chainval.assess(chain, roots)
 
 
 def _inventory(chain: List[CertInfo]) -> List[str]:
@@ -712,14 +692,33 @@ def inspect_cert_file(path: str, hostname: str = "",
                 [f"certificate is currently valid; {days} days remaining"],
                 target=target))
 
-    # Self-signed?
-    if first.is_self_signed():
-        _add(F.Finding(
-            "cert.selfsigned", "Issued by a trusted CA?", F.WARNING, F.SCOPE_LOCAL,
-            ["subject and issuer are identical: this is a self-signed certificate"],
-            recommendation="Clients will not trust this unless it is imported into their "
-                           "trust store. Use a CA-issued certificate for production.",
-            target=target))
+    # Self-signed?  Only a verified self-signature counts; equal names do not.
+    if first.self_issued_name():
+        from . import chainval
+        verdict = chainval.self_signed(first)
+        if verdict:
+            _add(F.Finding(
+                "cert.selfsigned", "Issued by a trusted CA?", F.WARNING, F.SCOPE_LOCAL,
+                ["this is a self-signed certificate (its own key signed it, verified)"],
+                recommendation="Clients will not trust this unless it is imported into "
+                               "their trust store. Use a CA-issued certificate for "
+                               "production.",
+                target=target))
+        elif verdict is False:
+            _add(F.Finding(
+                "cert.selfsigned", "Issued by a trusted CA?", F.WARNING, F.SCOPE_LOCAL,
+                ["self-issued name, not self-signed: subject equals issuer, but another "
+                 "key signed this certificate"],
+                recommendation="Find the CA certificate that issued it; this certificate "
+                               "cannot serve as its own trust anchor.",
+                target=target))
+        else:
+            _add(F.Finding(
+                "cert.selfsigned", "Issued by a trusted CA?", F.WARNING, F.SCOPE_LOCAL,
+                ["subject and issuer are identical"],
+                uncertainty=["the self-signature could not be verified (openssl not "
+                             "available)"],
+                target=target, failure_kind="verifier-unavailable"))
 
     # Hostname coverage.
     if hostname:
@@ -736,29 +735,35 @@ def inspect_cert_file(path: str, hostname: str = "",
             "using a name the certificate covers.",
             target=target))
 
+    from . import chainval      # chainval builds on this module
+    _add(chainval.usage_finding(certs, F.SCOPE_LOCAL, target))
+
     # Chain structure inside the file.
     if len(certs) > 1:
-        from . import chainval      # chainval builds on this module
         roles, wrong_leaf, structure = chainval.file_structure(certs)
-        a = assess_chain(certs)
-        problems = wrong_leaf + structure + a.duplicates
-        if a.status != "complete":
-            problems = a.evidence + problems
-        if problems:
-            _add(F.Finding(
-                "cert.chainfile", "Certificate chain file structure", F.WARNING, F.SCOPE_LOCAL,
-                [f"{len(certs)} certificates in file", *problems],
-                recommendation="Order the file as: server certificate, then intermediate "
-                               "certificate(s), each once. The root certificate may be "
-                               "omitted.",
-                target=target))
-        else:
+        a = assess_chain(certs, load_root_anchors())
+        status, kind, uncertainty = chainval.chain_verdict(a)
+        if wrong_leaf:
+            # what the file is for is unknown locally, so a CA first is a warning
+            status = F.FAIL if status == F.FAIL else F.WARNING
+            kind = kind if status == F.FAIL else chainval.FAIL_WRONG_LEAF
+        elif status == F.PASS and structure:
+            status, kind = F.WARNING, chainval.FAIL_HYGIENE
+        if status == F.PASS:
             _add(F.Finding(
                 "cert.chainfile", "Certificate chain file structure", F.PASS, F.SCOPE_LOCAL,
                 [f"{len(certs)} certificates, correctly ordered "
                  f"({' -> '.join(c.common_name or c.subject for c in certs)})",
                  *a.evidence],
                 target=target))
+        else:
+            _add(F.Finding(
+                "cert.chainfile", "Certificate chain file structure", status, F.SCOPE_LOCAL,
+                [f"{len(certs)} certificates in file", *a.evidence, *wrong_leaf, *structure],
+                recommendation="Order the file as: server certificate, then intermediate "
+                               "certificate(s) that issued it, each once. The root "
+                               "certificate may be omitted.",
+                target=target, failure_kind=kind, uncertainty=uncertainty))
 
     return out
 

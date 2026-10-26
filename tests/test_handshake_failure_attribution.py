@@ -190,7 +190,10 @@ class FailureKindContractTests(unittest.TestCase):
             "probe-inconclusive", "endpoint-unreachable",
             # 1.7: why a certificate or key question stayed open
             "verifier-unavailable", "key-encrypted", "key-unreadable",
-            "command-failed", "permission-denied"})
+            "command-failed", "permission-denied",
+            # 1.7: chain defect classes
+            "chain-signature", "chain-misordered", "chain-incomplete",
+            "chain-unverified", "chain-hygiene", "chain-wrong-leaf"})
 
     def test_finding_defaults_to_unclassified(self):
         self.assertEqual(F.Finding("tls.chain", "t", F.PASS, F.SCOPE_REMOTE_NET

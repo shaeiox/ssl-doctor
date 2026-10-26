@@ -250,7 +250,8 @@ wrong endpoint).
 
 | Check id | What it proves |
 |---|---|
-| `tls.chain` | The chain the server **actually sends**, judged on its own: `complete`, `incomplete` (intermediates not sent) or `broken` (a certificate is not issued by the next one, matched by name and key identifier). Reported `NOT TESTED` when the chain can't be read; it never assumes "leaf only". |
+| `tls.chain` | The chain the server **actually sends**, judged on its own. Each link is **verified cryptographically** with `openssl verify`: the next certificate's key must have signed it, and it must be a CA (Basic Constraints, `pathLenConstraint`). Names and key identifiers only pick the candidate. `complete`: PASS, evidence "signatures verified", every path to a trusted root listed (cross-signed chains give several), and a verified chain whose root this machine lacks stays complete ("anchor unknown"). `incomplete`: WARNING, naming the missing issuer, its key identifier and the AIA URL. `broken`: a wrong or misordered issuer is a WARNING, while a failed signature, a non-CA issuer or an exceeded path length is a FAIL. Duplicates are a WARNING. Without `openssl` the links are matched by name only and the chain is never PASS. `NOT TESTED` when the chain can't be read; it never assumes "leaf only". |
+| `chain.usage` | The leaf may authenticate a TLS server (EKU `serverAuth` or unrestricted; Key Usage that fits its key type), and every issuer with a Key Usage includes `keyCertSign`. A client-only certificate is FAIL with its own cause. |
 | `tls.verify` | Validation against this machine's full trust store, including any cached intermediates (what *this* machine sees). |
 | `tls.verify.rootonly` | Validation against trusted **roots only**, with no cached or bundled intermediates (what a client that has never seen the intermediate sees). PASS on `tls.verify` with FAIL here means the server is missing its intermediate. |
 | `tls.hostname` | Name coverage from **subjectAltName only**. A CN-only certificate fails, because modern clients ignore the CN. |
@@ -350,8 +351,11 @@ Via a read-only SSH session (`/server connect` or `/scan --server-only` /
    below run only on files that could be opened; otherwise they are NOT TESTED
    with the reason, so a path problem is never shown as a broken certificate.
 6. **Chain linkage of `ssl_certificate`**: the leaf comes first, and each
-   certificate must be issued by the next one. A leaf-only file (intermediates
-   not sent) or a wrong intermediate gives a WARNING naming the broken link.
+   certificate must be issued **and signed** by the next one (same verification
+   as `tls.chain`). A leaf-only file (intermediates not sent) or a wrong
+   intermediate gives a WARNING naming the broken link. A forged or non-CA
+   intermediate, a file that starts with a CA certificate, or a DER file gives a
+   FAIL. `chain.usage` checks the configured certificate's key usages.
 7. **Certificate details + key pairing** of the referenced files (digest-only
    comparison, key bytes never read out). A key the account may not read —
    normal for root-only keys — makes the pairing NOT TESTED, not a warning.

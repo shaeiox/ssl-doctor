@@ -17,6 +17,9 @@ from .contract import TRANSPORT_FAILURE_KINDS
 
 
 _TIMEOUT_KINDS = ("connect-timeout", "negotiation-timeout")
+# chain defects that make the server's chain wrong (not a client trust question)
+_CHAIN_DEFECTS = ("chain-signature", "chain-misordered", "chain-incomplete",
+                  "chain-wrong-leaf")
 
 # Checks that report on the diagnostic session itself (could SSL Doctor log in
 # and run its read-only commands), not on the server's TLS configuration.
@@ -246,27 +249,46 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
     # is the running instance's, complete (nginx.conf PASS); documents from
     # before configuration discovery carry no nginx.conf verdict to doubt
     nginx_confirmed = nginx_conf is None or nginx_conf.status == F.PASS
+    # chain findings carry their defect class; documents from before 1.7 do not,
+    # and then a WARNING is read the way it always was
     chain_bad = [f for f in (chain, chainfile if nginx_confirmed else None)
-                 if f and f.status == F.WARNING]
+                 if f and f.status in (F.WARNING, F.FAIL)
+                 and (f.failure_kind in _CHAIN_DEFECTS
+                      or (not f.failure_kind and f.status == F.WARNING))]
+    chain_hygiene = [f for f in (chain, chainfile if nginx_confirmed else None)
+                     if f and f.failure_kind == "chain-hygiene"]
     rootonly_missing = bool(rootonly and rootonly.status == F.FAIL and any(
         k in " ".join(rootonly.evidence).lower()
         for k in ("local issuer", "first certificate")))
     server_chain_cause = bool(chain_bad or rootonly_missing)
     if server_chain_cause:
         joined = " ".join(e for f in chain_bad for e in f.evidence)
-        broken = "is not issued by" in joined
+        kinds = {f.failure_kind for f in chain_bad}
+        signature = "chain-signature" in kinds
+        broken = bool(kinds & {"chain-misordered", "chain-wrong-leaf"}) or (
+            not kinds - {""} and "is not issued by" in joined)
         ev = [e for f in chain_bad for e in f.evidence] + \
              (rootonly.evidence[:1] if rootonly_missing else [])
         rec = next((f.recommendation for f in (chainfile, chain)
                     if f and f.status == F.WARNING and f.recommendation), "") or \
             (rootonly.recommendation if rootonly_missing else "")
         add("confirmed" if chain_bad else "probable", "server",
+            "The certificate chain does not verify - a certificate in it did not sign "
+            "the one before it, or is not allowed to issue certificates"
+            if signature else
             "The server sends a wrong or misordered certificate chain - an "
             "intermediate does not match the certificate it should have issued"
             if broken else
             "The server does not send the full chain (missing intermediates) - "
             "clients without a cached intermediate fail",
             ev, rec, explains=("tls.chain", "nginx.chainfile", "tls.verify.rootonly"))
+    if chain_hygiene:
+        add("possible", "server",
+            "The certificate chain repeats certificates or carries unrelated ones - "
+            "harmless for most clients, but a sign the file was assembled by hand",
+            [e for f in chain_hygiene for e in f.evidence],
+            chain_hygiene[0].recommendation, bump=50,
+            explains=("tls.chain", "nginx.chainfile"))
     if vhost and vhost.status == F.WARNING and nginx_confirmed:
         joined = " ".join(vhost.evidence)
         no_block = re.search(r"no server block listens on port (\d+)", joined)
@@ -347,6 +369,18 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
             namefail.evidence + corroborate, namefail.recommendation,
             explains=("tls.hostname", "cert.hostname"))
 
+    # ---- certificate usage (KU / EKU / CA flags) ---------------------------------
+    usage_bad = [f for f in _by_check(items, "chain.usage") if f.status == F.FAIL]
+    if usage_bad:
+        u = usage_bad[-1]
+        leaf_side = any("TLS server authentication" in e for e in u.evidence)
+        add("confirmed", "certificate",
+            "The certificate is not valid for TLS server authentication (Key Usage / "
+            "Extended Key Usage)" if leaf_side else
+            "An intermediate certificate is not allowed to issue certificates (Key "
+            "Usage lacks keyCertSign)",
+            u.evidence, u.recommendation, explains=("chain.usage",))
+
     # ---- trust chain ---------------------------------------------------------
     # A validation handshake that never reached a verdict (stall, reset) says
     # nothing about the certificate: it is noted, never turned into a cause.
@@ -387,6 +421,9 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
             explained.update(("tls.verify", "tls.verify.rootonly"))  # validity rule
         elif ("mismatch" in joined or "not cover" in joined) and namefail:
             explained.update(("tls.verify", "tls.verify.rootonly"))  # hostname rule
+        elif usage_bad and any(k in joined for k in ("purpose", "invalid ca",
+                                                        "usage", "key usage")):
+            explained.update(("tls.verify", "tls.verify.rootonly"))  # usage rule
         elif "expired" in joined or "mismatch" in joined or "not cover" in joined:
             # e.g. an expired intermediate behind a valid leaf: no rule names it
             # yet, so the finding stays unexplained and still decides the verdict

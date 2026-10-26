@@ -20,7 +20,7 @@ published: [`findings-1.6`](../schemas/findings-1.6.schema.json),
 | 1.4 | Per-version probe classes in `facts.probe_policy.support` (`default`, `relaxed-only`, `relaxed-only-unverified`, `rejected`, `inconclusive`) plus `confirmed_legacy` / `unverified_legacy`, and three new observations that say which policy actually proved deprecated-TLS acceptance. A relaxed-policy handshake can no longer be reported as ordinary-client support |
 | 1.5 | Optional `uncertainty` on findings (why the evidence cannot settle the question), `diagnosis.unresolved` (warnings kept visible without a root cause), `facts.probe_policy.default_probe` (raw default-policy probe state, `client-limited` = never sent) and `facts.endpoint_comparison.addresses` (DNS addresses, so partial coverage is explicit) |
 | 1.6 | Check id `nginx.path_resolution`: how `ssl_certificate` / `ssl_certificate_key` were resolved (nginx's configuration-prefix rule or a saved manual setting) and whether the files can be opened, reported apart from certificate validation. No structural change |
-| 1.7 | Check ids for verified certificate analysis (`chain.validity`, `chain.usage`, `chain.trust`, `cert.policy`, `cert.cafile`, `tls.revocation`) and TLS service deployment (`srv.service`, `srv.configtest`, `srv.reload`, `srv.renewal`, `srv.keystartup`, `srv.inventory`); failure kinds `verifier-unavailable`, `key-encrypted`, `key-unreadable`, `command-failed`, `permission-denied`; optional `facts.certificates` (per judged chain) and `diagnosis.unexplained` (failures no cause rule explained, which now count toward `overall`) |
+| 1.7 | Check ids for verified certificate analysis (`chain.validity`, `chain.usage`, `chain.trust`, `cert.policy`, `cert.cafile`, `tls.revocation`) and TLS service deployment (`srv.service`, `srv.configtest`, `srv.reload`, `srv.renewal`, `srv.keystartup`, `srv.inventory`); failure kinds `verifier-unavailable`, `key-encrypted`, `key-unreadable`, `command-failed`, `permission-denied` and the chain classes `chain-signature`, `chain-misordered`, `chain-incomplete`, `chain-unverified`, `chain-hygiene`, `chain-wrong-leaf`; optional `facts.certificates` (per judged chain) and `diagnosis.unexplained` (failures no cause rule explained, which now count toward `overall`) |
 
 ## Versioning
 
@@ -54,6 +54,12 @@ when nothing failed, including every `PASS`.
 | `key-unreadable` | `cert.keymatch`, `srv.keymatch` | the key exists but this account cannot read it |
 | `command-failed` | server and certificate checks | a command the check needs exited unsuccessfully; its output was not used as evidence |
 | `permission-denied` | server checks | the check needs access this account does not have |
+| `chain-signature` | `tls.chain`, `nginx.chainfile`, `cert.chainfile` | a link's signature, CA flag (Basic Constraints) or path length does not verify (`FAIL`) |
+| `chain-misordered` | chain checks | a certificate is not followed by the certificate that issued it (`WARNING`) |
+| `chain-incomplete` | chain checks | the issuer of the top certificate was not included (`WARNING`) |
+| `chain-unverified` | chain checks | links match by name only; signatures could not be verified (`WARNING`, with `uncertainty`) |
+| `chain-hygiene` | chain checks | repeated or unrelated certificates (`WARNING`) |
+| `chain-wrong-leaf` | `nginx.chainfile`, `cert.chainfile` | the file starts with a CA certificate instead of the server certificate |
 
 `connect-timeout`, `negotiation-timeout`, `network-error` and
 `endpoint-unreachable` describe the network path. A `FAIL` that carries one of

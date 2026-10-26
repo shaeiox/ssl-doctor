@@ -819,6 +819,7 @@ class ServerSession:
         self.connected = False
         # populated by cert scans
         self.last_remote_cert_sha256: str = ""
+        self.last_configured_chain: List = []      # certificates of the last chain file read
         self.nginx_cert_path: str = ""
         self.nginx_key_path: str = ""
         # nginx invocation for config dumps; override for non-default installs,
@@ -1610,7 +1611,11 @@ class ServerSession:
         if cert and cert_state == "readable":
             cert_path = cert["resolved"]
             key_path = key["resolved"] if key else ""
+            self.last_configured_chain = []
             _add(self._chainfile_finding(cert_path))
+            if self.last_configured_chain:
+                _add(chainval.usage_finding(self.last_configured_chain, F.SCOPE_SERVER,
+                                            cert_path))
             out.extend(self.scan_cert(cert_path, key_path, emit=emit,
                                       states={cert_path: cert_state,
                                               **({key_path: key_state} if key_path else {})}))
@@ -1769,8 +1774,9 @@ class ServerSession:
                              [e for e in ev + notes if e], recommendation=rec,
                              target=cert_path)
         chain = parsed.certs
+        self.last_configured_chain = chain
         roles, wrong_leaf, structure = chainval.file_structure(chain)
-        a = certs.assess_chain(chain)
+        a = certs.assess_chain(chain, certs.load_root_anchors())
         ev = [f"{cert_path}: {len(chain)} certificate(s) in file",
               *chainval.inventory_lines(chain, roles), *a.evidence, *wrong_leaf,
               *structure, *notes]
@@ -1779,24 +1785,29 @@ class ServerSession:
                              recommendation="nginx serves the first certificate of the "
                                             "file: put the server (leaf) certificate "
                                             "first, then its intermediate(s).",
-                             target=cert_path)
-        if a.status == "complete" and not (a.duplicates or structure):
-            return F.Finding("nginx.chainfile", title, F.PASS, F.SCOPE_SERVER, ev,
-                             target=cert_path)
-        if a.status == "complete":
-            return F.Finding("nginx.chainfile", title, F.WARNING, F.SCOPE_SERVER, ev,
-                             recommendation="Remove repeated and unrelated certificates: "
-                                            "the file should hold the leaf, then the "
-                                            "intermediate(s) that issued it, once each.",
-                             target=cert_path)
-        rec = ("Order the file as: leaf first, then the intermediate(s) that issued it; "
-               "replace any intermediate that did not issue the certificate above it."
-               if a.status == "broken" else
-               "Append the issuing intermediate certificate(s) after the leaf in the "
-               "ssl_certificate file and reload nginx - clients without a cached "
-               "intermediate fail otherwise.")
-        return F.Finding("nginx.chainfile", title, F.WARNING, F.SCOPE_SERVER, ev,
-                         recommendation=rec, target=cert_path)
+                             target=cert_path, failure_kind=chainval.FAIL_WRONG_LEAF)
+        status, kind, uncertainty = chainval.chain_verdict(a)
+        if status == F.PASS and structure:
+            status, kind = F.WARNING, chainval.FAIL_HYGIENE
+        rec = {
+            chainval.FAIL_SIGNATURE:
+                "A certificate in the file did not sign the one before it, or may not "
+                "issue certificates: replace the intermediate(s) with the ones your CA "
+                "issued for this certificate, leaf first.",
+            chainval.FAIL_MISORDERED:
+                "Order the file as: leaf first, then the intermediate(s) that issued it; "
+                "replace any intermediate that did not issue the certificate above it.",
+            chainval.FAIL_INCOMPLETE:
+                "Append the issuing intermediate certificate(s) after the leaf in the "
+                "ssl_certificate file and reload nginx - clients without a cached "
+                "intermediate fail otherwise.",
+            chainval.FAIL_HYGIENE:
+                "Remove repeated and unrelated certificates: the file should hold the "
+                "leaf, then the intermediate(s) that issued it, once each.",
+        }.get(kind, "")
+        return F.Finding("nginx.chainfile", title, status, F.SCOPE_SERVER, ev,
+                         recommendation=rec, target=cert_path, failure_kind=kind,
+                         uncertainty=uncertainty)
 
     def compare_configured_vs_presented(self, presented_sha256: str,
                                        emit: Optional[Callable[[F.Finding], None]] = None

@@ -101,7 +101,7 @@ When no path reaches an anchor from the certificates provided, SSL Doctor SHALL 
 
 #### Scenario: Linked chain whose top is not anchored
 - **WHEN** the provided certificates form a verified chain whose top is an intermediate whose issuer is absent from the trust configuration
-- **THEN** the result is not `complete`; it is reported as anchored-unknown, with the top's issuer named
+- **THEN** the chain status stays `complete` (the server sent what it must), the result is marked anchor-unknown with the top's issuer named, and no missing-intermediate cause is raised; trust is reported by the trust verdict
 
 ### Requirement: Validation names its trust anchor and trust configuration (audit #22)
 A chain-validation result SHALL name the trust configuration used (system store path, Windows store, or an explicitly supplied CA file), its number of anchors, and the anchor reached. A chain SHALL be `valid` only when a verified path reaches an anchor of that configuration and every certificate on the path is within its validity period.

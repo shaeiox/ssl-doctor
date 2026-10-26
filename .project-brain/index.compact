@@ -10,9 +10,9 @@
 @src index.md  @gen 2026-10-26  @updated 2026-10-26
 
 P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
-  ~ 2026-10-26 next: P2 verified chains (tasks 3.2–3.10) · blocker: none
+  ~ 2026-10-26 next: P3 trust, lifecycle, policy, hostname (tasks 4.x) · blocker: none
   architecture-and-scope ✓v 2026-10-25 v2
-  chain-diagnosis ✓v 2026-10-24 v1
+  chain-diagnosis ✓d 2026-10-26 v2
   server-ssh-nginx ✓d 2026-10-25 v4
   commands-reference ✓v 2026-10-25 v2
   evidence-based-probes ✓v 2026-10-24 v1

@@ -40,6 +40,16 @@ sample this openssl cannot build skips the calling test with the reason):
     same-name-int.pem   the intermediate's subject on another key (own SKI)
     leaf-issued.pem  a certificate issued (and signed) by the CA:FALSE leaf
     self-signed-leaf.pem  self-signed, CA:FALSE, digitalSignature only
+    nonca-chain.pem  leaf-issued.pem + the leaf that signed it (non-CA issuer)
+    pathlen-chain.pem    leaf below a sub-CA below the pathlen:0 intermediate
+    client-leaf.pem  EKU clientAuth only, issued by the intermediate
+    nosign-chain.pem leaf + an intermediate whose Key Usage lacks keyCertSign
+    root2.pem        a second root with the test root's name and another key
+    cross-root.pem   the test root's subject and key, cross-signed by old-root.pem
+    old-root.pem     a different self-signed root ("SSLDoctor Old Root")
+    case-chain.pem   child of "CN=Case CA" + the same key re-issued as "CN=CASE ca"
+    aia-leaf.pem     leaf issued by the intermediate with an AIA caIssuers URL
+    forged-chain.pem leaf + forged-int.pem
 """
 
 from __future__ import annotations
@@ -309,6 +319,92 @@ def _self_signed_leaf(pki: "PKI", out: str) -> None:
          "-addext", "subjectAltName=DNS:self.test", cwd=pki.dir)
 
 
+def _issue_sample(pki: "PKI", name: str, subject: str, ca_pem: str, ca_key: str,
+                  ext: str, key: str = "") -> str:
+    """Issue `<name>.pem` under `ca_pem`/`ca_key`; returns its path."""
+    d = pki.dir
+    keyopt = ["-key", key] if key else ["-newkey", "rsa:2048", "-nodes",
+                                        "-keyout", f"{name}.key"]
+    _run("req", "-new", *keyopt, "-out", f"{name}.csr", "-subj", subject, cwd=d)
+    with open(os.path.join(d, f"{name}.ext"), "w") as fh:
+        fh.write(ext)
+    _run("x509", "-req", "-in", f"{name}.csr", "-CA", ca_pem, "-CAkey", ca_key,
+         "-CAcreateserial", "-out", f"{name}.pem", "-days", "30",
+         "-extfile", f"{name}.ext", cwd=d)
+    return pki.path(f"{name}.pem")
+
+
+def _nonca_chain(pki: "PKI", out: str) -> None:
+    _cat(lambda p: _read(p.sample("leaf-issued.pem")), _file("leaf"))(pki, out)
+
+
+def _pathlen_chain(pki: "PKI", out: str) -> None:
+    sub = _issue_sample(pki, "sub_int", "/CN=SSLDoctor Sub CA", "int.pem", "int.key",
+                        _CA_EXT.replace(",pathlen:0", ""))
+    leaf = _issue_sample(pki, "deep_leaf", "/CN=deep.shop.test", "sub_int.pem",
+                         "sub_int.key", _LEAF_EXT + "subjectAltName=DNS:deep.shop.test\n")
+    _cat(lambda p: _read(leaf), lambda p: _read(sub), _file("intermediate"))(pki, out)
+
+
+def _client_leaf(pki: "PKI", out: str) -> None:
+    path = _issue_sample(pki, "client_leaf", f"/CN={HOSTNAME}", "int.pem", "int.key",
+                         "basicConstraints=CA:FALSE\nextendedKeyUsage=clientAuth\n"
+                         f"subjectAltName=DNS:{HOSTNAME}\n")
+    _cat(lambda p: _read(path), _file("intermediate"))(pki, out)
+
+
+def _nosign_chain(pki: "PKI", out: str) -> None:
+    inter = _issue_sample(pki, "nosign_int", "/CN=SSLDoctor NoSign CA", "root.pem",
+                          "root.key", "basicConstraints=critical,CA:TRUE\n"
+                          "keyUsage=critical,digitalSignature\n")
+    leaf = _issue_sample(pki, "nosign_leaf", f"/CN={HOSTNAME}", "nosign_int.pem",
+                         "nosign_int.key", _LEAF_EXT + f"subjectAltName=DNS:{HOSTNAME}\n")
+    _cat(lambda p: _read(leaf), lambda p: _read(inter))(pki, out)
+
+
+def _root2(pki: "PKI", out: str) -> None:
+    _run("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "root2.key",
+         "-out", out, "-days", "30", "-subj", "/CN=SSLDoctor Test Root",
+         "-addext", "basicConstraints=critical,CA:TRUE",
+         "-addext", "keyUsage=critical,keyCertSign,cRLSign", cwd=pki.dir)
+
+
+def _old_root(pki: "PKI", out: str) -> None:
+    _run("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "old_root.key",
+         "-out", out, "-days", "30", "-subj", "/CN=SSLDoctor Old Root",
+         "-addext", "basicConstraints=critical,CA:TRUE",
+         "-addext", "keyUsage=critical,keyCertSign,cRLSign", cwd=pki.dir)
+
+
+def _cross_root(pki: "PKI", out: str) -> None:
+    pki.sample("old-root.pem")
+    path = _issue_sample(pki, "cross_root", "/CN=SSLDoctor Test Root", "old-root.pem",
+                         "old_root.key", "basicConstraints=critical,CA:TRUE\n"
+                         "keyUsage=critical,keyCertSign,cRLSign\n"
+                         "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n",
+                         key="root.key")
+    os.replace(path, out)
+
+
+def _case_chain(pki: "PKI", out: str) -> None:
+    d = pki.dir
+    _run("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "case.key",
+         "-out", "case_ca.pem", "-days", "30", "-subj", "/CN=Case CA",
+         "-addext", "basicConstraints=critical,CA:TRUE", cwd=d)
+    child = _issue_sample(pki, "case_child", "/CN=case.test", "case_ca.pem", "case.key",
+                          "basicConstraints=CA:FALSE\n")
+    _run("req", "-x509", "-key", "case.key", "-out", "case_variant.pem", "-days", "30",
+         "-subj", "/CN=CASE   ca", "-addext", "basicConstraints=critical,CA:TRUE", cwd=d)
+    _cat(lambda p: _read(child), lambda p: _read(p.path("case_variant.pem")))(pki, out)
+
+
+def _aia_leaf(pki: "PKI", out: str) -> None:
+    path = _issue_sample(pki, "aia_leaf", f"/CN={HOSTNAME}", "int.pem", "int.key",
+                         _LEAF_EXT + f"subjectAltName=DNS:{HOSTNAME}\n"
+                         "authorityInfoAccess=caIssuers;URI:http://ca.test/int.crt\n")
+    os.replace(path, out)
+
+
 _SAMPLES = {
     "truncated.pem": _cat(_file("leaf"), _truncated_int),
     "corrupt.pem": _cat(_file("leaf"), _corrupt_int, _file("root")),
@@ -331,6 +427,16 @@ _SAMPLES = {
     "same-name-int.pem": _same_name_int,
     "leaf-issued.pem": _leaf_issued,
     "self-signed-leaf.pem": _self_signed_leaf,
+    "nonca-chain.pem": _nonca_chain,
+    "pathlen-chain.pem": _pathlen_chain,
+    "client-leaf.pem": _client_leaf,
+    "nosign-chain.pem": _nosign_chain,
+    "root2.pem": _root2,
+    "old-root.pem": _old_root,
+    "cross-root.pem": _cross_root,
+    "case-chain.pem": _case_chain,
+    "aia-leaf.pem": _aia_leaf,
+    "forged-chain.pem": _cat(_file("leaf"), lambda p: _read(p.sample("forged-int.pem"))),
 }
 
 

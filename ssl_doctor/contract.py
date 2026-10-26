@@ -51,6 +51,14 @@ FAILURE_KINDS: Dict[str, str] = {
     "key-unreadable": "the private key exists but this account cannot read it",
     "command-failed": "a command needed for the check exited unsuccessfully",
     "permission-denied": "the check needs access this account does not have",
+    # 1.7: what is wrong with a certificate chain (tls.chain, nginx.chainfile,
+    # cert.chainfile), so correlation never parses evidence text
+    "chain-signature": "a link's signature, CA flag or path length does not verify",
+    "chain-misordered": "a certificate is not followed by the certificate that issued it",
+    "chain-incomplete": "the issuer of the top certificate was not included",
+    "chain-unverified": "links match by name only; signatures could not be verified",
+    "chain-hygiene": "the chain repeats certificates or holds unrelated ones",
+    "chain-wrong-leaf": "the file does not start with the server certificate",
 }
 
 # Failure kinds that describe the path to the endpoint, not the endpoint's

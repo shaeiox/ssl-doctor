@@ -61,3 +61,5 @@ One line per settled choice: `YYYY-MM: chosen > rejected — why`.
 2026-10: unregistered check ids reported by `contract.unregistered_checks()` > a `check` enum in the 1.7 schema — an enum would make 1.7 consumers reject later 1.x documents.
 2026-10: nginx.chainfile FAIL for a DER file > PASS because it parses — nginx's ssl_certificate loads only PEM, so the configured file can never be served.
 2026-10: cert.cafile treats intermediates in a service CA file (ssl_trusted_certificate) as normal > warning on every non-root — nginx uses them to verify OCSP responses/client certs; only a supplied root file warns on non-roots.
+2026-10: a verified chain whose top issuer is not a local root stays chain_status complete (anchor unknown) > 'not complete' as first specified — a missing root is a client trust question; calling it incomplete re-creates the old 'blame the server for missing intermediates' defect.
+2026-10: chain defects as failure_kind (chain-signature/misordered/incomplete/unverified/hygiene/wrong-leaf) > correlating on evidence text — a duplicate-only file was being read as 'missing intermediates'.

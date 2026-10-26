@@ -6,10 +6,10 @@
 
 - (no topics yet)
 
-> resume 2026-10-26 · done: complete-certificate-diagnostics P0 + P1 (strict parsing, records, roles, duplicates, CA files) and task 3.1 (openssl verify wrapper) on branch feat/complete-certificate-diagnostics, uncommitted · next: P2 verified chains (tasks 3.2–3.10) · blocker: none
+> resume 2026-10-26 · done: complete-certificate-diagnostics P0+P1 (commit 0e0a930) and P2 verified chains on branch feat/complete-certificate-diagnostics · next: P3 trust, lifecycle, policy, hostname (tasks 4.x) · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-25 · v2] → projects/ssl-doctor/architecture-and-scope.md
-- chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md
+- chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ done 2026-10-26 · v2] → projects/ssl-doctor/chain-diagnosis.md
 - server-ssh-nginx → Read-only SSH, nginx vhost resolution, chain linkage, configured-vs-presented   [✓ done 2026-10-25 · v4] → projects/ssl-doctor/server-ssh-nginx.md
 - commands-reference → Actual executed commands documented (local/remote, traced to source)   [✓ verified 2026-10-25 · v2] → projects/ssl-doctor/commands-reference.md
 - evidence-based-probes → Endpoint states, comparable-only comparison, SNI observations, probe reconciliation, cause limitations   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/evidence-based-probes.md
