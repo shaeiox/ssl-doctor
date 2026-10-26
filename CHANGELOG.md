@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — trustworthy verdicts (complete-certificate-diagnostics, phase 0)
+## Unreleased — trustworthy verdicts (complete-certificate-diagnostics)
 
 A failing check can no longer disappear from the overall result, and checks
 that could not be completed are no longer reported as certificate or key
@@ -233,6 +233,14 @@ validating).
   later 1.x versions.
 - `tests/baseline/`: the recorded test-id list and `record.py --check`, which
   fails when a baseline test disappears, starts skipping or fails.
+
+### Verification
+
+- Integration gate: no private-key line, passphrase or SSH password reaches
+  any export (terminal, JSON, HTML, agent report, agent upload); an end-to-end
+  `/scan --with-server` names an expired intermediate and a missing reload and
+  exits 1. All 45 audited checks are now covered by passing tests
+  (`openspec/changes/complete-certificate-diagnostics/verification.md`).
 
 ## v0.10.1 — mouse-wheel scrolling on Windows consoles
 

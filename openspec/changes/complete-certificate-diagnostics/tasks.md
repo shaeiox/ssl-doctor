@@ -85,10 +85,10 @@
 
 ## 9. Integration and regression gate
 
-- [ ] 9.1 Full-suite comparison against the 1.1 baseline: no test id removed, no unexplained new skip, and `tests/test_sni_observation` (#29, unchanged behaviour) and `tests/test_tls_inspection.PresentedChainTests` (#26) are still green; verify with a diff of the `-v` outputs
-- [ ] 9.2 Security grep over every export path (stdout, JSON, HTML, agent report, upload payload) for every fixture key and passphrase line; verify zero matches
-- [ ] 9.3 End-to-end `/scan --with-server` against a `LocalSession` nginx fixture with an expired intermediate, an encrypted key with `ssl_password_file`, and a certificate newer than the workers; verify the diagnosis names all three causes and the exit code is 1
-- [ ] 9.4 Re-run the audit's 45-row matrix against the implementation and record each row's new status with its test id; verify every row references a passing test
+- [x] 9.1 Full-suite comparison against the 1.1 baseline: no test id removed, no unexplained new skip, and `tests/test_sni_observation` (#29, unchanged behaviour) and `tests/test_tls_inspection.PresentedChainTests` (#26) are still green; verify with a diff of the `-v` outputs
+- [x] 9.2 Security grep over every export path (stdout, JSON, HTML, agent report, upload payload) for every fixture key and passphrase line; verify zero matches
+- [x] 9.3 End-to-end `/scan --with-server` against a `LocalSession` nginx fixture with an expired intermediate, an encrypted key with `ssl_password_file`, and a certificate newer than the workers; verify the diagnosis names all three causes and the exit code is 1
+- [x] 9.4 Re-run the audit's 45-row matrix against the implementation and record each row's new status with its test id; verify every row references a passing test
 
 ## Workflow follow-up
 
