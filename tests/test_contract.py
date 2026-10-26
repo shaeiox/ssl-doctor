@@ -144,7 +144,7 @@ class FailureKindTests(unittest.TestCase):
                       ["properties"])
         self.assertIn("limitations", contract.SCHEMA["properties"]["diagnosis"]
                       ["properties"]["causes"]["items"]["properties"])
-        self.assertEqual(contract.SCHEMA_VERSION, "1.6")
+        self.assertEqual(contract.SCHEMA_VERSION, "1.7")
 
     def test_protocol_evidence_classes_are_declared(self):
         """1.4 declares which policy proved each version, and the legacy classes."""
@@ -168,6 +168,95 @@ class FailureKindTests(unittest.TestCase):
         # 1.3 stays published without the new classes
         with open(os.path.join(ROOT, "schemas", "findings-1.3.schema.json")) as fh:
             self.assertNotIn("tls12-relaxed-only", json.dumps(json.load(fh)))
+
+
+class CertificateEvidenceTests(unittest.TestCase):
+    """1.7 adds certificate/service check ids, key failure kinds,
+    facts.certificates and diagnosis.unexplained - all optional."""
+
+    SHA = "ab" * 32
+
+    def doc(self, version="1.7", **extra):
+        d = {"schema_version": version, "tool": "x", "generated_utc": "t",
+             "summary": {s: 0 for s in ("PASS", "FAIL", "WARNING", "NOT TESTED")},
+             "findings": []}
+        d.update(extra)
+        return d
+
+    def chain(self, **cert):
+        entry = {"position": 1, "role": "leaf", "sha256": self.SHA, "link": "verified"}
+        entry.update(cert)
+        return {"source": "presented", "status": "complete", "trust_class": "public",
+                "anchor": "CN=Root", "revocation": "not-checked",
+                "certificates": [entry]}
+
+    def test_new_check_ids_and_failure_kinds_are_registered(self):
+        for check in ("chain.validity", "chain.usage", "chain.trust", "cert.policy",
+                      "cert.cafile", "tls.revocation", "srv.service", "srv.configtest",
+                      "srv.reload", "srv.renewal", "srv.keystartup", "srv.inventory"):
+            self.assertIn(check, contract.CHECK_IDS)
+        for kind in ("verifier-unavailable", "key-encrypted", "key-unreadable",
+                     "command-failed", "permission-denied"):
+            self.assertIn(kind, contract.FAILURE_KINDS)
+
+    def test_certificate_facts_validate_and_bad_values_are_rejected(self):
+        doc = self.doc(facts={"certificates": {"presented": self.chain(),
+                                               "configured:/etc/ssl/a.pem": self.chain()}})
+        self.assertEqual(contract.validate(doc), [])
+        doc["facts"]["certificates"]["presented"]["certificates"][0]["role"] = "boss"
+        self.assertTrue(contract.validate(doc))
+        doc = self.doc(facts={"certificates": {"x": self.chain(sha256="nothex")}})
+        self.assertTrue(contract.validate(doc), "extra keys are validated too")
+
+    def test_unexplained_entries_validate(self):
+        diag = {"overall": "FAIL", "causes": [], "notes": [],
+                "unexplained": [{"check": "chain.validity", "status": "FAIL",
+                                 "title": "Intermediate validity", "failure_kind": "",
+                                 "evidence": ["expired"]}]}
+        self.assertEqual(contract.validate(self.doc(diagnosis=diag)), [])
+        diag["unexplained"][0]["status"] = "BAD"
+        self.assertTrue(contract.validate(self.doc(diagnosis=diag)))
+
+    def test_unregistered_check_id_is_reported_but_document_still_loads(self):
+        doc = self.doc(findings=[{"check": "future.check", "title": "t", "status": "PASS",
+                                  "scope": "remote-net", "evidence": []}])
+        self.assertEqual(contract.unregistered_checks(doc), ["future.check"])
+        self.assertEqual(contract.load_document(doc)["schema_version"], "1.7")
+
+    def test_every_published_minor_version_still_loads(self):
+        for minor in range(0, 8):
+            with self.subTest(version=f"1.{minor}"):
+                doc = self.doc(version=f"1.{minor}")
+                self.assertEqual(contract.load_document(doc)["schema_version"],
+                                 f"1.{minor}")
+                path = os.path.join(ROOT, "schemas", f"findings-1.{minor}.schema.json")
+                self.assertTrue(os.path.exists(path))
+                try:
+                    import jsonschema
+                except ImportError:
+                    continue
+                with open(path) as fh:
+                    jsonschema.validate(doc, json.load(fh))
+
+    def test_earlier_schemas_are_unchanged_by_1_7(self):
+        with open(os.path.join(ROOT, "schemas", "findings-1.6.schema.json")) as fh:
+            old = json.dumps(json.load(fh))
+        for added in ('"unexplained"', '"certificates"', "key-encrypted"):
+            self.assertNotIn(added, old)
+
+    @unittest.skipUnless(openssl_available(), "openssl binary not available")
+    def test_a_1_7_export_without_the_new_fields_is_a_valid_1_6_document(self):
+        try:
+            import jsonschema
+        except ImportError:
+            self.skipTest("jsonschema not installed")
+        doc = json.loads(export(cli_session("full-chain")))
+        self.assertEqual(doc["schema_version"], "1.7")
+        doc["schema_version"] = "1.6"
+        (doc.get("diagnosis") or {}).pop("unexplained", None)
+        (doc.get("facts") or {}).pop("certificates", None)
+        with open(os.path.join(ROOT, "schemas", "findings-1.6.schema.json")) as fh:
+            jsonschema.validate(doc, json.load(fh))
 
 
 @unittest.skipUnless(openssl_available(), "openssl binary not available")

@@ -552,13 +552,17 @@ font-size:12.5px;white-space:pre-wrap;word-break:break-word}
 def _diagnosis_from(d: Optional[Dict[str, Any]]) -> Optional[Diagnosis]:
     if not d:
         return None
-    from .analyze import Cause, Unresolved
+    from .analyze import Cause, Unexplained, Unresolved
     known = {f.name for f in dataclasses.fields(Cause)}
     known_u = {f.name for f in dataclasses.fields(Unresolved)}
+    known_x = {f.name for f in dataclasses.fields(Unexplained)}
+    # `overall` is recomputed from these, so every input to it must come back
     return Diagnosis(causes=[Cause(**{k: v for k, v in c.items() if k in known})
                              for c in d["causes"]], notes=list(d["notes"]),
                      unresolved=[Unresolved(**{k: v for k, v in u.items() if k in known_u})
-                                 for u in d.get("unresolved", [])])
+                                 for u in d.get("unresolved", [])],
+                     unexplained=[Unexplained(**{k: v for k, v in u.items() if k in known_x})
+                                  for u in d.get("unexplained", [])])
 
 
 def _badge(status: str) -> str:

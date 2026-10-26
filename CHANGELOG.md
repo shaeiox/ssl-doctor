@@ -1,5 +1,89 @@
 # Changelog
 
+## Unreleased — trustworthy verdicts (complete-certificate-diagnostics, phase 0)
+
+A failing check can no longer disappear from the overall result, and checks
+that could not be completed are no longer reported as certificate or key
+failures. Findings contract **1.7** (additive; 1.0–1.6 documents keep
+validating).
+
+### Changed
+
+- **The overall result counts every failing check.** It used to come from
+  matched root causes only, so an endpoint serving an *expired intermediate*
+  (`tls.verify` FAIL behind a valid leaf) was diagnosed `PASS` and `-c` exited
+  0. A FAIL that no cause rule explains is now listed in
+  `diagnosis.unexplained` and makes the result FAIL (exit 1). An unexplained
+  warning makes it WARNING. **Scans that used to be PASS with a failing or
+  warning check now report FAIL or WARNING.** Failures of the network path
+  (timeouts, resets) and of SSL Doctor's own session (SSH login, remote command
+  execution) count as WARNING, never FAIL.
+- The HTML report rebuilds the same verdict as the JSON document, including
+  unexplained findings.
+
+### Fixed
+
+- **An encrypted private key on the server was reported as a confirmed
+  key/certificate mismatch.** The pairing hashed the empty output of a failed
+  `openssl pkey` and compared it with the certificate. The key's state is now
+  classified first (readable, encrypted, unreadable, missing, unsupported) from
+  its structure, without reading it into the output. Every openssl step is
+  judged by its exit status, and a digest of empty input is never compared.
+  Encrypted, unreadable and unextractable keys give `srv.keymatch` NOT TESTED
+  (`key-encrypted`, `key-unreadable`, `command-failed`). A real mismatch is
+  still FAIL.
+- `/cert match`: a DER-encoded encrypted key was FAIL "private key
+  unreadable", and a certificate whose public key could not be extracted was
+  FAIL "does NOT belong". Both are NOT TESTED now. A missing or unreadable key
+  file is NOT TESTED too, and plain DER keys work with OpenSSL 1.1.1.
+- **A validation-handshake timeout was a certificate failure.** `tls.verify` /
+  `tls.verify.rootonly` that stall or are reset before a verdict are NOT TESTED
+  with the failure kind. They raise no certificate cause, and the diagnosis
+  says validation was inconclusive. A TLS-level rejection stays FAIL. Both
+  validations now connect to the address the TCP check verified, and name it.
+
+### Fixed (phase 1: strict certificate files)
+
+- **Truncated and corrupt PEM files no longer pass.** A trailing block without
+  its END line was ignored (`cert.parse` PASS, "1 certificate"), and a block
+  with invalid Base64 still gave PASS plus a warning. Every BEGIN must now have
+  its END, and every block must decode as X.509. Otherwise `cert.parse` (and
+  `nginx.chainfile` for a configured file) is FAIL, naming the block.
+- **A repeated certificate is a duplicate, not a broken chain.** Duplicates are
+  listed ("position 3 duplicates position 1") and left out of linkage.
+- **A certificate whose subject equals its issuer is a root only if its own key
+  signed it.** Self-signatures and issuer signatures are checked with the system
+  `openssl verify`, isolated from the system trust store.
+- `nginx.chainfile` is FAIL when the file starts with a CA certificate (nginx
+  serves the first certificate) and when it is DER-encoded (nginx loads only
+  PEM). An unrelated certificate in the file is a WARNING.
+
+### Added (phase 1)
+
+- Formats are detected from content: PEM, DER, PKCS#7, PKCS#12, private keys
+  and CSRs, whatever the file is called, each with a conversion hint. Key
+  blocks are counted and never read.
+- Each certificate record carries its key type, size and curve, signature
+  algorithm, Basic Constraints, Key Usage, Extended Key Usage, SKI/AKI, AIA and
+  CRL distribution points. Every file and chain finding lists each certificate
+  with its role.
+- `/cert cafile <file>` and `cert.cafile` for nginx `ssl_trusted_certificate` /
+  `ssl_client_certificate`. In a service CA file, intermediates are normal and
+  only listed.
+- Configured certificate files are read over SSH as base64 (exact bytes, at
+  most 1 MiB), falling back to `cat`.
+
+### Added
+
+- Findings contract 1.7: check ids for the coming certificate and service
+  checks; failure kinds `verifier-unavailable`, `key-encrypted`,
+  `key-unreadable`, `command-failed`, `permission-denied`; optional
+  `facts.certificates` and `diagnosis.unexplained`;
+  `contract.unregistered_checks()`. Validation keeps accepting check ids from
+  later 1.x versions.
+- `tests/baseline/`: the recorded test-id list and `record.py --check`, which
+  fails when a baseline test disappears, starts skipping or fails.
+
 ## v0.10.1 — mouse-wheel scrolling on Windows consoles
 
 The full-screen shell scrolls with the mouse wheel in cmd, PowerShell and Git

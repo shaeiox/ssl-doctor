@@ -187,7 +187,10 @@ class FailureKindContractTests(unittest.TestCase):
             "no-version-accepted", "no-version-answered",
             # 1.3: an inconclusive probe and an unreachable endpoint are failures
             # to obtain evidence, not findings about the server
-            "probe-inconclusive", "endpoint-unreachable"})
+            "probe-inconclusive", "endpoint-unreachable",
+            # 1.7: why a certificate or key question stayed open
+            "verifier-unavailable", "key-encrypted", "key-unreadable",
+            "command-failed", "permission-denied"})
 
     def test_finding_defaults_to_unclassified(self):
         self.assertEqual(F.Finding("tls.chain", "t", F.PASS, F.SCOPE_REMOTE_NET

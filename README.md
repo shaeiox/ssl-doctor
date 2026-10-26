@@ -19,7 +19,7 @@ python3 ssldoctor.py -c "/scan example.com --with-server" -c "/report both out"
 
 | Option | Effect |
 |---|---|
-| `-c "<command>"` | run a command non-interactively (repeatable); exit code `1` when the diagnosis is `FAIL` |
+| `-c "<command>"` | run a command non-interactively (repeatable); exit code `1` when the overall diagnosis is `FAIL`, otherwise `0` (see [Overall result](#overall-result)) |
 | `--timeout <seconds>` | network timeout (default 8 s; `/timeout` changes it in a session) |
 | `--no-tui` (or `--plain`) | line-oriented REPL instead of the full-screen shell |
 | `--no-remember` | never offer to remember servers and never use saved passwords (also `SSL_DOCTOR_REMEMBER=off`) |
@@ -367,8 +367,9 @@ Via a read-only SSH session (`/server connect` or `/scan --server-only` /
 | `/scan …` | See table above |
 | `/tls <host\|URL> [--sni name]` | Remote TLS/HTTPS suite: DNS, TCP, handshake, chain, validation, TLS 1.0–1.3 matrix, SNI diff, multi-IP diff, weak ciphers, HTTP redirects |
 | `/local [cert]` | Client machine: OS, clock skew vs server, proxy, Windows stores/root-CA presence, certutil chain engine, Schannel events |
-| `/cert inspect <file> [host]` | Parse PEM/DER cert or chain file: dates, SANs, fingerprints, chain order |
+| `/cert inspect <file> [host]` | Parse a certificate or chain file strictly, by content (PEM, DER; PKCS#7, PKCS#12, keys and CSRs are named, with a conversion hint): every certificate listed with its role (leaf / intermediate / root / unrelated), dates, SANs, fingerprints, order, duplicates. A truncated or corrupt block fails the whole file |
 | `/cert match <cert> <key>` | Prove key belongs to cert (digest comparison only) |
+| `/cert cafile <file>` | Check a root / CA bundle: an entry counts as a root only when it is a CA and its own key signed it; non-roots are named |
 | `/server connect [name] · status · disconnect` | SSH setup with verified host keys; `name` connects to a remembered server without the prompts |
 | `/server config show\|set\|clear [name]` | Per-server nginx settings: `set --cert <path> --key <path> [--conf <path>] [--prefix <path>]` saves manual paths for the connected (or named) remembered server and uses them on every later connection; `clear` returns to automatic discovery; bare `/server config` is the TLS-configuration inventory |
 | `/servers` | Remembered servers: name, `user@host:port`, auth, whether a password is saved, last use (never the password) |
@@ -381,10 +382,28 @@ Via a read-only SSH session (`/server connect` or `/scan --server-only` /
 | `/typewriter [on\|off\|speed <n>]` | Gradual output on an interactive terminal |
 | `/timeout`, `/findings`, `/clear`, `/help`, `/version`, `/exit` | Session utilities |
 
-JSON reports follow the versioned **findings contract** (currently `1.6`;
+JSON reports follow the versioned **findings contract** (currently `1.7`;
 schemas in [`schemas/`](schemas/), reference in
 [`docs/findings-contract.md`](docs/findings-contract.md)). Minor versions only
-add fields, so 1.0–1.5 documents keep validating.
+add fields, so 1.0–1.6 documents keep validating.
+
+### Overall result
+
+`/diagnose` (and the end of `/scan`) gives one overall result:
+
+- **FAIL**: a cause is *confirmed*, or a check failed and no cause rule
+  explains it. Such a check is listed as unexplained ("No root cause pattern
+  matched these findings: …") and still counts. It is never dropped.
+- **WARNING**: any other cause or unexplained warning exists, or the only
+  failures are of the network path (timeouts, resets) or of SSL Doctor's own
+  session (SSH login, a remote command that could not run).
+- **PASS**: nothing failed or warned. Checks that could not be completed are
+  `NOT TESTED`. They never make the result worse, and the notes list each one
+  with its reason.
+
+A timeout during certificate validation is reported as `NOT TESTED`, not as a
+certificate failure. With `-c`, the exit code is `1` exactly when the result is
+FAIL.
 
 `ssldoctor.py agent enroll|run` runs SSL Doctor as an outbound-only scan agent
 for the optional service in [`service/`](service/); see
@@ -422,6 +441,12 @@ for the optional service in [`service/`](service/); see
   remember. Key logins remember only the key path — passphrases stay with
   `ssh-agent` / Pageant, the stronger choice for important servers. See
   [ADR-001](docs/decisions/ADR-001-remembered-servers.md).
+- **Private keys are never shown and passphrases are never asked for.** Key
+  pairing (`/cert match`, `/server cert`, `/scan --with-server`) compares only
+  public-key SHA-256 digests. An encrypted key (PEM, PKCS#8 PEM or DER, PKCS#12)
+  is detected from its structure and reported as `NOT TESTED` (pairing not
+  possible), never as a mismatch. So is a key this account cannot read, and so
+  is any failed openssl step.
 - **Per-server nginx settings** (`/server config set`) are stored in that
   server's profile next to its connection settings — never a password — and
   apply only to that server. They outlive a saved password's expiry. In manual
@@ -466,7 +491,7 @@ ssl_doctor/
   report.py             JSON + HTML report rendering
   contract.py           findings-contract schema, validation, redaction
   agent.py              outbound-only scan agent (`ssldoctor.py agent`)
-schemas/                published findings-contract JSON schemas (1.0-1.6)
+schemas/                published findings-contract JSON schemas (1.0-1.7)
 docs/                   contract, agents, executed commands, execution flow
 docs/decisions/         architecture decision records (ADRs)
 service/                optional multi-tenant service (separate package)

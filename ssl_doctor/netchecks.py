@@ -484,23 +484,51 @@ def check_tls_basic(host: str, port: int, sni: Optional[str],
         target=target), facts
 
 
+def _validation_unfinished(check: str, title: str, target: str, addr: str,
+                           exc: BaseException) -> F.Finding:
+    """A validation handshake that ended before any certificate verdict.
+
+    Timeouts and resets say nothing about the certificate, so they are NOT
+    TESTED with their failure kind; only a TLS-level rejection stays FAIL.
+    """
+    if isinstance(exc, (_ConnectTimeout, _NegotiationTimeout)):
+        kind = ("connect-timeout" if isinstance(exc, _ConnectTimeout)
+                else "negotiation-timeout")
+    else:
+        kind = _classify_negotiation_error(exc)
+    first = str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__
+    if kind == "tls-alert":
+        return F.Finding(check, title, F.FAIL, F.SCOPE_REMOTE_NET,
+                         [f"validated handshake with {addr} failed before verification: "
+                          f"{first}"], target=target, failure_kind=kind)
+    return F.Finding(
+        check, title, F.NOT_TESTED, F.SCOPE_REMOTE_NET,
+        [f"{_failure_summary(kind, addr, target.rsplit(':', 1)[-1])}: {first}",
+         "the certificate was not validated; no conclusion about it is drawn"],
+        recommendation="Repeat the scan; if the validation handshake keeps failing, "
+                       "test from another network.",
+        target=target, failure_kind=kind)
+
+
 def check_tls_validation(host: str, port: int, sni: Optional[str],
-                         timeout: float) -> F.Finding:
+                         timeout: float, connect_ip: Optional[str] = None) -> F.Finding:
     """Full validation handshake with the system trust store."""
+    title = "Certificate validation (system trust)"
     target = f"{host}:{port}"
+    addr = connect_ip or host
     if not sni:
-        return F.Finding("tls.verify", "Certificate validation (system trust)",
+        return F.Finding("tls.verify", title,
                          F.NOT_TESTED, F.SCOPE_REMOTE_NET,
                          ["no hostname available for verification"], target=target)
     ctx = _make_context(verify=True)
     try:
-        ssock = _handshake(host, port, sni, ctx, timeout)
+        ssock = _handshake(host, port, sni, ctx, timeout, connect_ip=connect_ip)
         ssock.close()
         return F.Finding(
-            "tls.verify", "Certificate validation (system trust)", F.PASS,
+            "tls.verify", title, F.PASS,
             F.SCOPE_REMOTE_NET,
             ["the presented certificate chains to a trusted root and matches "
-             f"the hostname '{sni}'"], target=target)
+             f"the hostname '{sni}'", f"validated against {addr}"], target=target)
     except ssl.SSLCertVerificationError as exc:
         code = getattr(exc, "verify_code", None)
         msg = getattr(exc, "verify_message", None) or str(exc)
@@ -519,27 +547,25 @@ def check_tls_validation(host: str, port: int, sni: Optional[str],
                 "via the correct name.",
         }.get(code, "Inspect the chain details above and correct trust/chain issues.")
         return F.Finding(
-            "tls.verify", "Certificate validation (system trust)", F.FAIL,
+            "tls.verify", title, F.FAIL,
             F.SCOPE_REMOTE_NET,
-            [f"validation failed: {plain}", f"openssl verify detail: {msg}"],
+            [f"validation failed: {plain}", f"openssl verify detail: {msg}",
+             f"validated against {addr}"],
             recommendation=advice, target=target)
     except ssl.CertificateError as exc:
         return F.Finding(
-            "tls.verify", "Certificate validation (system trust)", F.FAIL,
+            "tls.verify", title, F.FAIL,
             F.SCOPE_REMOTE_NET, [f"hostname verification failed: {exc}"],
             recommendation="The certificate does not cover this hostname.",
             target=target)
     except (ssl.SSLError, OSError) as exc:
-        return F.Finding(
-            "tls.verify", "Certificate validation (system trust)", F.FAIL,
-            F.SCOPE_REMOTE_NET, [f"validated handshake failed before verification: {exc}"],
-            target=target)
+        return _validation_unfinished("tls.verify", title, target, addr, exc)
 
 
 def check_tls_rootonly_validation(host: str, port: int, sni: Optional[str],
                                   timeout: float,
-                                  roots: Optional[List[certs.CertInfo]] = None
-                                  ) -> F.Finding:
+                                  roots: Optional[List[certs.CertInfo]] = None,
+                                  connect_ip: Optional[str] = None) -> F.Finding:
     """Validate with trusted ROOTS only - no cached/bundled intermediates.
 
     This is what a client that has never seen the intermediate experiences,
@@ -547,6 +573,7 @@ def check_tls_rootonly_validation(host: str, port: int, sni: Optional[str],
     """
     title = "Certificate validation (roots only, no cached intermediates)"
     target = f"{host}:{port}"
+    addr = connect_ip or host
     if not sni:
         return F.Finding("tls.verify.rootonly", title, F.NOT_TESTED, F.SCOPE_REMOTE_NET,
                          ["no hostname available for verification"], target=target)
@@ -559,25 +586,24 @@ def check_tls_rootonly_validation(host: str, port: int, sni: Optional[str],
     ctx.hostname_checks_common_name = False
     ctx.load_verify_locations(cadata="".join(r.pem.decode("ascii") for r in roots))
     try:
-        _handshake(host, port, sni, ctx, timeout).close()
+        _handshake(host, port, sni, ctx, timeout, connect_ip=connect_ip).close()
         return F.Finding("tls.verify.rootonly", title, F.PASS, F.SCOPE_REMOTE_NET,
                          [f"chain validates from what the server sends, against "
-                          f"{len(roots)} trusted root(s)"], target=target)
+                          f"{len(roots)} trusted root(s)", f"validated against {addr}"],
+                         target=target)
     except ssl.SSLCertVerificationError as exc:
         code = getattr(exc, "verify_code", None)
         msg = getattr(exc, "verify_message", None) or str(exc)
         return F.Finding(
             "tls.verify.rootonly", title, F.FAIL, F.SCOPE_REMOTE_NET,
             [f"validation failed: {_VERIFY_CODES.get(code, msg)}",
-             f"openssl verify detail: {msg}"],
+             f"openssl verify detail: {msg}", f"validated against {addr}"],
             recommendation=("Clients without a cached intermediate fail here. Serve the "
                             "full chain (leaf + intermediates) from the server."
                             if code in (20, 21) else ""),
             target=target)
     except (ssl.SSLError, OSError) as exc:
-        return F.Finding("tls.verify.rootonly", title, F.FAIL, F.SCOPE_REMOTE_NET,
-                         [f"validated handshake failed before verification: {exc}"],
-                         target=target)
+        return _validation_unfinished("tls.verify.rootonly", title, target, addr, exc)
 
 
 _RELAXED_CIPHER_POLICY = "ALL:@SECLEVEL=0"
@@ -1478,8 +1504,9 @@ def run_remote_diagnostics(host: str, port: int = 443, sni: Optional[str] = None
 
         _add(check_presented_chain(facts, host, port))
 
-    _add(check_tls_validation(host, port, server_name, timeout))
-    _add(check_tls_rootonly_validation(host, port, server_name, timeout))
+    _add(check_tls_validation(host, port, server_name, timeout, connect_ip=verified_ip))
+    _add(check_tls_rootonly_validation(host, port, server_name, timeout,
+                                       connect_ip=verified_ip))
     _add(check_protocol_matrix(host, port, server_name, timeout,
                                connect_ip=verified_ip,
                                negotiated=facts.get("protocol"), facts=facts))

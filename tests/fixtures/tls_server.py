@@ -5,6 +5,7 @@ Modes:
     full-chain  server sends leaf + issuing intermediate
     wrong-chain server sends leaf + an intermediate that did not issue it
     cn-only     server sends a CN-only leaf (no SAN) + intermediate
+    expired-intermediate  server sends leaf + an expired copy of its intermediate
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from typing import List
 
 from .pki import PKI
 
-MODES = ("leaf-only", "full-chain", "wrong-chain", "cn-only")
+MODES = ("leaf-only", "full-chain", "wrong-chain", "cn-only", "expired-intermediate")
 
 
 def _free_port() -> int:
@@ -44,6 +45,8 @@ class TLSServer:
             chain = p.intermediate
         elif self.mode == "wrong-chain":
             chain = p.other_intermediate
+        elif self.mode == "expired-intermediate":
+            chain = p.expired_intermediate
         elif self.mode == "cn-only":
             cert, key, chain = p.cn_only, p.cn_only_key, p.intermediate
         # -no-CAfile/-no-CApath: otherwise OpenSSL completes the chain from its

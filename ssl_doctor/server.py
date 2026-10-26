@@ -17,6 +17,8 @@ used automatically if it happens to be importable).  Security properties:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import posixpath
 import re
@@ -28,6 +30,7 @@ import sys
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
+from . import certs, chainval
 from . import findings as F
 from . import nginx_discovery
 
@@ -505,6 +508,9 @@ class NginxSettings:
     def is_default(self) -> bool:
         return not (self.manual or self.conf or self.prefix)
 
+
+# SHA-256 of no input: what a digest pipeline prints when its producer failed
+_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 _PATH_STATE_LABELS = {
     "readable": "exists and is readable",
@@ -1079,6 +1085,36 @@ class ServerSession:
             emit(_f)
         return [_f]
 
+    # Classifies a key on the server from its structure; prints one token and
+    # never the key.  asn1parse output (which shows key numbers for a plain DER
+    # key) stays inside the pipeline: only grep's verdict leaves the shell.
+    _KEY_STATE_SCRIPT = (
+        'k={path}; '
+        'if [ ! -e "$k" ]; then s=missing; '
+        'elif [ ! -r "$k" ]; then s=unreadable; '
+        'elif head -c 4096 "$k" | grep -q -e "BEGIN ENCRYPTED PRIVATE KEY" '
+        '-e "Proc-Type: 4,ENCRYPTED"; then s=encrypted; '
+        'elif ! command -v openssl >/dev/null 2>&1; then s=noverifier; '
+        'elif openssl asn1parse -inform DER -in "$k" 2>/dev/null | head -n 4 '
+        '| grep -q -i -e ":PBES2" -e ":pbeWith" -e ":pkcs7-data"; then s=encrypted; '
+        'elif openssl pkey -in "$k" -passin pass: -noout >/dev/null 2>&1 '
+        '|| openssl pkey -inform DER -in "$k" -passin pass: -noout >/dev/null 2>&1; '
+        'then s=readable; '
+        'else s=unsupported; fi; echo "@@SSLDOCTOR keystate=$s"')
+
+    def key_state(self, key_path: str) -> Tuple[str, str]:
+        """(state, reason) of a key file on the server; state "" = undetermined.
+
+        States follow `certs.key_state`; "noverifier" means openssl is missing,
+        so a plain key could not be told from an unsupported one.
+        """
+        rc, out, err, fatal = self.run(
+            self._KEY_STATE_SCRIPT.format(path=shlex.quote(key_path)))
+        for line in out.splitlines():
+            if line.startswith("@@SSLDOCTOR keystate="):
+                return line.split("=", 1)[1].strip(), ""
+        return "", (fatal or err.strip()[:200] or f"key-state probe exited {rc}")
+
     def scan_cert(self, cert_path: str, key_path: str = "",
                   emit: Optional[Callable[[F.Finding], None]] = None,
                   states: Optional[Dict[str, str]] = None) -> List[F.Finding]:
@@ -1152,24 +1188,18 @@ class ServerSession:
                                  "the pairing could not be tested"],
                 target=cert_path))
         elif key_path:
-            rc2, so2, se2, _ = self.run(
-                f"chash=$(openssl x509 -noout -pubkey -in {q(cert_path)} 2>/dev/null | "
-                f"openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1); "
-                f"khash=$(openssl pkey -in {q(key_path)} -pubout -outform DER 2>/dev/null | "
-                f"sha256sum | cut -d' ' -f1); echo \"cert=$chash\"; echo \"key=$khash\"")
-            cert_h = key_h = ""
-            for ln in so2.splitlines():
-                if ln.startswith("cert="):
-                    cert_h = ln[5:].strip()
-                elif ln.startswith("key="):
-                    key_h = ln[4:].strip()
-            if not cert_h or not key_h:
+            state, why = self.key_state(key_path)
+            if state != certs.KEY_READABLE:
+                _add(self._pairing_not_tested(cert_path, key_path, state, why))
+                return out
+            cert_h, key_h, failed = self._pairing_digests(cert_path, key_path)
+            if failed:
                 _add(F.Finding(
-                    "srv.keymatch", "Certificate/key pairing on server", F.WARNING,
+                    "srv.keymatch", "Certificate/key pairing on server", F.NOT_TESTED,
                     F.SCOPE_SERVER,
-                    ["could not derive public key fingerprints (permissions or "
-                     "unsupported key type)"],
-                    detail=se2.strip()[:200], target=cert_path))
+                    [f"could not derive the {failed}",
+                     "the pairing could not be tested; this is not a mismatch"],
+                    target=cert_path, failure_kind="command-failed"))
             elif cert_h == key_h:
                 _add(F.Finding(
                     "srv.keymatch", "Certificate/key pairing on server", F.PASS,
@@ -1189,6 +1219,62 @@ class ServerSession:
                                    "certificate was replaced.",
                     target=cert_path))
         return out
+
+    _PAIRING_NOT_TESTED = {
+        "encrypted": ("key-encrypted",
+                      "the private key is passphrase-encrypted; it was not read"),
+        "unreadable": ("key-unreadable", "the private key cannot be read by this account"),
+        "missing": ("", "the private key file does not exist"),
+        "unsupported": ("", "the file is not a private key openssl can load"),
+        "noverifier": ("verifier-unavailable", "openssl is not available on the server"),
+    }
+
+    def _pairing_not_tested(self, cert_path: str, key_path: str, state: str,
+                            why: str) -> F.Finding:
+        kind, reason = self._PAIRING_NOT_TESTED.get(
+            state, ("command-failed", f"the key could not be classified ({why})"))
+        return F.Finding(
+            "srv.keymatch", "Certificate/key pairing on server", F.NOT_TESTED,
+            F.SCOPE_SERVER,
+            [f"private key {key_path}: {reason}",
+             "the pairing could not be tested; this is not a mismatch"],
+            target=cert_path, failure_kind=kind)
+
+    # Each step that fails prints its own marker to fd 3 (the script's stdout),
+    # so a failure is never hidden behind the digest of an empty pipe.
+    _PAIRING_SCRIPT = (
+        'exec 3>&1; '
+        'c=$( { openssl x509 -noout -pubkey -in {cert} 2>/dev/null '
+        '|| echo "@@SSLDOCTOR fail=certificate public key" >&3; } '
+        '| { openssl pkey -pubin -outform DER 2>/dev/null '
+        '|| echo "@@SSLDOCTOR fail=certificate public key" >&3; } '
+        '| sha256sum | cut -d" " -f1 ); '
+        'k=$( { openssl pkey -in {key} -passin pass: -pubout -outform DER 2>/dev/null '
+        '|| openssl pkey -inform DER -in {key} -passin pass: -pubout -outform DER '
+        '2>/dev/null || echo "@@SSLDOCTOR fail=public key of the private key" >&3; } '
+        '| sha256sum | cut -d" " -f1 ); '
+        'echo "@@SSLDOCTOR cert=$c"; echo "@@SSLDOCTOR key=$k"')
+
+    def _pairing_digests(self, cert_path: str, key_path: str) -> Tuple[str, str, str]:
+        """(certificate digest, key digest, failed step); digests are SPKI SHA-256."""
+        q = shlex.quote
+        rc, out, err, fatal = self.run(
+            self._PAIRING_SCRIPT.replace("{cert}", q(cert_path)).replace("{key}", q(key_path)))
+        if fatal:
+            return "", "", f"public keys ({fatal})"
+        found: Dict[str, str] = {}
+        for line in out.splitlines():
+            if line.startswith("@@SSLDOCTOR "):
+                name, _, value = line[len("@@SSLDOCTOR "):].partition("=")
+                found.setdefault(name, value.strip())
+        if "fail" in found:
+            return "", "", found["fail"]
+        cert_h, key_h = found.get("cert", ""), found.get("key", "")
+        for label, digest in (("certificate public key", cert_h),
+                              ("public key of the private key", key_h)):
+            if not re.fullmatch(r"[0-9a-f]{64}", digest) or digest == _EMPTY_SHA256:
+                return "", "", label
+        return cert_h, key_h, ""
 
     def file_permissions(self, paths: List[str]) -> List[F.Finding]:
         if (err := self._need_conn()):
@@ -1437,11 +1523,46 @@ class ServerSession:
                 recommendation="Check include files or a parent http{} certificate, "
                                "or TLS being terminated elsewhere.",
                 target=self.cfg.host))
+            self._ca_file_checks(d, matched_dirs, http_dirs, _add)
             return self._certificate_checks(d, None, out, _add, emit)
         values = {"certificate": (cert_paths[0], "ssl_certificate" in inherited),
                   "key": ((key_paths[0], "ssl_certificate_key" in inherited)
                           if key_paths else None)}
+        self._ca_file_checks(d, matched_dirs, http_dirs, _add)
         return self._certificate_checks(d, values, out, _add, emit)
+
+    _CA_DIRECTIVES = ("ssl_trusted_certificate", "ssl_client_certificate")
+
+    def _ca_file_checks(self, d, matched_dirs, http_dirs, _add) -> None:
+        """`cert.cafile` for each CA file the selected block uses (or inherits)."""
+        nd = nginx_discovery
+        for name in self._CA_DIRECTIVES:
+            values = matched_dirs.get(name) or http_dirs.get(name) or []
+            for args in values[:1]:
+                if not args:
+                    continue
+                inherited = not matched_dirs.get(name)
+                source = nd.directive_source(d, name, args[0], inherited)
+                resolved, _method, problem = nd.resolve_cert_path(args[0], nd.conf_prefix(d))
+                if not resolved:
+                    _add(F.Finding("cert.cafile", "Root / CA bundle file", F.NOT_TESTED,
+                                   F.SCOPE_SERVER, [f"{name} {args[0]} [{source}]",
+                                                    f"not resolved: {problem}"],
+                                   target=self.cfg.host))
+                    continue
+                state = self.nginx_probe().file_states([resolved]).get(resolved, "unsupported")
+                data = None
+                if state == "readable":
+                    data, why = self.read_public_file(resolved)
+                if data is None:
+                    label = _PATH_STATE_LABELS.get(state, state)
+                    _add(F.Finding("cert.cafile", "Root / CA bundle file", F.NOT_TESTED,
+                                   F.SCOPE_SERVER, [f"{name} {resolved} [{source}]: {label}"],
+                                   target=resolved))
+                    continue
+                _add(chainval.ca_file_finding(certs.parse_cert_bytes(data), resolved,
+                                              F.SCOPE_SERVER, chainval.CA_SERVICE,
+                                              source=f"{name}, {source}"))
 
     def _certificate_checks(self, d, values, out, _add, emit) -> List[F.Finding]:
         """nginx.path_resolution, then validation of the files that could be opened.
@@ -1576,38 +1697,97 @@ class ServerSession:
                          F.SCOPE_SERVER, ev, recommendation=rec, uncertainty=uncertainty,
                          target=self.cfg.host)
 
+    _CERT_FILE_LIMIT = 1 << 20
+
+    def read_public_file(self, path: str) -> Tuple[Optional[bytes], str]:
+        """Exact bytes of a (public) file on the server, or (None, reason).
+
+        Read as base64 so binary content survives the text channel; `cat` is
+        the fallback for hosts without `base64`.  Never used for key files.
+        """
+        q = shlex.quote(path)
+        rc, out, err, fatal = self.run(
+            f"head -c {self._CERT_FILE_LIMIT} -- {q} | base64; echo \"@@SSLDOCTOR rc=$?\"")
+        if not fatal and "@@SSLDOCTOR rc=0" in out:
+            body = "".join(ln.strip() for ln in out.splitlines()
+                           if ln.strip() and not ln.startswith("@@SSLDOCTOR"))
+            try:
+                return base64.b64decode(body, validate=True), ""
+            except (ValueError, binascii.Error):
+                pass
+        rc, out, err, fatal = self.run(f"cat {q} 2>&1")
+        if fatal or rc != 0:
+            return None, (fatal or err.strip() or out.strip())[:200]
+        return out.encode("utf-8", "replace"), ""
+
     def _chainfile_finding(self, cert_path: str) -> F.Finding:
         """Linkage of the ssl_certificate file: leaf first, each issued by the next.
 
-        Reads only the public certificate file (never the key).
+        Reads only the public certificate file (never the key).  The file is
+        parsed strictly: a truncated or corrupt block fails the file even when
+        other blocks decode.
         """
-        from . import certs
         title = "Chain completeness of ssl_certificate file"
-        rc, so, se, fatal = self.run(f"cat {shlex.quote(cert_path)} 2>&1")
-        blocks = certs.extract_pem_blocks(so.encode()) if not fatal else []
-        if not blocks:
-            # the caller checked the file is readable: no PEM here is bad content,
-            # not a missing intermediate and not a path problem
-            if not fatal and rc == 0:
+        data, why = self.read_public_file(cert_path)
+        if data is None:
+            return F.Finding("nginx.chainfile", title, F.FAIL, F.SCOPE_SERVER,
+                             [f"{cert_path}: certificate file could not be read", why],
+                             recommendation="Point ssl_certificate at a PEM file that "
+                                            "holds the certificate (and its "
+                                            "intermediates).", target=cert_path)
+        parsed = certs.parse_cert_bytes(data)
+        notes = ([f"{cert_path}: a private-key block is present and was not read"]
+                 if parsed.key_blocks else [])
+        if parsed.problems:
+            return F.Finding(
+                "nginx.chainfile", title, F.FAIL, F.SCOPE_SERVER,
+                [f"{cert_path}: {p}" for p in parsed.problems]
+                + [f"{len(parsed.certs)} certificate block(s) decoded; the file is not "
+                   "usable as it is"] + notes,
+                recommendation="Re-create the file from the certificates your CA issued: "
+                               "the leaf, then the intermediate(s), each a complete "
+                               "-----BEGIN/END CERTIFICATE----- block.",
+                target=cert_path)
+        if not parsed.certs or parsed.format == certs.FMT_DER:
+            # the caller checked the file is readable: this is bad content, not a
+            # missing intermediate and not a path problem
+            if parsed.format == certs.FMT_DER:
+                ev = [f"{cert_path}: the certificate is DER-encoded; nginx loads only PEM"]
+                rec = (f"Convert it: openssl x509 -inform DER -in {cert_path} "
+                       "-out <file>.pem, then point ssl_certificate at the PEM file.")
+            elif parsed.format in (certs.FMT_UNKNOWN, certs.FMT_EMPTY):
                 ev = [f"{cert_path}: no PEM certificate in the file",
                       "the content does not contain a -----BEGIN CERTIFICATE----- block"]
+                rec = ("Point ssl_certificate at a PEM file that holds the certificate "
+                       "(and its intermediates).")
             else:
-                ev = [f"{cert_path}: certificate file could not be read",
-                      (fatal or se.strip() or so.strip())[:200]]
-            return F.Finding("nginx.chainfile", title, F.FAIL, F.SCOPE_SERVER, ev,
-                             recommendation="Point ssl_certificate at a PEM file that holds "
-                                            "the certificate (and its intermediates).",
-                             target=cert_path)
-        try:
-            chain = [certs.decode_pem(b) for b in blocks]
-        except Exception as exc:  # noqa: BLE001
+                ev = [f"{cert_path}: no PEM certificate in the file",
+                      f"detected format: {parsed.format}", parsed.error() or ""]
+                rec = ("Point ssl_certificate at a PEM file that holds the certificate "
+                       "(and its intermediates).")
             return F.Finding("nginx.chainfile", title, F.FAIL, F.SCOPE_SERVER,
-                             [f"{cert_path}: unparseable certificate: {exc}"],
+                             [e for e in ev + notes if e], recommendation=rec,
                              target=cert_path)
+        chain = parsed.certs
+        roles, wrong_leaf, structure = chainval.file_structure(chain)
         a = certs.assess_chain(chain)
-        ev = [f"{cert_path}: {len(chain)} certificate(s) in file", *a.evidence]
-        if a.status == "complete":
+        ev = [f"{cert_path}: {len(chain)} certificate(s) in file",
+              *chainval.inventory_lines(chain, roles), *a.evidence, *wrong_leaf,
+              *structure, *notes]
+        if wrong_leaf:
+            return F.Finding("nginx.chainfile", title, F.FAIL, F.SCOPE_SERVER, ev,
+                             recommendation="nginx serves the first certificate of the "
+                                            "file: put the server (leaf) certificate "
+                                            "first, then its intermediate(s).",
+                             target=cert_path)
+        if a.status == "complete" and not (a.duplicates or structure):
             return F.Finding("nginx.chainfile", title, F.PASS, F.SCOPE_SERVER, ev,
+                             target=cert_path)
+        if a.status == "complete":
+            return F.Finding("nginx.chainfile", title, F.WARNING, F.SCOPE_SERVER, ev,
+                             recommendation="Remove repeated and unrelated certificates: "
+                                            "the file should hold the leaf, then the "
+                                            "intermediate(s) that issued it, once each.",
                              target=cert_path)
         rec = ("Order the file as: leaf first, then the intermediate(s) that issued it; "
                "replace any intermediate that did not issue the certificate above it."

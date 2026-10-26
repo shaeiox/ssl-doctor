@@ -1,0 +1,57 @@
+"""diagnosis-correlation: the batch exit code follows the overall verdict.
+
+R2 end to end: `ssl-doctor -c "/scan … --client-only"` against a server that
+sends an expired intermediate used to exit 0 with an overall PASS.
+"""
+
+import contextlib
+import io
+import unittest
+from unittest import mock
+
+from fixtures.pki import HOSTNAME, get_pki, openssl_available
+from fixtures.scan import trust_env
+from fixtures.tls_server import TLSServer
+
+from ssl_doctor import cli, findings as F
+
+
+def batch_scan(mode):
+    """Exit status and diagnosis of a batch `/scan` against a fixture server."""
+    seen = {}
+    real_diagnose = cli.SSLDoctorCLI.cmd_diagnose
+
+    def capture(self, args):
+        real_diagnose(self, args)
+        seen["diagnosis"] = self._diagnosis
+
+    with TLSServer(get_pki(), mode) as srv, trust_env(("root",)), \
+            contextlib.redirect_stdout(io.StringIO()), \
+            mock.patch.object(cli.SSLDoctorCLI, "cmd_diagnose", capture):
+        status = cli.main(["--no-tui", "-c",
+                           f"/scan {srv.host}:{srv.port} --sni {HOSTNAME} --client-only"])
+    return status, seen.get("diagnosis")
+
+
+@unittest.skipUnless(openssl_available(), "openssl binary not available")
+class BatchExitCode(unittest.TestCase):
+
+    def test_regression_r2_expired_intermediate_exit(self):
+        status, d = batch_scan("expired-intermediate")
+        self.assertEqual(d.overall, F.FAIL)
+        self.assertIn("tls.verify", [u.check for u in d.unexplained])
+        self.assertEqual(status, 1)
+
+    def test_full_valid_chain_exits_zero(self):
+        status, d = batch_scan("full-chain")
+        self.assertNotEqual(d.overall, F.FAIL)
+        self.assertEqual(status, 0)
+
+    def test_leaf_only_server_still_exits_one(self):
+        status, d = batch_scan("leaf-only")
+        self.assertEqual(d.overall, F.FAIL)
+        self.assertEqual(status, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -33,6 +33,7 @@ from . import findings as F
 from . import textcells
 from .analyze import diagnose
 from . import certs as certmod
+from . import chainval
 from . import local as localmod
 from . import netchecks
 from . import report as reportmod
@@ -1177,6 +1178,7 @@ class SSLDoctorCLI:
             ("/local", "diagnostics for this machine (Windows-aware)"),
             ("/cert inspect <file> [hostname]", "parse a PEM/DER certificate or chain file"),
             ("/cert match <cert> <key>", "verify a private key belongs to a certificate"),
+            ("/cert cafile <file>", "check a root/CA bundle: which entries are real roots"),
             ("/server connect [name]", "SSH setup for authorized server-side checks (name: a remembered server)"),
             ("/servers", "list remembered servers; passwords live only in the OS credential vault"),
             ("/server forget <name>|--all", "forget a remembered server and its saved password"),
@@ -1334,7 +1336,18 @@ class SSLDoctorCLI:
                                                           emit=phase.add))
             self.store.extend(items)
             return
-        self.error("usage: /cert inspect <file> [hostname] | /cert match <cert> <key>")
+        if args[0] == "cafile":
+            if len(args) < 2:
+                self.error("usage: /cert cafile <file>")
+                return
+            path = os.path.expanduser(args[1])
+            with self._results(f"checking CA bundle {os.path.basename(path)}") as phase:
+                items = phase.done([chainval.ca_file_finding(
+                    certmod.parse_cert_file(path), path, F.SCOPE_LOCAL)])
+            self.store.extend(items)
+            return
+        self.error("usage: /cert inspect <file> [hostname] | /cert match <cert> <key> | "
+                   "/cert cafile <file>")
 
     # ---------------- /tls ----------------
     def _sni_arg(self, args: List[str]) -> Optional[str]:

@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-25 · done: v0.10.1 (Windows wheel scrolling, terminal profiles) merged to master, tagged & pushed · next: user verifies wheel in cmd, PowerShell, Git Bash; widen terminal-interface Purpose; remembered-servers needs Windows CI + manual vault checks · blocker: no Windows to test here
+> resume 2026-10-26 · done: complete-certificate-diagnostics P0 + P1 (strict parsing, records, roles, duplicates, CA files) and task 3.1 (openssl verify wrapper) on branch feat/complete-certificate-diagnostics, uncommitted · next: P2 verified chains (tasks 3.2–3.10) · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-25 · v2] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/chain-diagnosis.md
@@ -20,4 +20,5 @@
 - copy-to-clipboard → drag-to-copy, /copy, Ctrl-Y; native Win32/X11 clipboard, tools, OSC 52; Windows ReadConsoleInputW mouse   [✓ done 2026-10-25 · v3] → projects/ssl-doctor/copy-to-clipboard.md
 - ui-design-system → Theme, full-screen shell, result frames, streaming into frames, centred banner, chat composer   [✓ done 2026-10-25 · v8] → projects/ssl-doctor/ui-design-system.md
 - remembered-servers → SSH server profiles + passwords in OS vault (Win Credential Manager / Secret Service), host-key bound; ADR-001 Accepted, implemented   [⚠ in-progress 2026-10-25 · v4] → projects/ssl-doctor/remembered-servers.md
+- certificate-diagnostics → 45-check audit remediation: verdict/unexplained, key states, verify transport, contract 1.7, phases P0–P7   [⚠ in-progress 2026-10-26 · v2] → projects/ssl-doctor/certificate-diagnostics.md
 - _decisions → One-line decision log: colours, frames, static input, report pills   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/_decisions.md

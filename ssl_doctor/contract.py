@@ -21,12 +21,15 @@ import re
 import urllib.parse
 from typing import Any, Dict, Iterable, List
 
-SCHEMA_VERSION = "1.6"   # 1.1: facts block; 1.2: failure classification;
+SCHEMA_VERSION = "1.7"   # 1.1: facts block; 1.2: failure classification;
                          # 1.3: cause limitations, observation classes, endpoint state;
                          # 1.4: legacy-protocol acceptance classes;
                          # 1.5: finding uncertainty, unresolved diagnosis entries,
                          #      default-probe states, endpoint address coverage;
-                         # 1.6: check id nginx.path_resolution
+                         # 1.6: check id nginx.path_resolution;
+                         # 1.7: certificate/service check ids, key and verifier
+                         #      failure kinds, facts.certificates,
+                         #      diagnosis.unexplained
 SUPPORTED_MAJOR = 1
 
 # Machine-readable classification of a failed probe.  "What went wrong" is
@@ -42,7 +45,18 @@ FAILURE_KINDS: Dict[str, str] = {
     "no-version-answered": "every per-version probe stalled or errored without a TLS answer",
     "probe-inconclusive": "the probe could not establish a result within the evidence available",
     "endpoint-unreachable": "no endpoint could be reached to collect certificate evidence",
+    # 1.7: why a certificate or key question stayed open (never a defect)
+    "verifier-unavailable": "no tool was available to verify signatures or keys",
+    "key-encrypted": "the private key is passphrase-encrypted, so it was not read",
+    "key-unreadable": "the private key exists but this account cannot read it",
+    "command-failed": "a command needed for the check exited unsuccessfully",
+    "permission-denied": "the check needs access this account does not have",
 }
+
+# Failure kinds that describe the path to the endpoint, not the endpoint's
+# certificate or configuration: a FAIL carrying one never decides the verdict.
+TRANSPORT_FAILURE_KINDS = ("connect-timeout", "negotiation-timeout", "network-error",
+                           "endpoint-unreachable")
 
 # Machine-readable classes for things that were *observed* but are not failures.
 # Kept apart from FAILURE_KINDS so a diagnosis can treat an observation as
@@ -125,6 +139,68 @@ CHECK_IDS: Dict[str, str] = {
     "nginx.certref": "Certificate and key referenced by the selected block",
     "nginx.path_resolution": "Certificate and key file paths: resolution and access",
     "nginx.chainfile": "Linkage of the ssl_certificate file",
+    # 1.7: verified certificate analysis
+    "chain.validity": "Validity period of every non-leaf certificate in a chain",
+    "chain.usage": "Basic Constraints, Key Usage and Extended Key Usage of a chain",
+    "chain.trust": "Validation of a chain to a named trust anchor, and its trust class",
+    "cert.policy": "Key strength and signature algorithm policy",
+    "cert.cafile": "Root / CA bundle file parsing and classification",
+    "tls.revocation": "OCSP / CRL revocation status",
+    # 1.7: TLS service deployment on the server
+    "srv.service": "Process that terminates TLS on the target port",
+    "srv.configtest": "Native configuration test of the TLS service",
+    "srv.reload": "Reload state of the service after certificate changes",
+    "srv.renewal": "Renewal tooling that manages the configured certificate",
+    "srv.keystartup": "Encrypted private key versus service startup configuration",
+    "srv.inventory": "Every certificate configured for the TLS service",
+}
+
+# 1.7: certificate facts per judged chain
+_CERT_ROLES = ["leaf", "intermediate", "root", "unrelated", ""]
+_LINK_STATES = ["verified", "signature-failed", "name-mismatch", "name-only",
+                "not-a-ca", "anchor", ""]
+_TRUST_CLASSES = ["public", "private", "self-signed", "unknown", ""]
+_REVOCATION_STATES = ["good", "revoked", "unavailable", "not-checked", "inconclusive", ""]
+_CHAIN_SOURCES = ["presented", "configured", "supplied"]
+_NULLABLE_STR = {"type": ["string", "null"]}
+_STR_LIST = {"type": "array", "items": {"type": "string"}}
+_CERTIFICATE: Dict[str, Any] = {
+    "type": "object",
+    "required": ["position", "sha256"],
+    "properties": {
+        "position": {"type": "integer"},
+        "role": {"type": "string", "enum": _CERT_ROLES},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "subject": {"type": "string"},
+        "issuer": {"type": "string"},
+        "not_before": _NULLABLE_STR,
+        "not_after": _NULLABLE_STR,
+        "key_type": {"type": "string"},
+        "key_bits": {"type": ["integer", "null"]},
+        "curve": {"type": "string"},
+        "signature_algorithm": {"type": "string"},
+        "ca": {"type": ["boolean", "null"]},
+        "path_len": {"type": ["integer", "null"]},
+        "key_usage": _STR_LIST,
+        "extended_key_usage": _STR_LIST,
+        "ski": {"type": "string"},
+        "aki": {"type": "string"},
+        # how this certificate's link to the next one was established
+        "link": {"type": "string", "enum": _LINK_STATES},
+    },
+}
+_CHAIN: Dict[str, Any] = {
+    "type": "object",
+    "required": ["source", "certificates"],
+    "properties": {
+        "source": {"type": "string", "enum": _CHAIN_SOURCES},
+        "path": {"type": "string"},
+        "status": {"type": "string", "enum": ["complete", "incomplete", "broken", "unread"]},
+        "trust_class": {"type": "string", "enum": _TRUST_CLASSES},
+        "anchor": {"type": "string"},
+        "revocation": {"type": "string", "enum": _REVOCATION_STATES},
+        "certificates": {"type": "array", "items": _CERTIFICATE},
+    },
 }
 
 _STATUS = ["PASS", "FAIL", "WARNING", "NOT TESTED"]
@@ -188,6 +264,19 @@ SCHEMA: Dict[str, Any] = {
                         "conclusion": {"type": "string"},
                         "uncertainty": {"type": "array", "items": {"type": "string"}},
                         "recommendation": {"type": "string"},
+                    },
+                }},
+                # 1.7: FAIL/WARNING findings no cause rule explained; they still
+                # count toward `overall`
+                "unexplained": {"type": "array", "items": {
+                    "type": "object",
+                    "required": ["check", "status", "title"],
+                    "properties": {
+                        "check": {"type": "string", "pattern": _CHECK_RE},
+                        "status": {"type": "string", "enum": _STATUS},
+                        "title": {"type": "string"},
+                        "failure_kind": {"type": "string", "enum": _FAILURE_KINDS},
+                        "evidence": {"type": "array", "items": {"type": "string"}},
                     },
                 }},
             },
@@ -266,6 +355,9 @@ SCHEMA: Dict[str, Any] = {
                         v: {"type": "string", "enum": _PROBE_STATES}
                         for v in ("TLS 1.0", "TLS 1.1", "TLS 1.2")}},
                 }},
+                # 1.7: every judged chain, keyed "presented", "configured:<path>"
+                # or "supplied:<path>"
+                "certificates": {"type": "object", "additionalProperties": _CHAIN},
             },
         },
     },
@@ -307,13 +399,32 @@ def validate(doc: Any, schema: Dict[str, Any] = SCHEMA, path: str = "$") -> List
         for key in schema.get("required", []):
             if key not in doc:
                 errs.append(f"{path}: missing required '{key}'")
-        for key, sub in schema.get("properties", {}).items():
+        props = schema.get("properties", {})
+        for key, sub in props.items():
             if key in doc:
                 errs.extend(validate(doc[key], sub, f"{path}.{key}"))
+        extra = schema.get("additionalProperties")
+        if isinstance(extra, dict):
+            for key in doc:
+                if key not in props:
+                    errs.extend(validate(doc[key], extra, f"{path}.{key}"))
     if isinstance(doc, list) and "items" in schema:
         for i, item in enumerate(doc):
             errs.extend(validate(item, schema["items"], f"{path}[{i}]"))
     return errs
+
+
+def unregistered_checks(doc: Dict[str, Any]) -> List[str]:
+    """Check ids in `doc` that the registry does not know.
+
+    Kept out of `validate` on purpose: a later 1.x minor version may add ids,
+    and a consumer must still accept its documents.
+    """
+    used = [f.get("check", "") for f in doc.get("findings") or []]
+    diag = doc.get("diagnosis") or {}
+    used += [e.get("check", "") for key in ("unresolved", "unexplained")
+             for e in diag.get(key) or []]
+    return sorted({c for c in used if c and c not in CHECK_IDS})
 
 
 def load_document(data) -> Dict[str, Any]:
