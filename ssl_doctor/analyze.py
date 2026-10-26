@@ -451,6 +451,8 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
         elif usage_bad and any(k in joined for k in ("purpose", "invalid ca",
                                                         "usage", "key usage")):
             explained.update(("tls.verify", "tls.verify.rootonly"))  # usage rule
+        elif any(k in joined for k in ("signature failure", "invalid ca")) and server_chain_cause:
+            explained.update(("tls.verify", "tls.verify.rootonly"))  # the chain rule
         elif "expired" in joined or "mismatch" in joined or "not cover" in joined:
             # e.g. an expired intermediate behind a valid leaf: no rule names it
             # yet, so the finding stays unexplained and still decides the verdict
@@ -459,6 +461,51 @@ def diagnose(items: List[F.Finding], context: Optional[Dict] = None) -> Diagnosi
             add("probable", "certificate",
                 "Certificate validation failed against the system trust store",
                 verify.evidence, verify.recommendation, explains=("tls.verify", "tls.verify.rootonly", "local.certutil", "chain.trust"))
+
+    # ---- trust class not covered by a validation cause --------------------------
+    # (configured and supplied chains have no handshake, and an expired anchor
+    # is not a validation failure everywhere)
+    seen_trust = set()
+    for t in _by_check(items, "chain.trust"):
+        if t.status != F.WARNING or "chain.trust" in explained:
+            continue
+        cls = next((e.split(":", 1)[1].strip() for e in t.evidence
+                    if e.startswith("trust class:")), "")
+        expired_anchor = any(e.startswith("anchor expired") for e in t.evidence)
+        key = (t.scope, cls, expired_anchor)
+        if key in seen_trust:
+            continue
+        seen_trust.add(key)
+        where = {"server": "configured on the server", "local": "in the inspected file"
+                 }.get(t.scope, "presented by the server")
+        if expired_anchor:
+            add("probable", "certificate",
+                f"The chain {where} anchors at an expired root",
+                t.evidence, t.recommendation, limitations=list(t.uncertainty),
+                explains=("chain.trust",))
+        elif cls == "self-signed":
+            add("probable", "server", f"The certificate {where} is self-signed",
+                t.evidence, t.recommendation, explains=("chain.trust",))
+        elif cls in ("private", "unknown"):
+            # judged against *this* machine's store, which need not be the
+            # clients': visible, but no cause (client trust gaps are not blamed)
+            d.unresolved.append(Unresolved(
+                "chain.trust", t.status, "",
+                observed=f"the chain {where} is trust class '{cls}' for this machine",
+                conclusion="No trusted anchor of this machine's store verifies the "
+                           "chain; whether the affected clients trust it depends on "
+                           "their own trust stores.",
+                uncertainty=["judged against this machine's trust store only"],
+                recommendation=t.recommendation))
+
+    # ---- keys that could not be read ---------------------------------------------
+    for k in _by_check(items, "srv.keymatch") + _by_check(items, "cert.keymatch"):
+        if k.status == F.NOT_TESTED and k.failure_kind == "key-encrypted":
+            startup = _first(server, "srv.keystartup")
+            note(f"{k.evidence[0]}; the certificate/key pairing could not be tested and "
+                 "no mismatch is concluded"
+                 + (f" - service startup with this key: {startup.status}"
+                    if startup else ""))
 
     # ---- local certificate file problems ---------------------------------------
     keymatch_local = _first(local, "cert.keymatch")

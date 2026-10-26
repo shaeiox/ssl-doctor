@@ -583,6 +583,27 @@ def _in(cert: Optional[CertInfo], anchors: List[CertInfo]) -> bool:
                for r in anchors)
 
 
+def classify_trust(chain: List[CertInfo], roots: List[CertInfo],
+                   private: Optional[Tuple[List[CertInfo], str]] = None):
+    """(trust class, anchor certificate, anchor source, assessment) from verified
+    paths only; ("", None, "", None) when nothing can be established (no
+    verifier, no anchors, no certificate)."""
+    if not chain or not available() or (not roots and not private):
+        return "", None, "", None
+    a = assess(chain, roots) if roots else None
+    if a and a.status == "complete" and a.anchored and not a.name_only \
+            and _in(a.anchor_cert, roots):
+        return TRUST_PUBLIC, a.anchor_cert, store_label(roots), a
+    if private:
+        cas, source = private
+        pa = assess(chain, cas)
+        if pa.status == "complete" and pa.anchored and not pa.name_only:
+            return TRUST_PRIVATE, pa.anchor_cert, source, a or pa
+    if len(chain) == 1 and self_signed(chain[0]):
+        return TRUST_SELF_SIGNED, chain[0], "", a
+    return TRUST_UNKNOWN, None, "", a
+
+
 def trust_finding(chain: List[CertInfo], scope: str, target: str,
                   roots: List[CertInfo], private: Optional[Tuple[List[CertInfo], str]] = None,
                   now=None):
@@ -609,9 +630,8 @@ def trust_finding(chain: List[CertInfo], scope: str, target: str,
                          ["no trust anchors available: the system trust store could not "
                           "be read or is empty"], target=target)
     store = store_label(roots)
-    a = assess(chain, roots) if roots else None
-    if a and a.status == "complete" and a.anchored and not a.name_only             and _in(a.anchor_cert, roots):
-        anchor = a.anchor_cert
+    cls, anchor, source, a = classify_trust(chain, roots, private)
+    if cls == TRUST_PUBLIC:
         ev = [f"trust class: {TRUST_PUBLIC}", f"anchor: '{_label(anchor)}' in the {store}",
               *a.paths]
         if anchor.not_after and anchor.not_after < now:
@@ -623,24 +643,19 @@ def trust_finding(chain: List[CertInfo], scope: str, target: str,
                              "ignore an anchor's expiry"],
                 recommendation="Serve a chain that leads to a current root (for example "
                                "the CA's newer cross-signed intermediate).",
-                target=target)
+                target=target, failure_kind="")
         return F.Finding("chain.trust", title, F.PASS, scope, ev, target=target)
-    if private:
-        cas, source = private
-        pa = assess(chain, cas)
-        if pa.status == "complete" and pa.anchored and not pa.name_only:
-            return F.Finding(
-                "chain.trust", title, F.WARNING, scope,
-                [f"trust class: {TRUST_PRIVATE}",
-                 f"anchor: '{_label(pa.anchor_cert)}' from {source}",
-                 f"not anchored in the {store}"],
-                recommendation="Clients trust this chain only if that CA is installed "
-                               "in their trust store.", target=target)
-    leaf = chain[0]
-    if len(chain) == 1 and self_signed(leaf):
+    if cls == TRUST_PRIVATE:
+        return F.Finding(
+            "chain.trust", title, F.WARNING, scope,
+            [f"trust class: {TRUST_PRIVATE}", f"anchor: '{_label(anchor)}' from {source}",
+             f"not anchored in the {store}"],
+            recommendation="Clients trust this chain only if that CA is installed "
+                           "in their trust store.", target=target)
+    if cls == TRUST_SELF_SIGNED:
         return F.Finding("chain.trust", title, F.WARNING, scope,
                          [f"trust class: {TRUST_SELF_SIGNED}",
-                          f"'{_label(leaf)}' signed itself and is not in the {store}"],
+                          f"'{_label(chain[0])}' signed itself and is not in the {store}"],
                          recommendation="Clients will not trust it unless it is imported "
                                         "into their trust store.", target=target)
     reason = ("the chain does not verify" if a and a.status == "broken" else
@@ -651,3 +666,43 @@ def trust_finding(chain: List[CertInfo], scope: str, target: str,
                      recommendation="If this is an internal CA, install its root on the "
                                     "clients; otherwise serve the chain your CA issued.",
                      target=target)
+
+
+_FACT_LINKS = {LINK_VERIFIED, LINK_SIGNATURE_FAILED, LINK_NAME_MISMATCH, LINK_NAME_ONLY,
+               LINK_NOT_A_CA}
+
+
+def _iso(when) -> Optional[str]:
+    return when.isoformat() if when else None
+
+
+def certificates_fact(chain: List[CertInfo], source: str, roots: List[CertInfo],
+                      path: str = "", private=None) -> dict:
+    """One `facts.certificates` entry (findings contract 1.7). Public data only."""
+    from . import certs
+    unique, _dups = certs.dedupe(list(chain))
+    a = assess(unique, roots) if unique else None
+    cls, anchor, _src, _a = classify_trust(unique, roots, private)
+    roles = classify_roles(unique) if unique else []
+    entries = []
+    for i, (c, role) in enumerate(zip(unique, roles)):
+        if i + 1 < len(unique):
+            state = verify_link(c, unique[i + 1])[0]
+            link = state if state in _FACT_LINKS else ""
+        else:
+            link = "anchor" if (a and a.anchored) or role == ROLE_ROOT else ""
+        entries.append({
+            "position": c.position or i + 1, "role": role, "sha256": c.sha256,
+            "subject": c.subject, "issuer": c.issuer,
+            "not_before": _iso(c.not_before), "not_after": _iso(c.not_after),
+            "key_type": c.key_type, "key_bits": c.key_bits, "curve": c.curve,
+            "signature_algorithm": c.signature_algorithm, "ca": c.is_ca,
+            "path_len": c.path_len, "key_usage": list(c.key_usage),
+            "extended_key_usage": list(c.ext_key_usage), "ski": c.ski, "aki": c.aki,
+            "link": link})
+    out = {"source": source, "status": a.status if a else "unread",
+           "trust_class": cls, "anchor": anchor.subject if anchor else "",
+           "revocation": "", "certificates": entries}
+    if path:
+        out["path"] = path
+    return out

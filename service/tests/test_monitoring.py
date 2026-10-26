@@ -140,6 +140,27 @@ class ConditionTests(unittest.TestCase):
         r = w.upload(mkdoc(sha=SHA_B))
         self.assertEqual(r["alerts_opened"], ["leaf_changed:" + SHA_B])
 
+    def test_configured_chain_facts_neither_alert_nor_hide_a_leaf_change(self):
+        """1.7 server-agent documents carry facts.certificates but no leaf."""
+        w = World()
+        w.upload(mkdoc(sha=SHA_A))
+        server_doc = mkdoc()
+        server_doc["schema_version"] = "1.7"
+        server_doc["facts"] = {"certificates": {"configured:/etc/ssl/a.pem": {
+            "source": "configured", "status": "broken", "certificates": []}}}
+        self.assertEqual(w.upload(server_doc)["alerts_opened"], [])
+        r = w.upload(mkdoc(sha=SHA_B))
+        self.assertEqual(r["alerts_opened"], ["leaf_changed:" + SHA_B])
+
+    def test_expired_intermediate_alerts(self):
+        w = World()
+        doc = mkdoc()
+        doc["findings"].append({"check": "chain.validity", "title": "v", "status": "FAIL",
+                                "scope": "remote-net",
+                                "evidence": ["position 2 ('Int'): expired 3 days ago"]})
+        r = w.upload(doc)
+        self.assertEqual(r["alerts_opened"], ["chain_certificate_invalid"])
+
     def test_endpoint_inconsistency_alerts(self):
         w = World()
         r = w.upload(mkdoc(multiip="WARNING"))

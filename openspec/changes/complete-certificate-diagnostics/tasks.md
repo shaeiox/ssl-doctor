@@ -50,11 +50,11 @@
 
 ## 5. P4: Structured facts and diagnosis rules
 
-- [ ] 5.1 Populate `facts.certificates` for presented, configured and supplied chains (CEM); verify `facts.chain_status` is `complete` only for verified anchored paths, and the monitoring condition test for a forged chain fires
-- [ ] 5.2 Validation-reason cause mapping (DC "every validation error has a specific cause"); verify the expired-intermediate, EKU, failed-signature, non-CA, untrusted/expired anchor and hostname scenarios each raise their named cause
-- [ ] 5.3 Inconclusive validation and pairing rules (DC "inconclusive validation never becomes a certificate cause", "pairing failures need conclusive key evidence"); verify the R1 and R5 regression tests assert no cause
-- [ ] 5.4 HTML, JSON and agent reports show the new findings and the `unexplained` list; verify `tests/test_agent_report.py` and a report equality test for an unchanged scan
-- [ ] 5.5 Service monitor reads `chain.validity` / `tls.revocation` additively; verify `service/tests/test_monitoring.py` (with the PostgreSQL fixture) passes
+- [x] 5.1 Populate `facts.certificates` for presented, configured and supplied chains (CEM); verify `facts.chain_status` is `complete` only for verified anchored paths, and the monitoring condition test for a forged chain fires
+- [x] 5.2 Validation-reason cause mapping (DC "every validation error has a specific cause"); verify the expired-intermediate, EKU, failed-signature, non-CA, untrusted/expired anchor and hostname scenarios each raise their named cause
+- [x] 5.3 Inconclusive validation and pairing rules (DC "inconclusive validation never becomes a certificate cause", "pairing failures need conclusive key evidence"); verify the R1 and R5 regression tests assert no cause
+- [x] 5.4 HTML, JSON and agent reports show the new findings and the `unexplained` list; verify `tests/test_agent_report.py` and a report equality test for an unchanged scan
+- [x] 5.5 Service monitor reads `chain.validity` / `tls.revocation` additively; verify `service/tests/test_monitoring.py` (with the PostgreSQL fixture) passes
 
 ## 6. P5: Server certificate deployment
 

@@ -1325,6 +1325,11 @@ class SSLDoctorCLI:
                 items = phase.done(certmod.inspect_cert_file(path, hostname,
                                                              emit=phase.add))
             self.store.extend(items)
+            parsed = certmod.parse_cert_file(path)
+            if parsed.ok:
+                self.remote_facts.setdefault("certificate_chains", {})[
+                    f"supplied:{path}"] = chainval.certificates_fact(
+                        parsed.certs, "supplied", certmod.load_root_anchors(), path)
             return
         if args[0] == "match":
             if len(args) < 3:
@@ -2283,6 +2288,12 @@ class SSLDoctorCLI:
                 self.out(paint(f"       uncertain: {unc}", dim=True))
             if u.recommendation:
                 self.out(paint(f"       next: {u.recommendation}", "accent"))
+        for u in self._diagnosis.unexplained:
+            role = "error" if u.decides_verdict else "warning"
+            self.out(f"{INDENT}[{paint('UNEXPLAINED', role, bold=True)}"
+                     f" {paint(_GLYPHS['sep'], 'muted')} {u.check} {u.status}] {u.title}")
+            for e in u.evidence[:2]:
+                self.out(paint(f"       {e}", dim=True))
         for n in self._diagnosis.notes:
             self.out(paint(f"  note: {n}", "muted", dim=True))
         self.note("\ngenerate a report with /report html")
@@ -2298,8 +2309,12 @@ class SSLDoctorCLI:
         secrets = self.server.known_secrets() if self.server else []
         # Also emitted when no certificate was captured: the facts block carries
         # the handshake address and failure classification that explain why.
+        if self.server is not None and getattr(self.server, "chain_facts", None):
+            self.remote_facts.setdefault("certificate_chains", {}).update(
+                self.server.chain_facts)
         facts = netchecks.export_facts(self.remote_facts) \
-            if self.remote_facts.get("host") else None
+            if (self.remote_facts.get("host")
+                or self.remote_facts.get("certificate_chains")) else None
         return diag, meta, secrets, facts
 
     def _agent_payload(self, items: List[F.Finding]) -> Dict:

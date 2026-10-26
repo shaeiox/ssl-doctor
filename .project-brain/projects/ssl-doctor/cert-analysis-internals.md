@@ -5,7 +5,7 @@ tags: [certs, chainval, certpolicy, hostnames, parsing, trust, openssl]
 status: in-progress
 trust: ai-inferred
 last_done: 2026-10-26
-version: 1
+version: 2
 ---
 
 **Problem:** How the certificate-analysis core works after complete-certificate-diagnostics P1–P3 (moved from certificate-diagnostics v2/v3, unchanged).
@@ -41,3 +41,10 @@ version: 1
   - fixtures live 30 days, so a leaf is always within the default threshold (WARNING); threshold tests build their own dates.
   - `openssl x509 -req -sha1` still signs on 3.0.
 - Service suite: 77 tests. 1 failure is pre-existing (`test_unreadable_nginx_config_is_not_tested_with_reason`, fails as root, also on 2f70fb0).
+
+**v2 (P4, trust: ai-inferred):**
+- `chainval.classify_trust` is the single trust decision, shared by `trust_finding` and `certificates_fact`.
+- `facts.certificates` comes from `netchecks.export_facts`: presented from facts["chain"], plus facts["certificate_chains"] (CLI: `/cert inspect` → supplied, server `chain_facts` → configured, merged in `_report_inputs`). Server-agent docs carry `facts: {certificates}` only.
+- monitor: `evaluate` gates on `facts.leaf` (both the doc and the prev query), so cert-only docs are ignored. New STATEFUL conditions `chain_certificate_invalid` (remote-net `chain.validity` FAIL) and `revoked`.
+- analyze: `chain.trust` private/unknown → `Unresolved` (no cause; this machine's store is not the client's); expired anchor / self-signed → probable causes. Existing `test_wildcard_vhost_is_not_a_cause` caught the first draft blaming configured chains.
+- Reports: agent md `### 5.8 Unexplained findings` (top-level sections stay 7); HTML `[UNEXPLAINED · check · status]`; CLI `/diagnose` prints them.

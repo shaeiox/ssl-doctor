@@ -820,6 +820,8 @@ class ServerSession:
         # populated by cert scans
         self.last_remote_cert_sha256: str = ""
         self.last_configured_chain: List = []      # certificates of the last chain file read
+        # facts.certificates entries ("configured:<path>") of the chain files read
+        self.chain_facts: Dict[str, Dict] = {}
         self.nginx_cert_path: str = ""
         self.nginx_key_path: str = ""
         # nginx invocation for config dumps; override for non-default installs,
@@ -1667,6 +1669,9 @@ class ServerSession:
                 _add(chainval.trust_finding(configured, F.SCOPE_SERVER, cert_path,
                                             certs.load_root_anchors(),
                                             private=getattr(self, "_service_cas", None)))
+                self.chain_facts[f"configured:{cert_path}"] = chainval.certificates_fact(
+                    configured, "configured", certs.load_root_anchors(), cert_path,
+                    private=getattr(self, "_service_cas", None))
             out.extend(self.scan_cert(cert_path, key_path, emit=emit,
                                       domain=getattr(self, "_nginx_domain", None),
                                       states={cert_path: cert_state,

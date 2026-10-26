@@ -304,6 +304,7 @@ def agent_markdown(payload: Dict[str, Any]) -> str:
     diag = payload.get("diagnosis") or {"overall": "not computed", "causes": [],
                                         "notes": [], "unresolved": []}
     causes, unresolved = diag.get("causes") or [], diag.get("unresolved") or []
+    unexplained = diag.get("unexplained") or []
     counts = payload.get("summary") or {}
     target = (f"{scan.get('host')}:{scan.get('port')}" if scan.get("host")
               else meta.get("target") or "not recorded")
@@ -330,17 +331,20 @@ def agent_markdown(payload: Dict[str, Any]) -> str:
 
     lines += ["## 2. Executive summary", "",
               f"- Overall status (from SSL Doctor's diagnosis): **{diag.get('overall')}** "
-              f"(derived from causes only; a warning without a justified cause is listed "
-              f"as an unresolved finding, not folded into this status)",
+              f"(derived from causes and from failing checks no cause explains; a warning "
+              f"without a justified cause is listed as an unresolved finding)",
               f"- Checks: {counts.get(F.PASS, 0)} PASS · {counts.get(F.FAIL, 0)} FAIL · "
               f"{counts.get(F.WARNING, 0)} WARNING · {counts.get(F.NOT_TESTED, 0)} NOT TESTED",
               f"- Confirmed causes: {len(by_certainty['confirmed'])} · probable causes: "
               f"{len(by_certainty['probable'])} · possible causes (hypotheses): "
-              f"{len(by_certainty['possible'])} · unresolved findings: {len(unresolved)}"]
+              f"{len(by_certainty['possible'])} · unresolved findings: {len(unresolved)}"
+              f" · unexplained findings: {len(unexplained)}"]
     for c in causes:
         lines.append(f"  - {c['certainty']}: {c['summary']}")
     for u in unresolved:
         lines.append(f"  - unresolved (`{u['check']}`, {u['status']}): {u['observed']}")
+    for u in unexplained:
+        lines.append(f"  - unexplained (`{u['check']}`, {u['status']}): {u['title']}")
     lines.append("")
 
     lines += ["## 3. Target and environment", "",
@@ -426,6 +430,15 @@ def agent_markdown(payload: Dict[str, Any]) -> str:
         lines.append(f"- {f['status']} · `{f['check']}` · {f['title']}{kind}")
     lines += ["", "### 5.7 Diagnosis notes", ""]
     lines += [f"- {n}" for n in diag.get("notes") or []] or ["- none recorded"]
+    lines += ["", "### 5.8 Unexplained findings", "",
+              "Failing or warning checks that no cause rule explains. They still count "
+              "toward the overall status.", ""]
+    if not unexplained:
+        lines.append("- none recorded")
+    for u in unexplained:
+        kind = f" · failure kind `{u['failure_kind']}`" if u.get("failure_kind") else ""
+        lines.append(f"- {u['status']} · `{u['check']}` · {u['title']}{kind}")
+        lines += [f"  - {e}" for e in (u.get("evidence") or [])[:4]]
     lines.append("")
 
     lines += ["## 6. Recommended next steps", "",
@@ -621,6 +634,12 @@ def html_from_payload(payload: Dict[str, Any]) -> str:
                          + (f'<ul>{"".join(f"<li><i>limitation: {esc(l)}</i></li>" for l in c.limitations)}</ul>' if c.limitations else "")
                          + (f'<div><b>Remediation:</b> {esc(c.recommendation)}</div>' if c.recommendation else "")
                          + "</div>")
+        for u in diagnosis.unexplained:
+            parts.append(f'<div class="cause"><b>[UNEXPLAINED · {esc(u.check)} · '
+                         f'{esc(u.status)}]</b> {esc(u.title)}'
+                         + (f'<ul>{"".join(f"<li class=mono>{esc(e[:400])}</li>" for e in u.evidence[:4])}</ul>' if u.evidence else "")
+                         + '<div>No cause rule explains this result; it still counts '
+                           'toward the overall status.</div></div>')
         for u in diagnosis.unresolved:
             parts.append(f'<div class="cause warn"><b>[UNRESOLVED · {esc(u.check)}]</b> '
                          f'{esc(u.observed)}<div><b>Conclusion:</b> {esc(u.conclusion)}</div>'

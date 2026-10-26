@@ -42,6 +42,26 @@ validating).
   says validation was inconclusive. A TLS-level rejection stays FAIL. Both
   validations now connect to the address the TCP check verified, and name it.
 
+### Added (phase 4: structured facts, causes, reports)
+
+- `facts.certificates` is filled for the presented chain (`presented`), every
+  configured chain file read on the server (`configured:<path>`, also in
+  server-agent documents) and `/cert inspect` files (`supplied:<path>`). Each
+  entry carries status, trust class, anchor and per-certificate role, dates,
+  key, signature, CA flag, KU/EKU, SKI/AKI and link verification. There is no
+  key material.
+- Service alerts: new conditions `chain_certificate_invalid` (an expired or
+  not-yet-valid certificate in the presented chain) and `revoked`. Alert
+  evaluation now keys on `facts.leaf`, so server-agent documents with
+  configured-chain facts neither alert nor hide a later leaf change.
+- Named causes for an anchor that expired and for a non-CA or forged link.
+  For a private or unknown trust class judged against this machine's store, an
+  *unresolved* entry is raised instead of a cause (this machine may not be the
+  client). An encrypted key is named in the notes, with no mismatch concluded.
+- `/diagnose`, the HTML report and `agent-report.md` (new subsection 5.8)
+  list unexplained findings. The agent report no longer says the overall
+  status comes from causes only.
+
 ### Fixed (phase 3: trust, lifecycle, policy, hostnames)
 
 - **An expired certificate configured on the server was `srv.cert` PASS.** The

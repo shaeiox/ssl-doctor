@@ -115,7 +115,10 @@ def run_server_checks(host: str, port: int, sni: Optional[str],
     presented = hs_facts["cert"].sha256 if hs_facts.get("cert") else ""
     items.append(sess.compare_configured_vs_presented(presented))
     items += sess.log_scan()
-    return report.build_payload(items, diagnose(items), _meta(host, port, "server"))
+    # configured chains only: endpoint facts (leaf, chain_status) belong to client runs
+    facts = {"certificates": sess.chain_facts} if sess.chain_facts else None
+    return report.build_payload(items, diagnose(items), _meta(host, port, "server"),
+                                facts=facts)
 
 
 def _meta(host: str, port: int, kind: str) -> Dict[str, Any]:

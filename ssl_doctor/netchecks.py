@@ -1377,7 +1377,20 @@ def export_facts(facts: Dict) -> Dict:
         "endpoints": facts.get("endpoints", []),
         "endpoint_comparison": facts.get("endpoint_comparison"),
         "probe_policy": facts.get("probe_policy"),
+        "certificates": _certificate_facts(facts),
     }
+
+
+def _certificate_facts(facts: Dict) -> Dict:
+    """`facts.certificates`: the presented chain plus configured/supplied chains
+    the session recorded under facts["certificate_chains"]."""
+    from . import chainval
+    out: Dict = {}
+    if facts.get("chain"):
+        out["presented"] = chainval.certificates_fact(facts["chain"], "presented",
+                                                      certs.load_root_anchors())
+    out.update(facts.get("certificate_chains") or {})
+    return out
 
 
 # ---------------------------------------------------------------- orchestrator
