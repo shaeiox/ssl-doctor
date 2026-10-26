@@ -99,6 +99,15 @@ class Listener(unittest.TestCase):
         self.assertEqual((state, owners), (services.LISTENER_OWNED, [("nginx", 812)]))
 
 
+NONROOT_NGINX_T = (
+    'nginx: [alert] could not open error log file: open() "/var/log/nginx/error.log" '
+    "failed (13: Permission denied)\n"
+    f"nginx: the configuration file {PVM}/conf/nginx.conf syntax is ok\n"
+    '2026/10/26 10:00:00 [emerg] 4242#4242: open() "/run/nginx.pid" failed '
+    "(13: Permission denied)\n"
+    f"nginx: configuration file {PVM}/conf/nginx.conf test failed")
+
+
 class ConfigTest(unittest.TestCase):
 
     def run_test(self, result, exe=None):
@@ -126,18 +135,89 @@ class ConfigTest(unittest.TestCase):
         self.assertIn("exit status 0", f.evidence[0])
 
     def test_permission_only_failure_is_not_tested(self):
+        # nginx always ends a failed test with "configuration file ... test failed"
         f, _items, _h = self.run_test(
             (1, 'nginx: [alert] could not open error log file: open() '
                 '"/var/log/nginx/error.log" failed (13: Permission denied)\n'
-                'nginx: [emerg] open() "/run/nginx.pid" failed (13: Permission denied)'))
+                'nginx: [emerg] open() "/run/nginx.pid" failed (13: Permission denied)\n'
+                f"nginx: configuration file {PVM}/conf/nginx.conf test failed"))
         self.assertEqual((f.status, f.failure_kind), (F.NOT_TESTED, "permission-denied"))
         self.assertIn("configuration test needs read access", " ".join(f.evidence))
+
+    def test_regression_b_unprivileged_nginx_t(self):
+        # captured shape of `nginx -t` run by a non-root account (audit B)
+        f, items, _h = self.run_test((1, NONROOT_NGINX_T))
+        self.assertEqual((f.status, f.failure_kind), (F.NOT_TESTED, "permission-denied"))
+        text = " ".join(f.evidence)
+        self.assertIn("syntax is ok", text)
+        self.assertIn("/run/nginx.pid", text)
+        d = diagnose(items)
+        self.assertFalse([c for c in d.causes if "configuration test" in c.summary])
+        self.assertNotIn("srv.configtest", [u.check for u in d.unexplained])
+
+    def test_unreadable_certificate_key_is_not_tested(self):
+        f, _items, _h = self.run_test(
+            (1, 'nginx: [emerg] cannot load certificate key "/etc/ssl/private/site.key": '
+                "BIO_new_file() failed (SSL: error:8000000D:system library::Permission "
+                "denied:calling fopen(/etc/ssl/private/site.key, r) error:10080002:BIO "
+                "routines::system lib)\n"
+                f"nginx: configuration file {PVM}/conf/nginx.conf test failed"))
+        self.assertEqual((f.status, f.failure_kind), (F.NOT_TESTED, "permission-denied"))
+        self.assertIn("/etc/ssl/private/site.key", " ".join(f.evidence))
+
+    def test_genuine_error_next_to_a_permission_error_fails(self):
+        f, items, _h = self.run_test(
+            (1, 'nginx: [alert] could not open error log file: open() '
+                '"/var/log/nginx/error.log" failed (13: Permission denied)\n'
+                'nginx: [emerg] unknown directive "ssl_certificat" in '
+                f"{PVM}/conf/site.conf:12\n"
+                f"nginx: configuration file {PVM}/conf/nginx.conf test failed"))
+        self.assertEqual(f.status, F.FAIL)
+        self.assertIn("unknown directive", " ".join(f.evidence))
+        self.assertTrue(any(c.certainty == "confirmed" and "configuration test fails"
+                            in c.summary for c in diagnose(items).causes))
+
+    def test_nonzero_exit_without_error_lines_is_not_tested(self):
+        f, _items, _h = self.run_test((1, "nginx: something unexpected happened"))
+        self.assertEqual((f.status, f.failure_kind), (F.NOT_TESTED, "command-failed"))
 
     def test_untrusted_binary_is_not_run(self):
         f, _items, host = self.run_test((0, "ok"), exe=Exe(mode=0o777))
         self.assertEqual(f.status, F.NOT_TESTED)
         self.assertIn("not trusted", " ".join(f.evidence))
         self.assertFalse([c for c in host.calls if c[0] == "config_test"])
+
+
+class ConfigTestOutputs(unittest.TestCase):
+    """classify_config_test on captured Apache and HAProxy output."""
+
+    def test_apache_syntax_error(self):
+        verdict, lines = services.classify_config_test(
+            1, "AH00526: Syntax error on line 12 of /etc/apache2/sites-enabled/site.conf:\n"
+               "Invalid command 'SSLCertificatFile', perhaps misspelled\n"
+               "Action '-t' failed.")
+        self.assertEqual(verdict, "fail")
+        self.assertIn("AH00526", " ".join(lines))
+
+    def test_apache_syntax_ok(self):
+        self.assertEqual(services.classify_config_test(0, "Syntax OK")[0], "pass")
+
+    def test_haproxy_alert(self):
+        verdict, lines = services.classify_config_test(
+            1, "[NOTICE]   (1234) : haproxy version is 2.8.5\n"
+               "[ALERT]    (1234) : config : parsing [/etc/haproxy/haproxy.cfg:40] : "
+               "'bind *:443' : unable to load SSL certificate file '/etc/ssl/x.pem'.\n"
+               "[ALERT]    (1234) : config : Fatal errors found in configuration.")
+        self.assertEqual(verdict, "fail")
+
+    def test_haproxy_permission_only(self):
+        verdict, _ = services.classify_config_test(
+            1, "[ALERT]    (1234) : config : parsing [/etc/haproxy/haproxy.cfg:40] : "
+               "'bind *:443' : unable to stat SSL certificate from file "
+               "'/etc/ssl/private/x.pem' : Permission denied.\n"
+               "[ALERT]    (1234) : config : Fatal errors found in configuration.")
+        # the summary ALERT carries no access error itself
+        self.assertEqual(verdict, "permission")
 
 
 class ApacheAndHaproxy(unittest.TestCase):

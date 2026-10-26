@@ -252,24 +252,42 @@ def select_site(sites: List[TlsSite], domain: str, port: int) -> Optional[TlsSit
 
 _PERMISSION = re.compile(r"permission denied|\(13:|must be root|operation not permitted",
                          re.IGNORECASE)
-_PROBLEM_LINE = re.compile(r"\[(emerg|alert|crit)\]|error|failed|invalid", re.IGNORECASE)
+# Error-level lines of nginx, Apache httpd and HAProxy configuration tests.
+_ERROR_LINE = re.compile(r"\[(emerg|alert|crit)\]|^AH\d{5}:|syntax error|\[(ALERT|ERROR)\]",
+                         re.IGNORECASE)
+# What the service prints about the test itself.  "test failed" follows every
+# failed nginx test, so it can never decide whether the failure was access-only.
+_SUMMARY_LINE = re.compile(r"syntax is ok|test is successful|configuration file .* test failed"
+                           r"|^syntax ok$|action '-t' failed|fatal errors found in configuration"
+                           r"|error\(s\) found in configuration file", re.IGNORECASE)
+_PARSED_OK = re.compile(r"syntax is ok|^syntax ok$", re.IGNORECASE)
+_UNOPENED = re.compile(r'open\(\) "([^"]+)"|fopen\(([^,)]+)|certificate(?: key)? "([^"]+)"'
+                       r"|from file '([^']+)'")
 
 
 def classify_config_test(rc: Optional[int], output: str) -> Tuple[str, List[str]]:
-    """("pass" | "fail" | "permission" | "unknown", summary lines).
+    """("pass" | "fail" | "permission" | "inconclusive" | "unknown", summary lines).
 
-    A test that failed only on files this account may not read says nothing
-    about the configuration, so it is "permission", never "fail".
+    Decided from error-level lines only.  A test that failed only on files this
+    account may not open says nothing about the configuration, so it is
+    "permission", never "fail"; its lines name those files and keep a reported
+    "syntax is ok".
     """
     lines = [ln.strip()[:240] for ln in (output or "").splitlines() if ln.strip()]
-    problems = [ln for ln in lines if _PROBLEM_LINE.search(ln)]
     if rc is None:
         return "unknown", lines[-3:]
     if rc == 0:
         return "pass", lines[-3:]
-    if problems and all(_PERMISSION.search(p) for p in problems):
-        return "permission", problems[:5]
-    return "fail", (problems or lines)[:5]
+    errors = [ln for ln in lines if _ERROR_LINE.search(ln) and not _SUMMARY_LINE.search(ln)]
+    if not errors:
+        return "inconclusive", lines[-3:]
+    if all(_PERMISSION.search(e) for e in errors):
+        paths = list(dict.fromkeys(next(g for g in m.groups() if g).strip()
+                                   for e in errors for m in _UNOPENED.finditer(e)))
+        parsed = [ln for ln in lines if _PARSED_OK.search(ln)]
+        return "permission", ([f"could not open: {', '.join(paths)}"] if paths else []) \
+            + parsed[:1] + errors[:5]
+    return "fail", [e for e in errors if not _PERMISSION.search(e)][:5] or errors[:5]
 
 
 # ---------------------------------------------------------------- reload state

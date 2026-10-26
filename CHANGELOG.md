@@ -13,6 +13,18 @@ Findings contract stays **1.7**; no schema change.
   code describe the endpoint and its server. The finding stays listed under
   unexplained findings, and a confirmed client cause still gives FAIL (exit 1).
 
+### Fixed
+
+- **An unprivileged SSH account no longer gets a "configuration test fails"
+  diagnosis on a valid nginx configuration.** `nginx -t` run without root cannot
+  open the pid file or error log and always ends with "configuration file …
+  test failed"; that summary line defeated the permission check, so
+  `srv.configtest` was FAIL with a confirmed cause and the scan exited 1. The
+  test is now classified from its error-level lines only (nginx `[emerg]`/
+  `[alert]`/`[crit]`, Apache `AH…`, HAProxy `[ALERT]`). Access errors alone give
+  NOT TESTED `permission-denied`, naming the files and keeping "syntax is ok".
+  A non-zero exit with no recognised error is NOT TESTED `command-failed`.
+
 ## v0.11.0 — trustworthy certificate verdicts
 
 Chains are verified by signature, not by names; every certificate in a chain

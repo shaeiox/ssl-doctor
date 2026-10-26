@@ -2284,11 +2284,16 @@ class ServerSession:
         if verdict == "permission":
             return F.Finding("srv.configtest", title, F.NOT_TESTED, F.SCOPE_SERVER,
                              [f"{command}: exit status {rc}", "configuration test needs read "
-                              "access to files this account cannot read", *lines],
+                              "access to files this account cannot open", *lines],
                              target=self.cfg.host, failure_kind="permission-denied")
         if verdict == "unknown":
             return F.Finding("srv.configtest", title, F.NOT_TESTED, F.SCOPE_SERVER,
                              [f"{command}: no exit status", *lines],
+                             target=self.cfg.host, failure_kind="command-failed")
+        if verdict == "inconclusive":
+            return F.Finding("srv.configtest", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                             [f"{command}: exit status {rc} without a recognised error "
+                              "message", *lines],
                              target=self.cfg.host, failure_kind="command-failed")
         return F.Finding("srv.configtest", title, F.FAIL, F.SCOPE_SERVER,
                          [f"{command}: exit status {rc}", *lines],

@@ -11,7 +11,7 @@
 
 ## 2. `srv.configtest` permission limits (B)
 
-- [ ] 2.1 Fixtures from real output in `tests/test_service_discovery.py`, each a captured multi-line string:
+- [x] 2.1 Fixtures from real output in `tests/test_service_discovery.py`, each a captured multi-line string:
   - non-root `nginx -t` (error-log alert, `syntax is ok`, pid `[emerg]`, `test failed`);
   - unreadable `ssl_certificate_key`;
   - unknown directive with a permission alert;
@@ -19,11 +19,11 @@
   - HAProxy `[ALERT]`.
   - The existing `test_permission_only_failure_is_not_tested` fixture gains the `test failed` trailer.
   - Verify the new non-root test fails before the fix.
-- [ ] 2.2 Error-level classification in `services.classify_config_test` (design D2): summary lines excluded, `syntax is ok` kept as evidence, unreadable paths listed, non-zero exit without error-level lines → NOT TESTED `command-failed`; verify the 2.1 tests:
+- [x] 2.2 Error-level classification in `services.classify_config_test` (design D2): summary lines excluded, `syntax is ok` kept as evidence, unreadable paths listed, non-zero exit without error-level lines → NOT TESTED `command-failed`; verify the 2.1 tests:
   - permission → NOT TESTED `permission-denied`, no cause, overall not FAIL;
   - mixed → FAIL;
   - syntax error → FAIL with a confirmed cause.
-- [ ] 2.3 Verify `NeverAStateChange` still passes: no sudo, test modes only (spec "never escalates privileges")
+- [x] 2.3 Verify `NeverAStateChange` still passes: no sudo, test modes only (spec "never escalates privileges")
 
 ## 3. `srv.perms` on the resolved target (F)
 
