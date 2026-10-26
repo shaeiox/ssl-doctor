@@ -891,6 +891,19 @@ class _SshNginxProbe:
         return out.splitlines()
 
     _RENEWAL_SCRIPT = (
+        # whether each source could be looked at: an unreadable source must not
+        # read as an empty one (a missing source was looked at and is absent)
+        'vis() { if [ -e "$1" ]; then '
+        'if [ -d "$1" ]; then { [ -r "$1" ] && [ -x "$1" ]; } && echo "$1 yes" || echo "$1 no"; '
+        'else [ -r "$1" ] && echo "$1 yes" || echo "$1 no"; fi; '
+        'else d=$(dirname "$1"); while [ ! -e "$d" ]; do d=$(dirname "$d"); done; '
+        '{ [ -r "$d" ] && [ -x "$d" ]; } && echo "$1 yes" || echo "$1 no"; fi; }; '
+        'echo "@@SSLDOCTOR visibility"; '
+        'systemctl list-timers --all --no-pager --no-legend >/dev/null 2>&1 '
+        '&& echo "timers yes" || echo "timers no"; '
+        'for p in /etc/crontab /etc/cron.d /etc/cron.daily /var/spool/cron/crontabs '
+        '/var/spool/cron /root/.acme.sh "$HOME/.acme.sh" /etc/letsencrypt/renewal; '
+        'do vis "$p"; done; '
         'echo "@@SSLDOCTOR tools"; for t in certbot acme.sh lego; do command -v "$t" '
         '2>/dev/null; done; for d in /root/.acme.sh "$HOME/.acme.sh"; do '
         '[ -x "$d/acme.sh" ] && echo "$d/acme.sh"; done; '
@@ -900,10 +913,11 @@ class _SshNginxProbe:
         '/root/.acme.sh/*/*.conf "$HOME"/.acme.sh/*/*.conf 2>/dev/null | head -n 200; '
         'echo "@@SSLDOCTOR timers"; systemctl list-timers --all --no-pager --no-legend '
         '2>/dev/null | grep -iE "certbot|acme|lego" | head -n 10; '
-        # cron: file names only - a cron line may carry API credentials
-        'echo "@@SSLDOCTOR cron"; grep -liE "certbot|acme\\.sh|lego" /etc/crontab '
-        '/etc/cron.d/* /etc/cron.daily/* /var/spool/cron/crontabs/* /var/spool/cron/* '
-        '2>/dev/null | head -n 10')
+        # cron: "<tool>: <file>" only - a cron line may carry API credentials
+        'echo "@@SSLDOCTOR cron"; for t in certbot acme.sh lego; do p=$t; '
+        '[ "$t" = acme.sh ] && p="acme[.]sh"; grep -liE "$p" /etc/crontab /etc/cron.d/* '
+        '/etc/cron.daily/* /var/spool/cron/crontabs/* /var/spool/cron/* 2>/dev/null '
+        '| head -n 10 | sed "s|^|$t: |"; done')
 
     def renewal(self):
         _rc, out = self._run(self._RENEWAL_SCRIPT)
@@ -2537,13 +2551,17 @@ class ServerSession:
         if state == "managed":
             return F.Finding("srv.renewal", title, F.PASS, F.SCOPE_SERVER, ev,
                              target=self.cfg.host)
+        if state == "hidden":
+            return F.Finding("srv.renewal", title, F.NOT_TESTED, F.SCOPE_SERVER, ev,
+                             target=self.cfg.host, failure_kind="permission-denied")
         if state in ("unscheduled", "unlinked"):
             return F.Finding("srv.renewal", title, F.WARNING, F.SCOPE_SERVER, ev,
                              recommendation="Make sure something renews this certificate "
                                             "before it expires, and reloads the service.",
                              target=self.cfg.host)
         return F.Finding("srv.renewal", title, F.NOT_TESTED, F.SCOPE_SERVER,
-                         ["no renewal tooling found"] + ev, target=self.cfg.host)
+                         ["no renewal tooling found"] + ev, target=self.cfg.host,
+                         failure_kind="permission-denied" if r.hidden else "")
 
     def begin_scan(self, conclusive: bool = True) -> None:
         """Start a new comparison context: only certificates read from now on count.

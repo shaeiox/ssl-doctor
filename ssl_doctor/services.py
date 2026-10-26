@@ -322,7 +322,8 @@ def reload_state(now: Optional[int], worker_elapsed: List[int],
 class Renewal:
     tools: List[str] = field(default_factory=list)          # installed binaries
     managed: Dict[str, str] = field(default_factory=dict)   # cert path -> tool:config
-    schedules: List[str] = field(default_factory=list)      # timers / cron lines
+    schedules: List[str] = field(default_factory=list)      # timers / "tool: cron file"
+    hidden: List[str] = field(default_factory=list)         # sources this account cannot read
 
 
 def parse_renewal(text: str) -> Renewal:
@@ -336,7 +337,11 @@ def parse_renewal(text: str) -> Renewal:
         line = line.strip()
         if not line:
             continue
-        if section == "tools":
+        if section == "visibility":
+            source, _, seen = line.rpartition(" ")
+            if seen == "no" and source:
+                r.hidden.append(source)
+        elif section == "tools":
             r.tools.append(posixpath.basename(line))
         elif section == "certbot":
             # /etc/letsencrypt/renewal/x.conf:fullchain = /etc/letsencrypt/live/x/fullchain.pem
@@ -355,9 +360,19 @@ def parse_renewal(text: str) -> Renewal:
     return r
 
 
+# Sources a renewal schedule can live in (the acme.sh homes and certbot's
+# renewal directory hold configuration, not schedules).
+_SCHEDULE_SOURCES = ("timers", "/etc/crontab", "/etc/cron.d", "/etc/cron.daily",
+                     "/var/spool/cron/crontabs", "/var/spool/cron")
+
+
 def renewal_for(r: Renewal, paths: List[str], realpaths: Dict[str, str]
                 ) -> Tuple[str, List[str]]:
-    """("managed" | "unscheduled" | "unlinked" | "none", evidence)."""
+    """("managed" | "unscheduled" | "hidden" | "unlinked" | "none", evidence).
+
+    A schedule counts only for the tool that manages the certificate, and a
+    certificate is "unscheduled" only when every schedule source was readable.
+    """
     linked = []
     for path in paths:
         candidates = {path, realpaths.get(path, path)}
@@ -365,17 +380,31 @@ def renewal_for(r: Renewal, paths: List[str], realpaths: Dict[str, str]
             if managed in candidates or realpaths.get(managed) in candidates:
                 linked.append((path, origin))
                 break
-    tool_names = sorted({o.split(":", 1)[0] for _p, o in linked} | set(r.tools))
+    hidden_schedules = [s for s in r.hidden if s in _SCHEDULE_SOURCES]
     if linked:
+        managers = sorted({o.split(":", 1)[0] for _p, o in linked})
         ev = [f"{p} is managed by {o.split(':', 1)[0]} ({o.split(':', 1)[1]})"
               for p, o in linked]
         relevant = [s for s in r.schedules
-                    if any(t in s for t in tool_names)] or r.schedules
+                    if any(_schedule_names(s, tool) for tool in managers)]
         if relevant:
             return "managed", ev + [f"schedule: {s}" for s in relevant[:3]]
-        return "unscheduled", ev + ["no systemd timer or cron entry for it was found"]
+        if hidden_schedules:
+            return "hidden", ev + [f"no {'/'.join(managers)} schedule found, but these "
+                                   "sources could not be read by this account: "
+                                   + ", ".join(hidden_schedules)]
+        return "unscheduled", ev + [f"no systemd timer or cron entry for it was found "
+                                    f"({'/'.join(managers)})"]
     if r.tools:
         return "unlinked", [f"{', '.join(sorted(set(r.tools)))} installed, but no renewal "
                             f"configuration names {', '.join(paths) or 'the certificate'}"]
     return "none", ["no certbot, acme.sh or lego installation or renewal configuration "
-                    "was found"]
+                    "was found"] + [f"{s} could not be inspected" for s in r.hidden]
+
+
+def _schedule_names(schedule: str, tool: str) -> bool:
+    """Does a timer line or a "tool: file" cron entry belong to `tool`?"""
+    head, sep, _rest = schedule.partition(": ")
+    if sep and head in ("certbot", "acme.sh", "lego"):
+        return head == tool
+    return tool.split(".")[0] in schedule.lower()

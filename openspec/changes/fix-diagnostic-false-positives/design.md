@@ -123,6 +123,8 @@ Directories need `-r` and `-x`; files need `-r`. A missing source counts as visi
 
 `parse_renewal` collects the `hidden` sources. `renewal_for` changes as follows:
 - **Schedule matching:** the `or r.schedules` fallback is removed. A schedule counts only when it names the managing tool.
+  - Cron entries are reported as `<tool>: <file>` (one `grep -l` per tool, `acme[.]sh` as a bracket class), because a crontab's file name, such as `/var/spool/cron/crontabs/root`, does not name the tool. Lines are still never printed.
+  - A missing source is judged by its nearest existing ancestor: an absent path is "looked at", and only an untraversable ancestor makes it hidden.
 - **`unscheduled` with any hidden schedule source** → state `hidden`, which gives NOT TESTED `permission-denied` naming those sources.
 - **`none` with a hidden acme.sh home** → NOT TESTED, naming it.
 

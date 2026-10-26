@@ -72,10 +72,10 @@
 
 ## 7. `srv.renewal` with source visibility (G)
 
-- [ ] 7.1 Visibility markers in the renewal probe and the `hidden` set in `parse_renewal` (design D6); verify:
+- [x] 7.1 Visibility markers in the renewal probe and the `hidden` set in `parse_renewal` (design D6); verify:
   - `test_real_probe_commands_are_read_only` still passes;
   - a `LocalSession` run of the real script on this host prints one marker per source.
-- [ ] 7.2 `renewal_for`: no fallback to unrelated schedules; hidden schedule source → NOT TESTED `permission-denied`; hidden acme.sh home with nothing found → NOT TESTED naming it; verify new `test_service_discovery.Renewal` cases:
+- [x] 7.2 `renewal_for`: no fallback to unrelated schedules; hidden schedule source → NOT TESTED `permission-denied`; hidden acme.sh home with nothing found → NOT TESTED naming it; verify new `test_service_discovery.Renewal` cases:
   - root crontab hidden → NOT TESTED, no cause;
   - all visible + no schedule → WARNING;
   - only a lego cron for a certbot certificate → not PASS;

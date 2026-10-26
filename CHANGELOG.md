@@ -61,6 +61,14 @@ Findings contract stays **1.7**; no schema change.
   uncertainty. The "client clock" cause now needs a date-related validation
   error; a missing issuer is no longer blamed on the clock.
 
+- **Renewal is no longer "not scheduled" when the schedule is just invisible.**
+  A non-root SSH account cannot list the root crontab, and the probe treated
+  that as empty, so a certbot certificate renewed from root's crontab gave a
+  WARNING and a cause. The probe now reports which sources it could read; with
+  a schedule source hidden, `srv.renewal` is NOT TESTED `permission-denied`
+  naming it. A schedule counts only for the tool that manages the certificate
+  (cron entries are reported as `<tool>: <file>`, never their lines).
+
 ## v0.11.0 — trustworthy certificate verdicts
 
 Chains are verified by signature, not by names; every certificate in a chain

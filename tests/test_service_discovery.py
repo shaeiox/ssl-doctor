@@ -336,6 +336,59 @@ class Renewal(unittest.TestCase):
         self.assertIn("no renewal tooling found", f.evidence[0])
         self.assertNotIn("manual", " ".join(f.evidence).lower())
 
+    LINKED = ("@@SSLDOCTOR tools\n/usr/bin/certbot\n@@SSLDOCTOR certbot\n"
+              "/etc/letsencrypt/renewal/files.example.com.conf:fullchain = "
+              "/etc/letsencrypt/live/files.example.com/fullchain.pem\n")
+
+    @staticmethod
+    def visibility(hidden=()):
+        sources = ["timers", "/etc/crontab", "/etc/cron.d", "/etc/cron.daily",
+                   "/var/spool/cron/crontabs", "/var/spool/cron", "/root/.acme.sh",
+                   "/home/audit/.acme.sh", "/etc/letsencrypt/renewal"]
+        return "@@SSLDOCTOR visibility\n" + "".join(
+            f"{src} {'no' if src in hidden else 'yes'}\n" for src in sources)
+
+    def test_regression_g_hidden_root_crontab_is_not_tested(self):
+        f = self.finding(self.visibility(hidden=("/var/spool/cron/crontabs",))
+                         + self.LINKED + "@@SSLDOCTOR timers\n@@SSLDOCTOR cron\n")
+        self.assertEqual((f.status, f.failure_kind), (F.NOT_TESTED, "permission-denied"))
+        self.assertIn("/var/spool/cron/crontabs", " ".join(f.evidence))
+        self.assertFalse([c for c in diagnose([f]).causes if "Renewal" in c.summary])
+
+    def test_every_source_visible_and_no_schedule_warns(self):
+        f = self.finding(self.visibility() + self.LINKED + "@@SSLDOCTOR timers\n"
+                         "@@SSLDOCTOR cron\n")
+        self.assertEqual(f.status, F.WARNING)
+        self.assertIn("no systemd timer or cron entry for it was found", " ".join(f.evidence))
+
+    def test_another_tools_schedule_does_not_count(self):
+        f = self.finding(self.visibility() + self.LINKED + "@@SSLDOCTOR timers\n"
+                         "@@SSLDOCTOR cron\nlego: /etc/cron.d/lego-other-site\n")
+        self.assertNotEqual(f.status, F.PASS)
+        self.assertIn("certbot", " ".join(f.evidence))
+
+    def test_root_crontab_naming_the_tool_counts(self):
+        f = self.finding(self.visibility() + self.LINKED + "@@SSLDOCTOR timers\n"
+                         "@@SSLDOCTOR cron\ncertbot: /var/spool/cron/crontabs/root\n")
+        self.assertEqual(f.status, F.PASS)
+
+    def test_hidden_acme_home_is_named_when_nothing_is_found(self):
+        f = self.finding(self.visibility(hidden=("/root/.acme.sh",))
+                         + "@@SSLDOCTOR tools\n@@SSLDOCTOR certbot\n")
+        self.assertEqual(f.status, F.NOT_TESTED)
+        self.assertIn("/root/.acme.sh could not be inspected", " ".join(f.evidence))
+
+    def test_real_probe_reports_every_source(self):
+        out = server.LocalSession().nginx_probe().renewal()
+        section = out.split("@@SSLDOCTOR visibility\n", 1)[1].split("@@SSLDOCTOR", 1)[0]
+        names = [line.rsplit(" ", 1)[0] for line in section.splitlines() if line.strip()]
+        for source in ("timers", "/etc/crontab", "/etc/cron.d", "/etc/cron.daily",
+                       "/var/spool/cron/crontabs", "/var/spool/cron", "/root/.acme.sh",
+                       "/etc/letsencrypt/renewal"):
+            self.assertIn(source, names)
+        self.assertTrue(all(line.endswith((" yes", " no")) for line in section.splitlines()
+                            if line.strip()), section)
+
 
 class NeverAStateChange(unittest.TestCase):
 
