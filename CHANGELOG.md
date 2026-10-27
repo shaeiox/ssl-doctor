@@ -1,8 +1,12 @@
 # Changelog
 
-## Unreleased — no faults reported on healthy systems (fix-diagnostic-false-positives)
+## v0.11.1 — no faults reported on healthy systems
 
-Findings contract stays **1.7**; no schema change.
+Fixes seven cases where a healthy server or client was reported as faulty
+(audit findings A–H): permission-limited `nginx -t`, certbot key symlinks,
+shared certificates across server blocks, certutil output, stale clock
+references, invisible renewal schedules, and client-side checks deciding the
+endpoint verdict. Findings contract stays **1.7**; no schema change.
 
 ### Changed
 

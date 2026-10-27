@@ -10,7 +10,7 @@
 @src index.md  @gen 2026-10-27  @updated 2026-10-27
 
 P+ ssl-doctor  Python·TLS/SSL diagnostics·CLI·SSH·Nginx/Apache·Windows
-  ~ 2026-10-27 next: review, merge, release 0.11.1; archive older changes then complete-certificate-diagnostics, then this one · blocker: none
+  ~ 2026-10-27 next: archive fix-chain-diagnosis-saas-enterprise + fix-tls-handshake-timeout-attribution, then complete-certificate-diagnostics, then fix-diagnostic-false-positives · blocker: none
   architecture-and-scope ✓v 2026-10-25 v2
   chain-diagnosis ✓d 2026-10-26 v2
   server-ssh-nginx ✓d 2026-10-26 v6

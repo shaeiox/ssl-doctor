@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-27 · done: fix-diagnostic-false-positives (audit A–H, 23/23 tasks, verification.md) on branch fix/diagnostic-false-positives · next: review, merge, release 0.11.1; archive older changes then complete-certificate-diagnostics, then this one · blocker: none
+> resume 2026-10-27 · done: v0.11.1 released (fix-diagnostic-false-positives merged to master, tagged) · next: archive fix-chain-diagnosis-saas-enterprise + fix-tls-handshake-timeout-attribution, then complete-certificate-diagnostics, then fix-diagnostic-false-positives · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-25 · v2] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ done 2026-10-26 · v2] → projects/ssl-doctor/chain-diagnosis.md

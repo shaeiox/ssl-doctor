@@ -5,7 +5,7 @@ points, argument handling, the command loop, what each command does internally,
 how findings become a diagnosis and a report, and how the session shuts down.
 File names are included at every step.
 
-Version covered: `0.11.0` (`ssl_doctor/__init__.py`).
+Version covered: `0.11.1` (`ssl_doctor/__init__.py`).
 
 ---
 
@@ -729,7 +729,7 @@ User                cli.py                  netchecks/local/server      analyze 
 |---|---|
 | `ssldoctor.py` | Source entry point; calls `ssl_doctor.cli.main()` |
 | `pyproject.toml` | Declares the `ssl-doctor` console script and package |
-| `ssl_doctor/__init__.py` | Version (`0.11.0`) and application name |
+| `ssl_doctor/__init__.py` | Version (`0.11.1`) and application name |
 | `ssl_doctor/cli.py` | Argument parsing, batch mode, REPL, dispatch, all command handlers, spinner/colors, result frames, `/scan` orchestration, the `/server connect` pipeline and remembered-server commands |
 | `ssl_doctor/tui.py` | Full-screen shell: layout, transcript (frames redrawn per width), composer, completion menu, mouse selection, key reader (termios / Windows console records) |
 | `ssl_doctor/termcaps.py` | Per-terminal presentation: full-screen shell or line mode, mouse capture, the reason for a fallback; Windows VT-output check |
