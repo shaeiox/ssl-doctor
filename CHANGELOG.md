@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Application icon.** The Windows `.exe` files (CLI, agent, server) and the
+  macOS builds carry the SSL Doctor shield icon instead of PyInstaller's Python
+  icon. `packaging/make_icons.py` regenerates `packaging/icons/` (`.ico`,
+  `.icns`, 1024 px `.png` with transparent corners) from the artwork; the
+  generated files are committed, so building needs no image library.
+
 ## v0.11.1 — no faults reported on healthy systems
 
 Fixes seven cases where a healthy server or client was reported as faulty
