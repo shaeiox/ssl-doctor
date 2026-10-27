@@ -7,6 +7,9 @@ Produces:
     ssl-doctor-agent[.exe]    single file  (agent; Windows service host on Windows)
     ssldoctor-server/         one-dir      (server + embedded PostgreSQL binaries)
 
+All three carry the SSL Doctor icon on Windows (.ico) and macOS (.icns)
+instead of PyInstaller's default; see packaging/make_icons.py.
+
 PyInstaller does not cross-compile: build Windows .exe files on Windows.
 """
 
@@ -21,6 +24,9 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 WIN = sys.platform == "win32"
+MAC = sys.platform == "darwin"
+# generated from the artwork by packaging/make_icons.py; Linux executables carry no icon
+ICON = os.path.join(HERE, "icons", "ssl-doctor.ico" if WIN else "ssl-doctor.icns")
 
 
 def pyinstaller(name: str, entry: str, out: str, work: str, onefile: bool, extra=()) -> None:
@@ -29,6 +35,8 @@ def pyinstaller(name: str, entry: str, out: str, work: str, onefile: bool, extra
             "--specpath", work, "--paths", ROOT, "--paths", os.path.join(ROOT, "service"),
             "--paths", HERE, "--onefile" if onefile else "--onedir", *extra,
             os.path.join(HERE, entry)]
+    if WIN or MAC:
+        argv[-1:-1] = ["--icon", ICON]
     if WIN:
         argv[-1:-1] = ["--hidden-import", "winsvc", "--hidden-import", "win32timezone"]
     subprocess.run(argv, check=True)
