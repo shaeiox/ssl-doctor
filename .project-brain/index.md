@@ -6,7 +6,7 @@
 
 - (no topics yet)
 
-> resume 2026-10-26 · done: v0.11.0 released (complete-certificate-diagnostics merged to master, tagged) · next: archive fix-chain-diagnosis-saas-enterprise + fix-tls-handshake-timeout-attribution, then complete-certificate-diagnostics · blocker: none
+> resume 2026-10-27 · done: fix-diagnostic-false-positives (audit A–H, 23/23 tasks, verification.md) on branch fix/diagnostic-false-positives · next: review, merge, release 0.11.1; archive older changes then complete-certificate-diagnostics, then this one · blocker: none
 
 - architecture-and-scope → Project layout, modes, security behavior   [✓ verified 2026-10-25 · v2] → projects/ssl-doctor/architecture-and-scope.md
 - chain-diagnosis → Chain reading, verify vs rootonly, SAN-only, Windows rootca   [✓ done 2026-10-26 · v2] → projects/ssl-doctor/chain-diagnosis.md
@@ -20,7 +20,7 @@
 - copy-to-clipboard → drag-to-copy, /copy, Ctrl-Y; native Win32/X11 clipboard, tools, OSC 52; Windows ReadConsoleInputW mouse   [✓ done 2026-10-25 · v3] → projects/ssl-doctor/copy-to-clipboard.md
 - ui-design-system → Theme, full-screen shell, result frames, streaming into frames, centred banner, chat composer   [✓ done 2026-10-25 · v8] → projects/ssl-doctor/ui-design-system.md
 - remembered-servers → SSH server profiles + passwords in OS vault (Win Credential Manager / Secret Service), host-key bound; ADR-001 Accepted, implemented   [⚠ in-progress 2026-10-25 · v4] → projects/ssl-doctor/remembered-servers.md
-- certificate-diagnostics → 45-check audit remediation: verdict/unexplained, key states, verify transport, contract 1.7, phases P0–P7, gate 45/45   [✓ done 2026-10-26 · v4] → projects/ssl-doctor/certificate-diagnostics.md
+- certificate-diagnostics → 45-check audit remediation: verdict/unexplained, key states, verify transport, contract 1.7, phases P0–P7, gate 45/45; v5 audit A–H false-positive fixes   [✓ done 2026-10-27 · v5] → projects/ssl-doctor/certificate-diagnostics.md
 - cert-analysis-internals → certs/chainval/certpolicy/hostnames internals: strict parsing, verify_link, roles, trust class, policy, gotchas   [⚠ in-progress 2026-10-26 · v3] → projects/ssl-doctor/cert-analysis-internals.md
 - revocation → stapled OCSP via s_client -status + openssl ocsp validation, online OCSP/CRL opt-in, IPv4/IPv6 endpoint balance   [✓ done 2026-10-26 · v1] → projects/ssl-doctor/revocation.md
 - _decisions → One-line decision log: colours, frames, static input, report pills   [✓ verified 2026-10-24 · v1] → projects/ssl-doctor/_decisions.md

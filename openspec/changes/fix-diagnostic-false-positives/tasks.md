@@ -83,9 +83,9 @@
 
 ## 8. Integration gate
 
-- [ ] 8.1 Full-suite comparison: `venv/bin/python tests/baseline/record.py --check` reports 0 removed and 0 failing, and any new skip has a named reason; the service suite has no new failures
-- [ ] 8.2 Re-run the audit reproductions (`audit2/*.py`) against the branch; verify each of A, B, C, D, F and G now gives the "expected behaviour" from the audit report, and record the results in `openspec/changes/fix-diagnostic-false-positives/verification.md`
-- [ ] 8.3 `openspec validate fix-diagnostic-false-positives --strict` passes, and the brain topic, `_decisions.md` and resume line are updated; verify `brain-check` reports 0 warnings
+- [x] 8.1 Full-suite comparison: `venv/bin/python tests/baseline/record.py --check` reports 0 removed and 0 failing, and any new skip has a named reason; the service suite has no new failures
+- [x] 8.2 Re-run the audit reproductions (`audit2/*.py`) against the branch; verify each of A, B, C, D, F and G now gives the "expected behaviour" from the audit report, and record the results in `openspec/changes/fix-diagnostic-false-positives/verification.md`
+- [x] 8.3 `openspec validate fix-diagnostic-false-positives --strict` passes, and the brain topic, `_decisions.md` and resume line are updated; verify `brain-check` reports 0 warnings
 
 ## Workflow follow-up
 

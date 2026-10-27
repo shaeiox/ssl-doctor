@@ -68,7 +68,7 @@ def _clock_skew(server_time: float, ref: dict, now: float) -> F.Finding:
     old = now - received
     if old > CLOCK_REFERENCE_MAX_AGE:
         return F.Finding("local.clockskew", title, F.NOT_TESTED, F.SCOPE_LOCAL,
-                         [f"server time reference is {int(old)}s old; repeat the network "
+                         [f"server time reference is {round(old)}s old; repeat the network "
                           "check", source])
     skew = received - server_time
     uncertainty = 1 + max(0.0, float(ref.get("server_time_rtt") or 0.0))
