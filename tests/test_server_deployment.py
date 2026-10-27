@@ -175,9 +175,70 @@ class Permissions(unittest.TestCase):
         real = session.run
         with mock.patch.object(session, "run",
                                side_effect=lambda c: commands.append(c) or real(c)):
-            session.permissions([(get_pki().leaf_key, "key")])
+            session.permissions([(get_pki().leaf_key, "key")], reader="nobody")
         self.assertTrue(commands)
-        self.assertTrue(all(c.startswith(("stat ", "id ")) for c in commands), commands)
+        # metadata only: stat, readlink, ls -d and id - nothing that opens the file
+        for c in commands:
+            self.assertNotRegex(c, r"\b(cat|head|tail|base64|openssl|grep|dd|od)\b", c)
+
+    def certbot_layout(self, mode):
+        """live/shop/privkey.pem -> ../../archive/shop/privkey1.pem (certbot)."""
+        os.makedirs(os.path.join(self.dir, "archive", "shop"))
+        os.makedirs(os.path.join(self.dir, "live", "shop"))
+        target = self.copy(get_pki().leaf_key, os.path.join("archive", "shop",
+                                                            "privkey1.pem"), mode)
+        link = os.path.join(self.dir, "live", "shop", "privkey.pem")
+        os.symlink("../../archive/shop/privkey1.pem", link)
+        return link, target
+
+    def test_regression_f_certbot_symlink_is_judged_on_its_target(self):
+        link, target = self.certbot_layout(0o600)
+        [f] = server.LocalSession().permissions([(link, "key")])
+        self.assertEqual(f.status, F.PASS, f.evidence)
+        self.assertIn(f"{link} -> {target}", f.evidence[0])
+        self.assertIn("mode=600", f.evidence[0])
+
+    def test_symlink_to_a_world_readable_key_warns_naming_the_target(self):
+        link, target = self.certbot_layout(0o644)
+        [f] = server.LocalSession().permissions([(link, "key")])
+        self.assertEqual(f.status, F.WARNING)
+        self.assertIn(f"private key readable by other users: {target}", f.evidence)
+        self.assertIn(f"chmod 600 {target}", f.recommendation)
+
+    def test_service_account_access_is_judged_on_the_target(self):
+        link, _target = self.certbot_layout(0o600)
+        [f] = server.LocalSession().permissions([(link, "key")], reader="nobody")
+        self.assertEqual(f.status, F.FAIL, f.evidence)
+        self.assertTrue(any("service account nobody cannot read" in e for e in f.evidence))
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root traverses every directory; runs as a non-root user")
+    def test_untraversable_parent_is_not_tested(self):
+        locked = os.path.join(self.dir, "private")
+        os.makedirs(locked)
+        key = self.copy(get_pki().leaf_key, os.path.join("private", "site.key"), 0o600)
+        os.chmod(locked, 0o000)
+        self.addCleanup(os.chmod, locked, 0o700)
+        [f] = server.LocalSession().permissions([(key, "key")])
+        self.assertEqual((f.status, f.failure_kind), (F.NOT_TESTED, "permission-denied"))
+
+    def test_acl_is_an_uncertainty_not_a_verdict(self):
+        key = self.copy(get_pki().leaf_key, "site.key", 0o600)
+        session = server.LocalSession()
+        real = session.run
+
+        def with_acl(cmd):
+            rc, so, se, fatal = real(cmd)
+            return rc, so.replace("@@SSLDOCTOR acl -", "@@SSLDOCTOR acl +"), se, fatal
+        with mock.patch.object(session, "run", side_effect=with_acl):
+            [f] = session.permissions([(key, "key")])
+        self.assertEqual(f.status, F.PASS)
+        self.assertTrue(any("ACL" in u for u in f.uncertainty), f.uncertainty)
+
+    def test_recommendation_names_the_file_and_mode(self):
+        key = self.copy(get_pki().leaf_key, "site.key", 0o644)
+        [f] = server.LocalSession().permissions([(key, "key")])
+        self.assertIn(f"chmod 600 {key}", f.recommendation)
 
 
 @unittest.skipUnless(openssl_available(), "openssl binary not available")
@@ -269,6 +330,71 @@ class Inventory(unittest.TestCase):
         f = session.inventory_finding(sha(get_pki().path("ecdsa_leaf.pem")))
         self.assertIn("the presented certificate belongs to server block 'other.test'",
                       " ".join(f.evidence))
+
+    def pair(self):
+        p = get_pki()
+        return f"ssl_certificate {p.fullchain}; ssl_certificate_key {p.leaf_key};"
+
+    def inventory(self, config, presented):
+        session, items = scan(config)
+        f = session.inventory_finding(presented)
+        return f, diagnose(items + [f])
+
+    def no_inventory_cause(self, d):
+        self.assertFalse([c for c in d.causes if "certificate could answer" in c.summary])
+
+    def test_regression_c_redirect_block_sharing_the_certificate(self):
+        f, d = self.inventory(
+            f"http {{ server {{ listen 443 ssl; server_name shop.test; {self.pair()} }} "
+            f"server {{ listen 443 ssl; server_name alias.test; {self.pair()} "
+            "return 301 https://shop.test$request_uri; } }", sha(get_pki().leaf))
+        self.assertEqual(f.status, F.PASS, f.evidence)
+        text = " ".join(f.evidence)
+        self.assertIn("shares the certificate", text)
+        self.assertNotIn("belongs to server block", text)
+        self.no_inventory_cause(d)
+
+    def test_same_name_on_another_port_raises_no_warning(self):
+        p = get_pki()
+        f, d = self.inventory(
+            f"http {{ server {{ listen 443 ssl; server_name shop.test; {self.pair()} }} "
+            f"server {{ listen 8443 ssl; server_name shop.test; "
+            f"ssl_certificate {p.sample('ecdsa-chain.pem')}; "
+            f"ssl_certificate_key {p.path('ecdsa_leaf.key')}; }} }}", sha(p.leaf))
+        self.assertEqual(f.status, F.PASS, f.evidence)
+        self.assertIn("other listener", " ".join(f.evidence))
+        self.no_inventory_cause(d)
+
+    def test_unknown_presented_certificate_is_an_uncertainty(self):
+        f, d = self.inventory(self.config(), "")
+        self.assertEqual(f.status, F.PASS, f.evidence)
+        self.assertTrue(any("other.test" in u for u in f.uncertainty), f.uncertainty)
+        self.no_inventory_cause(d)
+        self.assertNotIn("srv.inventory", [u.check for u in d.unexplained])
+
+    def test_genuine_alternative_still_raises_the_cause(self):
+        _f, d = self.inventory(self.config(), sha(get_pki().leaf))
+        self.assertTrue([c for c in d.causes if "certificate could answer" in c.summary])
+
+
+class ListenerMatch(unittest.TestCase):
+    """Which TCP port a server block's listen directives accept (nginx semantics)."""
+
+    def can(self, *listens, port=443):
+        return server._block_listens_on([list(a.split()) for a in listens], port)
+
+    def test_forms(self):
+        self.assertTrue(self.can("443 ssl"))
+        self.assertTrue(self.can("[::]:443 ssl"))
+        self.assertTrue(self.can("*:443 ssl http2"))
+        self.assertFalse(self.can("127.0.0.1:8443 ssl"))
+        self.assertTrue(self.can("127.0.0.1:8443 ssl", port=8443))
+        self.assertFalse(self.can("127.0.0.1"))          # nginx default port 80
+        self.assertTrue(self.can("127.0.0.1", port=80))
+        self.assertFalse(self.can("unix:/run/nginx.sock ssl"))
+        self.assertTrue(self.can("$listen_port ssl"))    # unparseable: may answer
+        self.assertTrue(server._block_listens_on([], 80))
+        self.assertFalse(server._block_listens_on([], 443))
 
 
 @unittest.skipUnless(openssl_available(), "openssl binary not available")

@@ -1,5 +1,74 @@
 # Changelog
 
+## Unreleased — no faults reported on healthy systems (fix-diagnostic-false-positives)
+
+Findings contract stays **1.7**; no schema change.
+
+### Changed
+
+- **BREAKING for scripts that use the exit code:** a failing check about the
+  machine running SSL Doctor (`local.*`, for example `local.clockskew` or
+  `local.certutil`) that no root cause explains now makes the overall result
+  WARNING instead of FAIL, so a batch run exits 0. The overall result and exit
+  code describe the endpoint and its server. The finding stays listed under
+  unexplained findings, and a confirmed client cause still gives FAIL (exit 1).
+
+### Fixed
+
+- **An unprivileged SSH account no longer gets a "configuration test fails"
+  diagnosis on a valid nginx configuration.** `nginx -t` run without root cannot
+  open the pid file or error log and always ends with "configuration file …
+  test failed"; that summary line defeated the permission check, so
+  `srv.configtest` was FAIL with a confirmed cause and the scan exited 1. The
+  test is now classified from its error-level lines only (nginx `[emerg]`/
+  `[alert]`/`[crit]`, Apache `AH…`, HAProxy `[ALERT]`). Access errors alone give
+  NOT TESTED `permission-denied`, naming the files and keeping "syntax is ok".
+  A non-zero exit with no recognised error is NOT TESTED `command-failed`.
+
+- **certbot keys are no longer reported as readable by other users.**
+  `srv.perms` read the configured path without following links, so certbot's
+  `live/<name>/privkey.pem` symlink was judged as mode 777. Mode, owner, group
+  and the service account's access are now judged on the file the path
+  resolves to, and the evidence names both (`link -> target`). A directory the
+  account cannot enter gives NOT TESTED `permission-denied`; an ACL on the file
+  is noted as not evaluated. The recommendation names the file and the exact
+  `chmod`/`chown`, and never removes the service account's read access.
+
+- **Server blocks that share a certificate no longer contradict each other.**
+  With a redirect block reusing the site's certificate, `srv.inventory` marked
+  the selected block `[selected, served]` yet warned that the certificate
+  "belongs to" the other block, and raised a cause. Certificates are now
+  compared by identity: blocks sharing the selected block's certificate are
+  listed as "shares the certificate"; blocks that do not listen on the scanned
+  port are listed as "other listener" (nginx defaults: port 80 for an address
+  without a port, unix sockets never match). Without a presented certificate, a
+  covering block is an uncertainty, not a warning.
+
+- **`local.certutil` no longer fails a successful Windows verification.** Any
+  "error" in certutil's output - the `dwErrorStatus=0` lines of its chain dump,
+  a certificate name, an unreachable revocation URL - made it FAIL, which also
+  raised the "Windows chain engine fails" cause. certutil's exit status now
+  decides; a failure names its error code (for example `0x800b010a`).
+  Unreachable revocation URLs are listed as a warning line of a PASS, and
+  certutil that cannot be started is NOT TESTED.
+
+- **Clock skew is measured when the server's `Date` arrived, not when `/local`
+  runs.** `/tls` followed minutes later by `/local` reported the waiting time
+  as clock skew (FAIL above 300 s). The server time now carries its receive
+  time, round trip, source host and `Age` (cached responses are corrected).
+  A reference older than 120 s is NOT TESTED; the evidence names the time
+  source and the uncertainty, and the thresholds apply to the skew minus that
+  uncertainty. The "client clock" cause now needs a date-related validation
+  error; a missing issuer is no longer blamed on the clock.
+
+- **Renewal is no longer "not scheduled" when the schedule is just invisible.**
+  A non-root SSH account cannot list the root crontab, and the probe treated
+  that as empty, so a certbot certificate renewed from root's crontab gave a
+  WARNING and a cause. The probe now reports which sources it could read; with
+  a schedule source hidden, `srv.renewal` is NOT TESTED `permission-denied`
+  naming it. A schedule counts only for the tool that manages the certificate
+  (cron entries are reported as `<tool>: <file>`, never their lines).
+
 ## v0.11.0 — trustworthy certificate verdicts
 
 Chains are verified by signature, not by names; every certificate in a chain

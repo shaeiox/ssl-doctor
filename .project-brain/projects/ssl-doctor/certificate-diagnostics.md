@@ -4,8 +4,8 @@ topic: certificate-diagnostics
 tags: [audit, verdict, keys, chain, openspec, contract-1.7]
 status: done
 trust: ai-inferred
-last_done: 2026-10-26
-version: 4
+last_done: 2026-10-27
+version: 5
 ---
 
 **Problem:** The 45-requirement audit (2026-10-26) found false verdicts. An encrypted server key was a *confirmed* mismatch (sha256 of empty `openssl pkey` output). An expired intermediate gave overall PASS and exit 0. A verify timeout was a certificate cause. Chains were linked by names only, the on-disk certificate's dates were never judged, and PEM parsing was lenient. Plan: openspec change `complete-certificate-diagnostics` (P0–P7, 63 tasks, decisions U1–U7 approved with their defaults).
@@ -43,3 +43,11 @@ version: 4
 - 9.4: 45/45 rows Yes/Yes; 140 matrix test ids checked against the run, all ok.
 - Gotcha: run the suites with `venv/bin/python` (has `psycopg`); with system python 4 service-importing tests skip and `--check` reports "added, skipped here". Service suite: from `service/tests`, `PYTHONPATH=.:../..:../../tests:..`; its 1 failure (`test_unreadable_nginx_config_is_not_tested_with_reason`) predates the change (root run).
 - Next: review, then archive after the two older unarchived changes (tasks.md "Workflow follow-up").
+
+**v5 (2026-10-27): follow-up audit A–H → openspec change `fix-diagnostic-false-positives`, branch `fix/diagnostic-false-positives` (23/23 tasks; U1 `local.*` unexplained FAIL = WARNING, U2 clock reference ≤120 s).** Per-fix details live in its design.md and verification.md, and in the CHANGELOG.
+- Gotchas:
+  - `datetime.now()` is often earlier than a preceding `time.time()` → round ages, never `int()`.
+  - Running the suite as `nobody` breaks the tests that use `nobody` as the service account.
+  - In shell `"…"` inside Python strings, `\\.` collapses → use `[.]`.
+  - nginx's default listen port is 80.
+- Archive order: the two older changes → `complete-certificate-diagnostics` → this change.

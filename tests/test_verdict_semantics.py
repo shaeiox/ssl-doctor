@@ -121,5 +121,35 @@ class VerdictTable(unittest.TestCase):
         self.assertTrue(any(n.startswith("All executed checks passed") for n in d.notes))
 
 
+class ClientMachineWeighting(unittest.TestCase):
+    """U1: an unexplained FAIL about the machine running SSL Doctor describes the
+    client, not the endpoint, so it weighs as WARNING; rule causes keep theirs."""
+
+    ENDPOINT_OK = [HANDSHAKE, CHAIN_OK, LEAF_OK, finding("tls.verify", F.PASS, "verified")]
+
+    def test_unexplained_clock_skew_is_warning(self):
+        skew = finding("local.clockskew", F.FAIL, "this machine is 400s ahead",
+                       scope=F.SCOPE_LOCAL)
+        d = diagnose(self.ENDPOINT_OK + [skew])
+        self.assertEqual(d.overall, F.WARNING)
+        self.assertEqual([u.check for u in d.unexplained], ["local.clockskew"])
+
+    def test_probable_certutil_cause_is_warning(self):
+        certutil = finding("local.certutil", F.FAIL, "CertUtil: -verify command FAILED",
+                           scope=F.SCOPE_LOCAL)
+        d = diagnose(self.ENDPOINT_OK + [certutil])
+        self.assertEqual(d.overall, F.WARNING)
+        self.assertTrue(any(c.origin == "client" and c.certainty == "probable"
+                            for c in d.causes))
+
+    def test_confirmed_cause_next_to_a_client_failure_is_still_fail(self):
+        skew = finding("local.clockskew", F.FAIL, "this machine is 400s ahead",
+                       scope=F.SCOPE_LOCAL)
+        leaf = finding("tls.certvalid", F.FAIL, "server presents an EXPIRED certificate")
+        d = diagnose([HANDSHAKE, CHAIN_OK, leaf, EXPIRED_INTERMEDIATE, skew])
+        self.assertTrue(any(c.certainty == "confirmed" for c in d.causes))
+        self.assertEqual(d.overall, F.FAIL)
+
+
 if __name__ == "__main__":
     unittest.main()

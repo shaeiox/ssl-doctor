@@ -101,6 +101,22 @@ evidence, the diagnosis with its uncertainty, and an analysis prompt.
 Windows-only checks activate only on Windows. When the server's chain is
 incomplete, `local.rootca` reports `NOT TESTED` instead of blaming the client.
 
+Clock skew (`local.clockskew`) compares this machine's clock with the HTTP `Date`
+header of the last network check (`/tls` or `/scan`), at the moment that response
+arrived:
+
+- The evidence names the host whose `Date` was used (and says so when it is a
+  redirect target), the measurement uncertainty (1 s `Date` resolution plus the
+  request round trip), and an `Age` correction when a cache served the response.
+- WARNING above 60 s and FAIL above 300 s apply to the skew minus its
+  uncertainty.
+- The reference is valid for 120 s. Running `/tls example.com` and then `/local`
+  more than two minutes later gives `NOT TESTED` "server time reference is
+  <n>s old; repeat the network check" - run `/tls` again, or use `/scan`, which
+  runs the local checks right after the network checks.
+- On its own, a failing client-machine check makes the overall result WARNING,
+  not FAIL: it describes this machine, not the endpoint.
+
 ---
 
 ## 4. Certificate troubleshooting

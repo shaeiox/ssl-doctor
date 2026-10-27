@@ -124,8 +124,11 @@ Since 1.7, a `FAIL` or `WARNING` finding that no cause rule explains (and that i
 not already `unresolved`) is listed in `diagnosis.unexplained` with its `check`,
 `status`, `title`, `failure_kind` and evidence. `overall` is:
 
-- `FAIL` when a cause is `confirmed`, or an unexplained `FAIL` carries no
-  network-path `failure_kind`;
+- `FAIL` when a cause is `confirmed`, or an unexplained `FAIL` that describes
+  the endpoint: it carries no network-path `failure_kind`, is not a check of the
+  diagnostic session (`ssh.*`, `srv.os`, `srv.web`, `srv.tlsconf`, `srv.logs`),
+  and is not a check of the machine running SSL Doctor (`local.*`, since
+  0.11.1). Such an unexplained `FAIL` counts as `WARNING` and stays listed;
 - `WARNING` when any other cause or unexplained entry exists;
 - `PASS` otherwise. `NOT TESTED` findings never raise `overall`; they are listed
   in `notes`.

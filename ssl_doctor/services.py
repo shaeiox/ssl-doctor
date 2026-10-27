@@ -252,24 +252,42 @@ def select_site(sites: List[TlsSite], domain: str, port: int) -> Optional[TlsSit
 
 _PERMISSION = re.compile(r"permission denied|\(13:|must be root|operation not permitted",
                          re.IGNORECASE)
-_PROBLEM_LINE = re.compile(r"\[(emerg|alert|crit)\]|error|failed|invalid", re.IGNORECASE)
+# Error-level lines of nginx, Apache httpd and HAProxy configuration tests.
+_ERROR_LINE = re.compile(r"\[(emerg|alert|crit)\]|^AH\d{5}:|syntax error|\[(ALERT|ERROR)\]",
+                         re.IGNORECASE)
+# What the service prints about the test itself.  "test failed" follows every
+# failed nginx test, so it can never decide whether the failure was access-only.
+_SUMMARY_LINE = re.compile(r"syntax is ok|test is successful|configuration file .* test failed"
+                           r"|^syntax ok$|action '-t' failed|fatal errors found in configuration"
+                           r"|error\(s\) found in configuration file", re.IGNORECASE)
+_PARSED_OK = re.compile(r"syntax is ok|^syntax ok$", re.IGNORECASE)
+_UNOPENED = re.compile(r'open\(\) "([^"]+)"|fopen\(([^,)]+)|certificate(?: key)? "([^"]+)"'
+                       r"|from file '([^']+)'")
 
 
 def classify_config_test(rc: Optional[int], output: str) -> Tuple[str, List[str]]:
-    """("pass" | "fail" | "permission" | "unknown", summary lines).
+    """("pass" | "fail" | "permission" | "inconclusive" | "unknown", summary lines).
 
-    A test that failed only on files this account may not read says nothing
-    about the configuration, so it is "permission", never "fail".
+    Decided from error-level lines only.  A test that failed only on files this
+    account may not open says nothing about the configuration, so it is
+    "permission", never "fail"; its lines name those files and keep a reported
+    "syntax is ok".
     """
     lines = [ln.strip()[:240] for ln in (output or "").splitlines() if ln.strip()]
-    problems = [ln for ln in lines if _PROBLEM_LINE.search(ln)]
     if rc is None:
         return "unknown", lines[-3:]
     if rc == 0:
         return "pass", lines[-3:]
-    if problems and all(_PERMISSION.search(p) for p in problems):
-        return "permission", problems[:5]
-    return "fail", (problems or lines)[:5]
+    errors = [ln for ln in lines if _ERROR_LINE.search(ln) and not _SUMMARY_LINE.search(ln)]
+    if not errors:
+        return "inconclusive", lines[-3:]
+    if all(_PERMISSION.search(e) for e in errors):
+        paths = list(dict.fromkeys(next(g for g in m.groups() if g).strip()
+                                   for e in errors for m in _UNOPENED.finditer(e)))
+        parsed = [ln for ln in lines if _PARSED_OK.search(ln)]
+        return "permission", ([f"could not open: {', '.join(paths)}"] if paths else []) \
+            + parsed[:1] + errors[:5]
+    return "fail", [e for e in errors if not _PERMISSION.search(e)][:5] or errors[:5]
 
 
 # ---------------------------------------------------------------- reload state
@@ -304,7 +322,8 @@ def reload_state(now: Optional[int], worker_elapsed: List[int],
 class Renewal:
     tools: List[str] = field(default_factory=list)          # installed binaries
     managed: Dict[str, str] = field(default_factory=dict)   # cert path -> tool:config
-    schedules: List[str] = field(default_factory=list)      # timers / cron lines
+    schedules: List[str] = field(default_factory=list)      # timers / "tool: cron file"
+    hidden: List[str] = field(default_factory=list)         # sources this account cannot read
 
 
 def parse_renewal(text: str) -> Renewal:
@@ -318,7 +337,11 @@ def parse_renewal(text: str) -> Renewal:
         line = line.strip()
         if not line:
             continue
-        if section == "tools":
+        if section == "visibility":
+            source, _, seen = line.rpartition(" ")
+            if seen == "no" and source:
+                r.hidden.append(source)
+        elif section == "tools":
             r.tools.append(posixpath.basename(line))
         elif section == "certbot":
             # /etc/letsencrypt/renewal/x.conf:fullchain = /etc/letsencrypt/live/x/fullchain.pem
@@ -337,9 +360,19 @@ def parse_renewal(text: str) -> Renewal:
     return r
 
 
+# Sources a renewal schedule can live in (the acme.sh homes and certbot's
+# renewal directory hold configuration, not schedules).
+_SCHEDULE_SOURCES = ("timers", "/etc/crontab", "/etc/cron.d", "/etc/cron.daily",
+                     "/var/spool/cron/crontabs", "/var/spool/cron")
+
+
 def renewal_for(r: Renewal, paths: List[str], realpaths: Dict[str, str]
                 ) -> Tuple[str, List[str]]:
-    """("managed" | "unscheduled" | "unlinked" | "none", evidence)."""
+    """("managed" | "unscheduled" | "hidden" | "unlinked" | "none", evidence).
+
+    A schedule counts only for the tool that manages the certificate, and a
+    certificate is "unscheduled" only when every schedule source was readable.
+    """
     linked = []
     for path in paths:
         candidates = {path, realpaths.get(path, path)}
@@ -347,17 +380,31 @@ def renewal_for(r: Renewal, paths: List[str], realpaths: Dict[str, str]
             if managed in candidates or realpaths.get(managed) in candidates:
                 linked.append((path, origin))
                 break
-    tool_names = sorted({o.split(":", 1)[0] for _p, o in linked} | set(r.tools))
+    hidden_schedules = [s for s in r.hidden if s in _SCHEDULE_SOURCES]
     if linked:
+        managers = sorted({o.split(":", 1)[0] for _p, o in linked})
         ev = [f"{p} is managed by {o.split(':', 1)[0]} ({o.split(':', 1)[1]})"
               for p, o in linked]
         relevant = [s for s in r.schedules
-                    if any(t in s for t in tool_names)] or r.schedules
+                    if any(_schedule_names(s, tool) for tool in managers)]
         if relevant:
             return "managed", ev + [f"schedule: {s}" for s in relevant[:3]]
-        return "unscheduled", ev + ["no systemd timer or cron entry for it was found"]
+        if hidden_schedules:
+            return "hidden", ev + [f"no {'/'.join(managers)} schedule found, but these "
+                                   "sources could not be read by this account: "
+                                   + ", ".join(hidden_schedules)]
+        return "unscheduled", ev + [f"no systemd timer or cron entry for it was found "
+                                    f"({'/'.join(managers)})"]
     if r.tools:
         return "unlinked", [f"{', '.join(sorted(set(r.tools)))} installed, but no renewal "
                             f"configuration names {', '.join(paths) or 'the certificate'}"]
     return "none", ["no certbot, acme.sh or lego installation or renewal configuration "
-                    "was found"]
+                    "was found"] + [f"{s} could not be inspected" for s in r.hidden]
+
+
+def _schedule_names(schedule: str, tool: str) -> bool:
+    """Does a timer line or a "tool: file" cron entry belong to `tool`?"""
+    head, sep, _rest = schedule.partition(": ")
+    if sep and head in ("certbot", "acme.sh", "lego"):
+        return head == tool
+    return tool.split(".")[0] in schedule.lower()

@@ -173,6 +173,33 @@ def _listen_ports(listens: List[List[str]]) -> List[str]:
     return ports
 
 
+def _block_listens_on(listens: List[List[str]], port: int) -> bool:
+    """Can a server block with these listen directives accept TCP `port`?
+
+    nginx semantics: an address without a port, and a block without any
+    listen, use port 80; unix sockets never match.  A value SSL Doctor cannot
+    parse (a variable) counts as "may answer", so it is never dismissed.
+    """
+    if not listens:
+        return port == 80
+    for args in listens:
+        if not args:
+            continue
+        value = args[0]
+        if value.startswith("unix:"):
+            continue
+        if "$" in value:
+            return True
+        tail = value.rsplit(":", 1)[-1] if (":" in value and not value.endswith("]")) else value
+        tail = tail.strip("[]").split("/")[0]
+        if tail.isdigit():
+            if int(tail) == port:
+                return True
+        elif port == 80:                     # an address only: nginx's default port
+            return True
+    return False
+
+
 def _nginx_name_matches(pattern: str, domain: str) -> Tuple[str, int]:
     """Classify a server_name pattern against `domain`.
 
@@ -864,6 +891,19 @@ class _SshNginxProbe:
         return out.splitlines()
 
     _RENEWAL_SCRIPT = (
+        # whether each source could be looked at: an unreadable source must not
+        # read as an empty one (a missing source was looked at and is absent)
+        'vis() { if [ -e "$1" ]; then '
+        'if [ -d "$1" ]; then { [ -r "$1" ] && [ -x "$1" ]; } && echo "$1 yes" || echo "$1 no"; '
+        'else [ -r "$1" ] && echo "$1 yes" || echo "$1 no"; fi; '
+        'else d=$(dirname "$1"); while [ ! -e "$d" ]; do d=$(dirname "$d"); done; '
+        '{ [ -r "$d" ] && [ -x "$d" ]; } && echo "$1 yes" || echo "$1 no"; fi; }; '
+        'echo "@@SSLDOCTOR visibility"; '
+        'systemctl list-timers --all --no-pager --no-legend >/dev/null 2>&1 '
+        '&& echo "timers yes" || echo "timers no"; '
+        'for p in /etc/crontab /etc/cron.d /etc/cron.daily /var/spool/cron/crontabs '
+        '/var/spool/cron /root/.acme.sh "$HOME/.acme.sh" /etc/letsencrypt/renewal; '
+        'do vis "$p"; done; '
         'echo "@@SSLDOCTOR tools"; for t in certbot acme.sh lego; do command -v "$t" '
         '2>/dev/null; done; for d in /root/.acme.sh "$HOME/.acme.sh"; do '
         '[ -x "$d/acme.sh" ] && echo "$d/acme.sh"; done; '
@@ -873,10 +913,11 @@ class _SshNginxProbe:
         '/root/.acme.sh/*/*.conf "$HOME"/.acme.sh/*/*.conf 2>/dev/null | head -n 200; '
         'echo "@@SSLDOCTOR timers"; systemctl list-timers --all --no-pager --no-legend '
         '2>/dev/null | grep -iE "certbot|acme|lego" | head -n 10; '
-        # cron: file names only - a cron line may carry API credentials
-        'echo "@@SSLDOCTOR cron"; grep -liE "certbot|acme\\.sh|lego" /etc/crontab '
-        '/etc/cron.d/* /etc/cron.daily/* /var/spool/cron/crontabs/* /var/spool/cron/* '
-        '2>/dev/null | head -n 10')
+        # cron: "<tool>: <file>" only - a cron line may carry API credentials
+        'echo "@@SSLDOCTOR cron"; for t in certbot acme.sh lego; do p=$t; '
+        '[ "$t" = acme.sh ] && p="acme[.]sh"; grep -liE "$p" /etc/crontab /etc/cron.d/* '
+        '/etc/cron.daily/* /var/spool/cron/crontabs/* /var/spool/cron/* 2>/dev/null '
+        '| head -n 10 | sed "s|^|$t: |"; done')
 
     def renewal(self):
         _rc, out = self._run(self._RENEWAL_SCRIPT)
@@ -1466,12 +1507,22 @@ class ServerSession:
         return self.permissions([(p, "certificate" if i == 0 else "key")
                                  for i, p in enumerate(paths)])
 
+    # Metadata only: the path's own type, where it resolves to, the resolved
+    # file's owner/group/mode/type, and whether an ACL is set (`ls` marks it '+').
+    _PERM_SCRIPT = (
+        'p={path}; '
+        'printf "@@SSLDOCTOR link %s\\n" "$(stat -c %F -- "$p" 2>/dev/null)"; '
+        'printf "@@SSLDOCTOR target %s\\n" "$(readlink -f -- "$p" 2>/dev/null)"; '
+        'printf "@@SSLDOCTOR stat %s\\n" "$(stat -L -c \'%U %G %a %F\' -- "$p" 2>&1)"; '
+        'printf "@@SSLDOCTOR acl %s\\n" "$(ls -ldL -- "$p" 2>/dev/null | cut -c11 | tr -d \' .\' | sed s/^$/-/)"')
+
     def permissions(self, entries: List[Tuple[str, str]],
                     reader: str = "") -> List[F.Finding]:
         """`srv.perms` per (path, role): owner, group, mode - never the content.
 
         The role comes from the directive, not the file name.  `reader` is the
         account that loads the files (nginx's master); "" or root = not judged.
+        A symbolic link is judged on the file it resolves to.
         """
         if (err := self._need_conn()):
             return [err]
@@ -1483,47 +1534,75 @@ class ServerSession:
         out: List[F.Finding] = []
         for path, role in entries:
             name = os.path.basename(path)
-            rc, so, se, fatal = self.run(f"stat -c '%U %G %a %F' -- {q(path)} 2>&1 "
-                                         "|| echo MISSING")
-            line = so.strip().splitlines()[0] if so.strip() else ""
-            if fatal or not line or "MISSING" in so or rc != 0:
+            title = f"Permissions on {name}"
+            _rc, so, se, fatal = self.run(self._PERM_SCRIPT.replace("{path}", q(path)))
+            found: Dict[str, str] = {}
+            for line in so.splitlines():
+                if line.startswith("@@SSLDOCTOR "):
+                    key, _, value = line[len("@@SSLDOCTOR "):].partition(" ")
+                    found.setdefault(key, value.strip())
+            line = found.get("stat", "")
+            if fatal or not line or "No such file" in line:
                 out.append(F.Finding(
-                    "srv.perms", f"Permissions on {name}", F.NOT_TESTED, F.SCOPE_SERVER,
+                    "srv.perms", title, F.NOT_TESTED, F.SCOPE_SERVER,
                     [f"{path}: {line or se.strip() or fatal or 'unreadable / missing'}"],
                     target=path, failure_kind="command-failed"))
                 continue
+            if "Permission denied" in line:
+                out.append(F.Finding(
+                    "srv.perms", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                    [f"{path}: {line}", "a directory on the path cannot be entered by this "
+                     "account, so the file's permissions could not be read"],
+                    target=path, failure_kind="permission-denied"))
+                continue
             user, group, mode = (line.split(" ", 3) + ["", "", ""])[:3]
+            is_link = found.get("link") == "symbolic link"
+            judged = found.get("target") if is_link and found.get("target") else path
             try:
                 bits = int(mode, 8)
             except ValueError:
                 bits = None
-            ev = [f"{path} ({role}): owner={user} group={group} mode={mode}"]
+            shown = f"{path} -> {judged}" if is_link else path
+            ev = [f"{shown} ({role}): owner={user} group={group} mode={mode}"]
+            uncertainty = (["an ACL is set on the file: additional access it grants was "
+                            "not evaluated"] if found.get("acl") == "+" else [])
             if bits is None:
-                out.append(F.Finding("srv.perms", f"Permissions on {name}", F.NOT_TESTED,
+                out.append(F.Finding("srv.perms", title, F.NOT_TESTED,
                                      F.SCOPE_SERVER, ev + ["mode could not be read"],
                                      target=path))
                 continue
             problems, warnings = [], []
             if role == "key" and bits & 0o004:
-                warnings.append("private key readable by other users")
+                warnings.append("private key readable by other users"
+                                + (f": {judged}" if is_link else ""))
             if reader and reader != "root":
                 readable = ((user == reader and bits & 0o400)
                             or (group in groups and bits & 0o040) or bits & 0o004)
                 if not readable:
-                    problems.append(f"service account {reader} cannot read {path}")
+                    problems.append(f"service account {reader} cannot read {judged}")
                 else:
                     ev.append(f"readable by the service account {reader}")
             status = F.FAIL if problems else F.WARNING if warnings else F.PASS
             out.append(F.Finding(
-                "srv.perms", f"Permissions on {name}", status, F.SCOPE_SERVER,
+                "srv.perms", title, status, F.SCOPE_SERVER,
                 ev + problems + warnings,
-                recommendation=("Make the file readable by the account the service runs "
-                                "as (owner or group), without opening it to others."
-                                if problems else
-                                "Restrict private keys: chmod 600/640 root:<service group>."
-                                if warnings else ""),
-                target=path))
+                recommendation=self._perm_advice(judged, user, group, reader, groups,
+                                                 bool(problems), bool(warnings)),
+                target=path, uncertainty=uncertainty))
         return out
+
+    @staticmethod
+    def _perm_advice(path: str, owner: str, group: str, reader: str, groups: List[str],
+                     unreadable: bool, exposed: bool) -> str:
+        """A change for the judged file that never takes read access from the
+        account that loads it (root reads every file)."""
+        if not (unreadable or exposed):
+            return ""
+        if not reader or reader in ("root", owner):
+            return f"Restrict the file to its owner: chmod 600 {path}."
+        via = group if group in groups else (groups[0] if groups else "<service group>")
+        return (f"Give {reader} read access through its group without opening the file "
+                f"to others: chown {owner}:{via} {path} && chmod 640 {path}.")
 
     def tls_config_scan(self, emit: Optional[Callable[[F.Finding], None]] = None) -> List[F.Finding]:
         """Find configured certs/vhosts. Read-only; degrades without privileges."""
@@ -1679,7 +1758,7 @@ class ServerSession:
                     target=self.cfg.host))
             return self._certificate_checks(d, None, out, _add, emit)
         matched_dirs = match[0]
-        self._inventory_blocks(d, blocks, ssl_blocks, nodes, matched_dirs, domain)
+        self._inventory_blocks(d, blocks, ssl_blocks, nodes, matched_dirs, domain, port)
         names = [n for a in matched_dirs.get("server_name", []) for n in a]
         # wildcard/regex matches are normal; only fallbacks and conflicts warn
         status = F.WARNING if "fallback" in how or notes else F.PASS
@@ -1785,7 +1864,8 @@ class ServerSession:
 
     _INVENTORY_LIMIT = 20
 
-    def _inventory_blocks(self, d, blocks, ssl_blocks, nodes, selected, domain) -> None:
+    def _inventory_blocks(self, d, blocks, ssl_blocks, nodes, selected, domain,
+                          port: int = 443) -> None:
         """Every TLS block's first certificate into scan_context["inventory"]."""
         nd = nginx_discovery
         http_dirs = _http_level_directives(nodes)
@@ -1798,6 +1878,7 @@ class ServerSession:
             entry = {"names": [n for a in dirs.get("server_name", []) for n in a],
                      "listen": [" ".join(a) for a in dirs.get("listen", [])],
                      "path": resolved or values[0][0], "selected": dirs is selected,
+                     "on_port": _block_listens_on(dirs.get("listen", []), port),
                      "sha256": "", "subject": "", "covers": None}
             data = None
             if resolved and self.nginx_probe().file_states([resolved]).get(resolved) == "readable":
@@ -1813,7 +1894,12 @@ class ServerSession:
         self.scan_context["inventory_truncated"] = len(ssl_blocks) > self._INVENTORY_LIMIT
 
     def inventory_finding(self, presented_sha256: str = "") -> F.Finding:
-        """`srv.inventory`: every configured certificate, the served one flagged."""
+        """`srv.inventory`: every configured certificate, the served one flagged.
+
+        Certificates are compared by identity: blocks that share the selected
+        block's certificate are listed, never warned about, and only blocks
+        that listen on the scanned port can be alternatives.
+        """
         title = "Certificates configured for the TLS service"
         entries = self.scan_context.get("inventory")
         if not entries:
@@ -1822,32 +1908,44 @@ class ServerSession:
                              target=self.cfg.host)
         domain = self.scan_context.get("inventory_domain", "")
         presented = presented_sha256.lower().replace(":", "")
-        ev, warnings = [], []
+        selected_sha = next((e["sha256"] for e in entries if e["selected"]), "")
+        selected_serves = bool(presented and selected_sha == presented)
+        ev, warnings, uncertainty = [], [], []
         for e in entries:
-            flags = [f for f, on in (("selected", e["selected"]),
-                                     ("served", presented and e["sha256"] == presented),
+            label = " ".join(e["names"]) or "(none)"
+            same_as_selected = bool(e["sha256"] and e["sha256"] == selected_sha)
+            served = bool(presented and e["sha256"] == presented)
+            flags = [f for f, on in (("selected", e["selected"]), ("served", served),
                                      (f"covers {domain}", e["covers"])) if on]
-            ev.append(f"server_name {' '.join(e['names']) or '(none)'} · listen "
+            if not e["selected"]:
+                if not e.get("on_port", True):
+                    flags.append("other listener")
+                elif same_as_selected:
+                    flags.append("shares the certificate")
+                elif presented and served and not selected_serves:
+                    warnings.append(f"the presented certificate belongs to server block "
+                                    f"'{label}', not the one selected for {domain}")
+                elif e["covers"] and not served:
+                    alternative = (f"another server block ({label}) has a certificate "
+                                   f"covering {domain}: a different listener or SNI order "
+                                   "could serve it")
+                    (warnings if presented else uncertainty).append(
+                        alternative if presented else
+                        alternative + " (the presented certificate is unknown, so which "
+                                      "block answers was not confirmed)")
+            ev.append(f"server_name {label} · listen "
                       f"{' / '.join(e['listen']) or '-'} · {e['path']}"
                       + (f" · {e['subject']} · sha256 {e['sha256'][:16]}…" if e["sha256"]
                          else " · certificate not read")
                       + (f" [{', '.join(flags)}]" if flags else ""))
-            if e["covers"] and not e["selected"] and not (presented and
-                                                          e["sha256"] == presented):
-                warnings.append(f"another server block ({' '.join(e['names']) or 'unnamed'}) "
-                                f"has a certificate covering {domain}: a different listener "
-                                "or SNI order could serve it")
-            if presented and e["sha256"] == presented and not e["selected"]:
-                warnings.append(f"the presented certificate belongs to server block "
-                                f"'{' '.join(e['names']) or '(none)'}', not the one selected "
-                                f"for {domain}")
         if self.scan_context.get("inventory_truncated"):
             ev.append(f"first {self._INVENTORY_LIMIT} TLS server blocks listed")
         status = F.WARNING if warnings else F.PASS
         return F.Finding("srv.inventory", title, status, F.SCOPE_SERVER, ev + warnings,
                          recommendation="Check which server block should answer for this "
                                         "name; remove or align the others."
-                         if warnings else "", target=self.cfg.host)
+                         if warnings else "", target=self.cfg.host,
+                         uncertainty=uncertainty)
 
     _CA_DIRECTIVES = ("ssl_trusted_certificate", "ssl_client_certificate")
 
@@ -2284,11 +2382,16 @@ class ServerSession:
         if verdict == "permission":
             return F.Finding("srv.configtest", title, F.NOT_TESTED, F.SCOPE_SERVER,
                              [f"{command}: exit status {rc}", "configuration test needs read "
-                              "access to files this account cannot read", *lines],
+                              "access to files this account cannot open", *lines],
                              target=self.cfg.host, failure_kind="permission-denied")
         if verdict == "unknown":
             return F.Finding("srv.configtest", title, F.NOT_TESTED, F.SCOPE_SERVER,
                              [f"{command}: no exit status", *lines],
+                             target=self.cfg.host, failure_kind="command-failed")
+        if verdict == "inconclusive":
+            return F.Finding("srv.configtest", title, F.NOT_TESTED, F.SCOPE_SERVER,
+                             [f"{command}: exit status {rc} without a recognised error "
+                              "message", *lines],
                              target=self.cfg.host, failure_kind="command-failed")
         return F.Finding("srv.configtest", title, F.FAIL, F.SCOPE_SERVER,
                          [f"{command}: exit status {rc}", *lines],
@@ -2448,13 +2551,17 @@ class ServerSession:
         if state == "managed":
             return F.Finding("srv.renewal", title, F.PASS, F.SCOPE_SERVER, ev,
                              target=self.cfg.host)
+        if state == "hidden":
+            return F.Finding("srv.renewal", title, F.NOT_TESTED, F.SCOPE_SERVER, ev,
+                             target=self.cfg.host, failure_kind="permission-denied")
         if state in ("unscheduled", "unlinked"):
             return F.Finding("srv.renewal", title, F.WARNING, F.SCOPE_SERVER, ev,
                              recommendation="Make sure something renews this certificate "
                                             "before it expires, and reloads the service.",
                              target=self.cfg.host)
         return F.Finding("srv.renewal", title, F.NOT_TESTED, F.SCOPE_SERVER,
-                         ["no renewal tooling found"] + ev, target=self.cfg.host)
+                         ["no renewal tooling found"] + ev, target=self.cfg.host,
+                         failure_kind="permission-denied" if r.hidden else "")
 
     def begin_scan(self, conclusive: bool = True) -> None:
         """Start a new comparison context: only certificates read from now on count.
