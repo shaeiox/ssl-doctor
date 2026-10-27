@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## v0.11.2 — application icon
+
+Packaging only: the built executables show the SSL Doctor icon. No change to
+checks, findings (contract **1.7**) or output.
 
 ### Added
 

@@ -4,7 +4,7 @@ Reference for the commands used in this project to diagnose TLS failures and to
 verify the project itself. Everything here is **read-only**: no `sudo`, no
 service restarts, no config edits, and no credentials in command lines.
 
-- Tool version: **SSL Doctor v0.11.1**
+- Tool version: **SSL Doctor v0.11.2**
 - Entry point: `ssldoctor.py` (also installed as the `ssl-doctor` console script)
 - Interactive: `python3 ssldoctor.py` (full-screen shell on a terminal; `--no-tui` for the line REPL)
 - One-shot: `python3 ssldoctor.py "/tls example.com"`
@@ -264,7 +264,7 @@ Regression suite (the primary check used during development):
 python3 -m unittest discover -s tests -v
 ```
 
-Result on this checkout (v0.11.1, Linux, as root, project `venv`): **1009 tests run, OK (27 skipped)**. The
+Result on this checkout (v0.11.2, Linux, as root, project `venv`): **1009 tests run, OK (27 skipped)**. The
 skipped tests are platform-bound: the real Windows Credential Manager contract
 runs only on Windows (the `windows-latest` CI job), the real Secret Service
 contract only with `SSL_DOCTOR_TEST_SECRET_SERVICE=1` on a desktop session, and
@@ -301,7 +301,7 @@ PYTHONPATH=service python -m unittest discover -s service/tests -v
 
 ```bash
 python -m pip install . "./service[dev]" "pyinstaller>=6.6" "cyclonedx-bom>=4"
-python packaging/build.py                    # writes dist/<os>/
+python packaging/build.py                    # writes dist/<os>/ (icon from packaging/icons/)
 python packaging/release.py --dist dist/linux --dev-key
 ```
 

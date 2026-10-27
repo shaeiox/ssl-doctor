@@ -1,4 +1,4 @@
-# SSL Doctor v0.11.1
+# SSL Doctor v0.11.2
 
 Offline-capable SSL/TLS diagnostic tool for IT support engineers. It answers:
 *why does this TLS connection fail — the client machine, the nginx server, the
@@ -74,7 +74,7 @@ evidence line gets the full width of the window.
                       ██     ██ ██       ██  ██ ██  ██ ██       ██   ██  ██ ██  ██
                   ██████ ██████ ██████   █████  ██████ ██████   ██   ██████ ██  ██
                    offline ssl/tls diagnostics · client · server · chain · nginx
-                                     creator: eleven  ·  v0.11.1
+                                     creator: eleven  ·  v0.11.2
                 ════════════════════════════════════════════════════════════════════
 
   Welcome. SSL Doctor is read-only; credentials are never logged.

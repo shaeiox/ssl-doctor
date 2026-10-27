@@ -5,7 +5,7 @@ points, argument handling, the command loop, what each command does internally,
 how findings become a diagnosis and a report, and how the session shuts down.
 File names are included at every step.
 
-Version covered: `0.11.1` (`ssl_doctor/__init__.py`).
+Version covered: `0.11.2` (`ssl_doctor/__init__.py`).
 
 ---
 
@@ -683,7 +683,9 @@ Subcommands are `init`, `run`, `upgrade`, `backup`, `verify-audit`, and
 
 Packaging glue lives in `packaging/build.py`, `packaging/entry_agent.py`,
 `packaging/entry_cli.py`, `packaging/entry_server.py`, `packaging/release.py`,
-and `packaging/winsvc.py`.
+and `packaging/winsvc.py`. The executables' icon (Windows `.ico`, macOS
+`.icns`) is in `packaging/icons/`, generated from the artwork by
+`packaging/make_icons.py`; the build only passes it to PyInstaller (`--icon`).
 
 ---
 
@@ -729,7 +731,7 @@ User                cli.py                  netchecks/local/server      analyze 
 |---|---|
 | `ssldoctor.py` | Source entry point; calls `ssl_doctor.cli.main()` |
 | `pyproject.toml` | Declares the `ssl-doctor` console script and package |
-| `ssl_doctor/__init__.py` | Version (`0.11.1`) and application name |
+| `ssl_doctor/__init__.py` | Version (`0.11.2`) and application name |
 | `ssl_doctor/cli.py` | Argument parsing, batch mode, REPL, dispatch, all command handlers, spinner/colors, result frames, `/scan` orchestration, the `/server connect` pipeline and remembered-server commands |
 | `ssl_doctor/tui.py` | Full-screen shell: layout, transcript (frames redrawn per width), composer, completion menu, mouse selection, key reader (termios / Windows console records) |
 | `ssl_doctor/termcaps.py` | Per-terminal presentation: full-screen shell or line mode, mouse capture, the reason for a fallback; Windows VT-output check |
@@ -766,6 +768,7 @@ User                cli.py                  netchecks/local/server      analyze 
 | `packaging/entry_agent.py` | Frozen-build agent entry point |
 | `packaging/entry_server.py` | Frozen-build server entry point |
 | `packaging/build.py` | Build orchestration |
+| `packaging/make_icons.py` | Regenerates `packaging/icons/` (executable icon) from the artwork |
 | `packaging/release.py` | Release bundling |
 | `packaging/winsvc.py` | Windows service wrapper |
 | `tests/` | Unit, integration, TLS fixture, nginx, air-gap, contract, and end-to-end tests |
